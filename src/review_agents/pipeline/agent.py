@@ -27,6 +27,7 @@ SUBMIT_TOOL = "submit_findings"
 # Below this much time before the deadline, the agent may only submit.
 SUBMIT_MARGIN_SECONDS = 30.0
 SUBMIT_ONLY = f"Not run: only {SUBMIT_TOOL} is available now."
+SUBMIT_IGNORED = "Ignored: only the last submission of a turn counts."
 SUBMIT_NOW = (
     f"Stop investigating. Call {SUBMIT_TOOL} now with the findings you have; an empty"
     " list is a valid review."
@@ -49,6 +50,11 @@ class Finding(BaseModel):
     why: str = ""
     suggestion: str = ""
     preexisting: bool = False
+
+    @field_validator("title")
+    @classmethod
+    def _one_line(cls, value: str) -> str:
+        return " ".join(value.split())
 
     @field_validator("file")
     @classmethod
@@ -96,6 +102,10 @@ def check(finding: Finding, line_count: Callable[[str], int | None]) -> str | No
         return f"{finding.file} has only {lines} lines"
     if finding.severity in ("blocking", "important") and not finding.evidence.strip():
         return "a blocking or important finding needs evidence"
+    if not finding.why.strip():
+        return "it does not say what goes wrong for users or maintainers (why)"
+    if not finding.suggestion.strip():
+        return "it does not suggest a fix"
     return None
 
 
@@ -117,6 +127,8 @@ def run_dimension(
     submit = _submit_tool()
     messages: list[BaseMessage] = list(pack.messages(dimension))
     run = AgentRun(dimension, "incomplete")
+    # One retry each: a reply in text instead of a call, and a malformed submission.
+    text_retry_used = False
     format_retry_used = False
     told_to_submit = False
 
@@ -146,6 +158,8 @@ def run_dimension(
         submitted: ToolCall | None = None
         for tool_call in reply.tool_calls:
             if tool_call["name"] == SUBMIT_TOOL:
+                if submitted is not None:  # every call needs an answer, the ignored ones too
+                    messages.append(ToolMessage(SUBMIT_IGNORED, tool_call_id=submitted["id"]))
                 submitted = tool_call
                 continue
             run.tool_calls += 1
@@ -155,10 +169,10 @@ def run_dimension(
                 messages.append(_answer(tool_call, available))
 
         if submitted is None and not reply.tool_calls:
-            if format_retry_used:
+            if text_retry_used:
                 run.reason = f"the model answered in text twice instead of calling {SUBMIT_TOOL}"
                 return run
-            format_retry_used = True
+            text_retry_used = True
             messages.append(HumanMessage(f"Report your findings by calling {SUBMIT_TOOL}."))
             continue
         if submitted is None:

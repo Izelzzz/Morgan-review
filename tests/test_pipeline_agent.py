@@ -331,3 +331,53 @@ def test_a_dimension_that_finished_early_hit_no_limit(repo_tools: RepoTools) -> 
     model = ScriptedModel(script=[call("list_dir", {}), submit()])
 
     assert run(model, repo_tools, limit=5).limit_hit is None
+
+
+def test_a_finding_without_its_consequence_or_fix_is_dropped(repo_tools: RepoTools) -> None:
+    model = ScriptedModel(
+        script=[
+            submit(
+                finding(), finding(title="No why", why=" "), finding(title="No fix", suggestion="")
+            )
+        ]
+    )
+
+    result = run(model, repo_tools)
+
+    assert [f.title for f in result.findings] == ["A refund can exceed the paid amount"]
+    reasons = " ".join(result.dropped)
+    assert "No why" in reasons and "No fix" in reasons
+
+
+def test_every_submit_call_in_a_turn_gets_an_answer(repo_tools: RepoTools) -> None:
+    two = AIMessage(
+        content="",
+        tool_calls=[
+            {"name": SUBMIT_TOOL, "args": {"findings": []}, "id": "s1"},
+            {"name": SUBMIT_TOOL, "args": {"findings": "broken"}, "id": "s2"},
+        ],
+    )
+    model = ScriptedModel(script=[two, submit(call_id="s3")])
+
+    result = run(model, repo_tools)
+
+    assert result.status == "done"
+    answered = {m.tool_call_id for m in model.sent[1] if isinstance(m, ToolMessage)}
+    assert answered == {"s1", "s2"}  # the ignored one and the malformed one
+
+
+def test_a_text_reply_does_not_use_up_the_format_retry(repo_tools: RepoTools) -> None:
+    broken = call(SUBMIT_TOOL, {"findings": "none"})
+    model = ScriptedModel(
+        script=[AIMessage(content="I found nothing."), broken, submit(call_id="s2")]
+    )
+
+    assert run(model, repo_tools).status == "done"
+
+
+def test_a_title_is_kept_on_one_line(repo_tools: RepoTools) -> None:
+    model = ScriptedModel(script=[submit(finding(title="Refund\n  exceeds paid"))])
+
+    [kept] = run(model, repo_tools).findings
+
+    assert kept.title == "Refund exceeds paid"
