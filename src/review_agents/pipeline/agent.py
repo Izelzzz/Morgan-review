@@ -22,7 +22,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_valida
 
 from review_agents.context.markup import untrusted
 from review_agents.context.pack import ContextPack
-from review_agents.models import BudgetExceededError
+from review_agents.models import MAX_RETRIES, REQUEST_TIMEOUT_SECONDS, BudgetExceededError
 from review_agents.tools import (
     LIMIT_REACHED,
     RepoTools,
@@ -116,7 +116,7 @@ def check(finding: Finding, line_count: Callable[[str], int | None]) -> str | No
 
 
 def run_dimension(
-    model: BaseChatModel,
+    model_for: Callable[[float], BaseChatModel],
     pack: ContextPack,
     dimension: str,
     tools: RepoTools,
@@ -126,7 +126,11 @@ def run_dimension(
     deadline: float = math.inf,
     clock: Callable[[], float],
 ) -> AgentRun:
-    """Run one dimension agent to its findings, or to a recorded reason it stopped."""
+    """Run one dimension agent to its findings, or to a recorded reason it stopped.
+
+    `model_for` builds the model for each turn from the seconds that call may take, so
+    no call, with its retries, runs past the deadline.
+    """
     budget = ToolBudget(tool_calls)
     available = agent_tools(tools, budget)
     schemas = [StructuredTool.from_function(f, name=n) for n, f in available.items()]
@@ -148,7 +152,9 @@ def run_dimension(
         if final and not told_to_submit:
             messages.append(HumanMessage(SUBMIT_NOW))
             told_to_submit = True
-        bound = model.bind_tools([submit] if final else [*schemas, submit])
+        # The client retries a failed call, so the time left is shared by every attempt.
+        timeout = max(1.0, min(REQUEST_TIMEOUT_SECONDS, (deadline - now) / (MAX_RETRIES + 1)))
+        bound = model_for(timeout).bind_tools([submit] if final else [*schemas, submit])
         try:
             reply = bound.invoke(messages, config={"callbacks": list(callbacks)})
         except BudgetExceededError as exc:

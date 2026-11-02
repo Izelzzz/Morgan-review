@@ -10,7 +10,7 @@ import threading
 from collections import defaultdict
 from pathlib import Path
 
-from review_agents.context.modules import SUMMARY_VERSION, Summarize
+from review_agents.context.modules import MODULE_TOKENS, SUMMARY_VERSION, Summarize
 from review_agents.context.repo_layer import RepoLayer, build_repo_layer
 
 _locks: defaultdict[str, threading.Lock] = defaultdict(threading.Lock)
@@ -37,6 +37,7 @@ def repo_layer_for_review(
     summarize: Summarize | None = None,
     memories: list[str] | None = None,
     memory_version: str = "",
+    module_tokens: int = MODULE_TOKENS,
 ) -> RepoLayer:
     """The repository layer, built under the repository's lock and recorded in `steps`.
 
@@ -55,6 +56,7 @@ def repo_layer_for_review(
                 summarize,
                 memories,
                 memory_version,
+                module_tokens=module_tokens,
             )
             prune(conn, repo)
     except Exception as exc:
