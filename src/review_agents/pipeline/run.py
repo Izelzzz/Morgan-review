@@ -167,10 +167,11 @@ def run_review(
     refs = [f"refs/heads/{review['default_branch']}", f"refs/pull/{review['pr']}/head"]
     git_dir = store.sync(repo, refs, [review["base_sha"], head], token)
     _step(conn, review_id, "mirror.sync", step)
+    step = _now(conn)
     loaded = read_repo_config(git_dir, review["default_branch"])
     config = loaded.config
-    if loaded.errors:
-        _step(conn, review_id, "config", _now(conn), "; ".join(loaded.errors))
+    # An invalid config falls back to the defaults as a whole (D-001); the step says why.
+    _step(conn, review_id, "config", step, "; ".join(loaded.errors) or None)
     limits = config.limits
     deadline = started_at + (
         review_seconds if review_seconds is not None else limits.review_minutes * 60
@@ -245,13 +246,18 @@ def run_review(
     _check_not_superseded(conn, review_id)
     snapshot = Snapshot(git_dir, head, tuple(skip))
     limit_hit = next((lim for lim in _LIMIT_ORDER if any(r.limit_hit == lim for r in runs)), None)
-    # All findings in one transaction with the review's outcome: never half a review.
+    # The findings and the review's end state commit together (reliability §5.3): never
+    # half a review, and a review with stored findings is never claimed and run again.
     conn.execute("BEGIN IMMEDIATE")
     try:
         for run in runs:
             for item in run.findings:
                 _insert_finding(conn, review_id, item, fingerprint(snapshot, item))
-        conn.execute("UPDATE reviews SET limit_hit = ? WHERE id = ?", (limit_hit, review_id))
+        conn.execute(
+            "UPDATE reviews SET limit_hit = ?, status = 'done', error = NULL,"
+            " finished_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = ?",
+            (limit_hit, review_id),
+        )
         conn.execute("COMMIT")
     except BaseException:
         conn.execute("ROLLBACK")

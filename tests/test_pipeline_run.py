@@ -346,3 +346,31 @@ def test_findings_in_an_unreadable_file_do_not_share_a_fingerprint(
 
     prints = {f["fingerprint"] for f in setup.findings(review_id)}
     assert len(prints) == 2
+
+
+def test_stored_findings_and_done_are_one_commit_so_a_restart_cannot_repeat_them(
+    setup: Setup,
+) -> None:
+    review_id = setup.queue()
+    model = ByDimension(scripts={"edge_cases": [submit(finding("edge_cases"))]})
+
+    setup.run(review_id, model)
+    # The process dies before the worker's own bookkeeping; the next one recovers.
+    with closing(connect(setup.settings.db_path)) as conn:
+        recover_interrupted(conn)
+        assert claim_next(conn) is None  # nothing to run again
+
+    assert setup.review(review_id)["status"] == "done"
+    assert len(setup.findings(review_id)) == 1
+
+
+def test_a_single_enabled_dimension_completes_the_review(setup: Setup) -> None:
+    others = "\n".join(f"  {d}: false" for d in ALL if d != "security")
+    review_id = setup.queue(f"dimensions:\n{others}\n")
+    model = ByDimension(scripts={"security": [submit(finding("security"))]})
+
+    setup.run(review_id, model)
+
+    assert set(model.seen) == {"security"}
+    assert [f["primary_dimension"] for f in setup.findings(review_id)] == ["security"]
+    assert setup.steps(review_id)["config"] == ("ok", None)
