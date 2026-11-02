@@ -186,6 +186,21 @@ class RepoTools:
             args += ["--", clean]
         return self._git(*args).decode("utf-8", "replace").strip() or "no commits"
 
+    def line_count(self, path: str) -> int | None:
+        """Lines in a file of the reviewed commit, or None when it does not exist.
+
+        Not an agent tool: the pipeline uses it to check where a finding points.
+        """
+        try:
+            clean = _clean_path(path)
+        except ToolError:
+            return None
+        try:
+            data = self._git("cat-file", "blob", f"{self._commit}:{clean}")
+        except (GitError, ToolError):
+            return None
+        return data.count(b"\n") + (0 if data.endswith(b"\n") or not data else 1)
+
     def read_issue(self, number: int) -> str:
         """Read an issue or pull request of this repository: title, state, labels and body."""
         return self.issue_text(number, MAX_ISSUE_CHARS)
