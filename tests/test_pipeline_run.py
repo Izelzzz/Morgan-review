@@ -87,7 +87,7 @@ class JudgeAll(BaseChatModel):
     ) -> ChatResult:
         ids = [int(i) for i in re.findall(r"^#(\d+) ", str(messages[-1].content), re.MULTILINE)]
         args = (
-            {"same_problem": [], "same_kind": [ids]}
+            {"same_problem": [[i] for i in ids], "same_kind": [ids]}
             if self.kind
             else {"same_problem": [ids], "same_kind": []}
         )

@@ -271,7 +271,7 @@ def run_review(
     _check_not_superseded(conn, review_id)
     snapshot = Snapshot(git_dir, head, tuple(skip))
     candidates = [
-        Candidate(index, item, job.run, fingerprint(snapshot, item))
+        Candidate(index, item, job.run, fingerprint(snapshot, item), job.node)
         for index, (job, item) in enumerate(
             ((job, item) for job, run in zip(jobs, runs, strict=True) for item in run.findings),
             start=1,
@@ -427,8 +427,8 @@ def review_handler(
             vault=vault,
             store=store,
             model_for=lambda timeout: chat_model(endpoint, timeout=timeout),
-            # The merge is judged by the strong model (D-022); without one, only identical
-            # fingerprints merge.
+            # The merge is judged by the strong model (D-022); without one, only the safe
+            # merge runs: one dimension's agent runs agreeing on overlapping lines.
             judge_for=(lambda timeout: chat_model(verifier, timeout=timeout)) if verifier else None,
         )
 
