@@ -281,8 +281,9 @@ def _run_dimensions(
 ) -> list[AgentRun]:
     """Every job side by side, at most `model_concurrency` at once, until the deadline.
 
-    A job still running at the deadline is left behind: its thread stops at its own next
-    check of the deadline, and each model call it is in is bounded by that deadline.
+    A job still running at the deadline is left behind: every model call it makes is
+    built with a timeout that fits, retries included, in the time left, so its thread
+    ends by the deadline plus at most the one-second floor of a call's timeout.
     """
     repo = conn.execute("SELECT repo, head_sha FROM reviews WHERE id = ?", (review_id,)).fetchone()
 
@@ -290,12 +291,10 @@ def _run_dimensions(
 
     def work(job: Job) -> AgentRun:
         starts[job.node] = _utc_now()  # when the job runs, not when it was queued
-        # One call may take what is left, split over the client's attempts.
-        per_call = max(1.0, min(REQUEST_TIMEOUT_SECONDS, (deadline - clock()) / 3))
         tools = RepoTools(git_dir, repo["repo"], repo["head_sha"], skip, token=token)
         meter = UsageMeter(budget, review_usage(settings.db_path, review_id, job.dimension))
         return run_dimension(
-            model_for(per_call),
+            model_for,
             job.pack,
             job.dimension,
             tools,

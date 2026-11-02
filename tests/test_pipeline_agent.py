@@ -14,7 +14,7 @@ from review_agents.context.pack import SHARED_RULES, ContextPack
 from review_agents.context.pr_layer import PrLayer, PrRequest
 from review_agents.context.repo_layer import RepoLayer
 from review_agents.mirror import MirrorStore
-from review_agents.models import BudgetExceededError
+from review_agents.models import MAX_RETRIES, REQUEST_TIMEOUT_SECONDS, BudgetExceededError
 from review_agents.pipeline.agent import SUBMIT_TOOL, AgentRun, run_dimension
 from review_agents.tools import RepoTools
 
@@ -112,7 +112,7 @@ def run(
     deadline: float = float("inf"),
 ) -> AgentRun:
     return run_dimension(
-        model,
+        lambda timeout: model,
         pack(),
         "edge_cases",
         repo_tools,
@@ -430,3 +430,29 @@ def test_both_retries_still_fit_after_the_tools_are_used_up(repo_tools: RepoTool
     result = run(model, repo_tools, limit=1)
 
     assert result.status == "done" and len(result.findings) == 1
+
+
+def test_each_model_call_is_bounded_by_the_time_left(repo_tools: RepoTools) -> None:
+    timeouts: list[float] = []
+    model = ScriptedModel(script=[call("list_dir", {}), submit()])
+    times = iter([0.0, 990.0])
+
+    def model_for(timeout: float) -> ScriptedModel:
+        timeouts.append(timeout)
+        return model
+
+    run_dimension(
+        model_for,
+        pack(),
+        "edge_cases",
+        repo_tools,
+        tool_calls=25,
+        callbacks=[],
+        deadline=1000.0,
+        clock=lambda: next(times),
+    )
+
+    # Early on a call may take its full limit; 10 seconds before the deadline, the call
+    # and its retries together fit in those 10 seconds.
+    assert timeouts[0] == REQUEST_TIMEOUT_SECONDS
+    assert timeouts[1] * (MAX_RETRIES + 1) <= 10.0
