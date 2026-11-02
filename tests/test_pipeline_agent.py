@@ -174,7 +174,7 @@ def test_the_loop_ends_even_if_the_model_never_submits(repo_tools: RepoTools) ->
 
     assert result.status == "incomplete"
     assert "did not submit" in (result.reason or "")
-    assert len(model.sent) <= 2 + 2  # at most the tool limit plus two turns
+    assert len(model.sent) <= 2 + 3  # the tool limit, the submit turn and two retries
 
 
 def test_findings_that_point_nowhere_are_dropped_with_a_reason(repo_tools: RepoTools) -> None:
@@ -415,3 +415,18 @@ def test_a_submission_forced_by_the_deadline_says_so(repo_tools: RepoTools) -> N
     result = run(ScriptedModel(script=[submit()]), repo_tools, now=lambda: 100.0, deadline=110.0)
 
     assert result.status == "done" and result.limit_hit == "time"
+
+
+def test_both_retries_still_fit_after_the_tools_are_used_up(repo_tools: RepoTools) -> None:
+    model = ScriptedModel(
+        script=[
+            call("read_file", {"path": "payments/refund.py"}),
+            AIMessage(content="Nothing to report."),
+            call(SUBMIT_TOOL, {"findings": "none"}, "bad"),
+            submit(finding(), call_id="good"),
+        ]
+    )
+
+    result = run(model, repo_tools, limit=1)
+
+    assert result.status == "done" and len(result.findings) == 1

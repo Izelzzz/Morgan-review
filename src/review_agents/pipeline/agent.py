@@ -2,7 +2,9 @@
 
 Two layers make sure an agent stops (agent tools doc §5). The tool layer refuses calls
 past the limit. The loop layer offers only the submit tool once the tool calls are
-used up or the deadline is close, and gives up after `tool_calls + 2` model turns.
+used up or the deadline is close, and gives up after `MAX_TURNS_AFTER_TOOLS` more
+turns than tool calls: the submit turn and one retry each for a text reply and for a
+malformed submission.
 A failure ends this agent only; the pipeline carries on with the other dimensions.
 """
 
@@ -31,6 +33,9 @@ from review_agents.tools import (
 )
 
 SUBMIT_TOOL = "submit_findings"
+# Turns beyond the tool calls: one to submit, one retry for a reply in text, one for a
+# malformed submission.
+MAX_TURNS_AFTER_TOOLS = 3
 # Below this much time before the deadline, the agent may only submit.
 SUBMIT_MARGIN_SECONDS = 30.0
 SUBMIT_ONLY = f"Not run: only {SUBMIT_TOOL} is available now."
@@ -133,7 +138,7 @@ def run_dimension(
     format_retry_used = False
     told_to_submit = False
 
-    for _ in range(tool_calls + 2):
+    for _ in range(tool_calls + MAX_TURNS_AFTER_TOOLS):
         now = clock()
         if now >= deadline:
             run.reason, run.limit_hit = "the review's deadline passed", "time"
@@ -220,7 +225,9 @@ def run_dimension(
             run.limit_hit = "time"
         return run
 
-    run.reason = f"the agent did not submit findings within {tool_calls + 2} turns"
+    run.reason = (
+        f"the agent did not submit findings within {tool_calls + MAX_TURNS_AFTER_TOOLS} turns"
+    )
     run.limit_hit = "tool_calls"
     return run
 
