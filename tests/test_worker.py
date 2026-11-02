@@ -127,14 +127,20 @@ def test_worker_keeps_draining_the_queue_after_a_failed_iteration(
 
 
 def test_worker_recovers_interrupted_reviews_and_drains_the_queue(db_path: Path) -> None:
+    # Reviews without a token: one on its first attempt is queued once more (D-021),
+    # one already tried twice fails.
+    retried = enqueue(db_path, status="running")
     interrupted = enqueue(db_path, status="running")
     queued = enqueue(db_path)
+    with closing(connect(db_path)) as conn:
+        conn.execute("UPDATE reviews SET attempts = 1 WHERE id = ?", (retried,))
+        conn.execute("UPDATE reviews SET attempts = 2 WHERE id = ?", (interrupted,))
 
     async def run_worker_until_queue_drains() -> None:
         worker = Worker(db_path, lambda conn, review_id: None, poll_seconds=0.01)
         worker.start()
         for _ in range(200):
-            if review(db_path, queued)["status"] == "done":
+            if all(review(db_path, r)["status"] == "done" for r in (queued, retried)):
                 break
             await asyncio.sleep(0.01)
         await worker.stop()
@@ -142,6 +148,7 @@ def test_worker_recovers_interrupted_reviews_and_drains_the_queue(db_path: Path)
     asyncio.run(run_worker_until_queue_drains())
 
     assert review(db_path, queued)["status"] == "done"
+    assert review(db_path, retried)["status"] == "done"
     assert review(db_path, interrupted)["status"] == "failed"
     assert "restart" in review(db_path, interrupted)["error"]
 

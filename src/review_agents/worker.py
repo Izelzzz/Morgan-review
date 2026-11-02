@@ -16,12 +16,23 @@ def not_implemented(conn: sqlite3.Connection, review_id: int) -> None:
     raise NotImplementedError("the review pipeline is not implemented yet")
 
 
-def recover_interrupted(conn: sqlite3.Connection) -> int:
-    """Fail reviews a previous process left unfinished; return how many.
+# Claims of one review, counting the first: a review that keeps dying with the service is
+# not queued again and again.
+MAX_ATTEMPTS = 2
 
-    Running reviews fail, and so do queued ones that came with a token: the token lived
-    only in that process's memory. Running the CI job again starts a fresh review.
+
+def recover_interrupted(conn: sqlite3.Connection) -> int:
+    """Settle reviews a previous process left unfinished; return how many failed.
+
+    A running review that needs no token is queued once more (decision D-021); one with
+    a token cannot run again, since the token lived only in that process's memory, so it
+    fails, as does a queued one with a token. Running the CI job again starts afresh.
     """
+    conn.execute(
+        "UPDATE reviews SET status = 'queued', started_at = NULL"
+        " WHERE status = 'running' AND has_token = 0 AND attempts < ? AND superseded_by IS NULL",
+        (MAX_ATTEMPTS,),
+    )
     cursor = conn.execute(
         "UPDATE reviews SET status = 'failed', error = CASE status"
         " WHEN 'running' THEN 'interrupted by a service restart'"
@@ -34,7 +45,8 @@ def recover_interrupted(conn: sqlite3.Connection) -> int:
 
 def claim_next(conn: sqlite3.Connection) -> int | None:
     row = conn.execute(
-        "UPDATE reviews SET status = 'running', started_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')"
+        "UPDATE reviews SET status = 'running', attempts = attempts + 1,"
+        " started_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')"
         " WHERE id = (SELECT id FROM reviews WHERE status = 'queued' ORDER BY id LIMIT 1)"
         " RETURNING id"
     ).fetchone()
