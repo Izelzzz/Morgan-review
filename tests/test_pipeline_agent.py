@@ -381,3 +381,37 @@ def test_a_title_is_kept_on_one_line(repo_tools: RepoTools) -> None:
     [kept] = run(model, repo_tools).findings
 
     assert kept.title == "Refund exceeds paid"
+
+
+@pytest.mark.parametrize(
+    "written", ["./payments/refund.py", "payments//refund.py", "/payments/refund.py"]
+)
+def test_a_path_is_stored_the_way_the_repository_spells_it(
+    repo_tools: RepoTools, written: str
+) -> None:
+    [kept] = run(ScriptedModel(script=[submit(finding(file=written))]), repo_tools).findings
+
+    assert kept.file == "payments/refund.py"
+
+
+def test_a_path_outside_the_repository_is_dropped(repo_tools: RepoTools) -> None:
+    result = run(ScriptedModel(script=[submit(finding(file="../payments/refund.py"))]), repo_tools)
+
+    assert result.findings == []
+    assert "inside the repository" in " ".join(result.dropped)
+
+
+def test_calling_a_tool_that_does_not_exist_uses_the_budget(repo_tools: RepoTools) -> None:
+    typos = [call("read_files", {}, f"c{i}") for i in range(2)]
+    model = ScriptedModel(script=[*typos, submit()])
+
+    result = run(model, repo_tools, limit=2)
+
+    assert result.status == "done"
+    assert model.bound[-1] == [SUBMIT_TOOL]  # the budget ran out, so only submit remained
+
+
+def test_a_submission_forced_by_the_deadline_says_so(repo_tools: RepoTools) -> None:
+    result = run(ScriptedModel(script=[submit()]), repo_tools, now=lambda: 100.0, deadline=110.0)
+
+    assert result.status == "done" and result.limit_hit == "time"

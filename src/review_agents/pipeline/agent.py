@@ -21,7 +21,14 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_valida
 from review_agents.context.markup import untrusted
 from review_agents.context.pack import ContextPack
 from review_agents.models import BudgetExceededError
-from review_agents.tools import RepoTools, ToolBudget, agent_tools
+from review_agents.tools import (
+    LIMIT_REACHED,
+    RepoTools,
+    ToolBudget,
+    ToolError,
+    agent_tools,
+    clean_path,
+)
 
 SUBMIT_TOOL = "submit_findings"
 # Below this much time before the deadline, the agent may only submit.
@@ -55,12 +62,6 @@ class Finding(BaseModel):
     @classmethod
     def _one_line(cls, value: str) -> str:
         return " ".join(value.split())
-
-    @field_validator("file")
-    @classmethod
-    def _repository_path(cls, value: str) -> str:
-        # The same file must look the same in every finding, for merging and comments.
-        return value.strip().lstrip("/")
 
 
 class Submission(BaseModel):
@@ -137,7 +138,8 @@ def run_dimension(
         if now >= deadline:
             run.reason, run.limit_hit = "the review's deadline passed", "time"
             return run
-        final = budget.used >= tool_calls or deadline - now < SUBMIT_MARGIN_SECONDS
+        forced_by_time = deadline - now < SUBMIT_MARGIN_SECONDS
+        final = budget.used >= tool_calls or forced_by_time
         if final and not told_to_submit:
             messages.append(HumanMessage(SUBMIT_NOW))
             told_to_submit = True
@@ -166,7 +168,7 @@ def run_dimension(
             if final:  # only submit was offered: a tool must not eat the time that is left
                 messages.append(ToolMessage(SUBMIT_ONLY, tool_call_id=tool_call["id"]))
             else:
-                messages.append(_answer(tool_call, available))
+                messages.append(_answer(tool_call, available, budget))
 
         if submitted is None and not reply.tool_calls:
             if text_retry_used:
@@ -198,14 +200,24 @@ def run_dimension(
         line_count = functools.cache(tools.line_count)
         for item in submission.findings:
             item.dimension = dimension
+            try:
+                # The same file must be spelled the same in every finding, as git spells
+                # it: merging compares paths, and GitHub rejects others in comments.
+                item.file = clean_path(item.file)
+            except ToolError as exc:
+                run.dropped.append(f"{item.title}: {exc}")
+                continue
             problem = check(item, line_count)
             if problem is None:
                 run.findings.append(item)
             else:
                 run.dropped.append(f"{item.title}: {problem}")
         run.status = "done"
-        if budget.used >= tool_calls:  # it stopped because the calls ran out
+        # A forced submission is complete but cut short; the report says by what.
+        if budget.used >= tool_calls:
             run.limit_hit = "tool_calls"
+        elif forced_by_time:
+            run.limit_hit = "time"
         return run
 
     run.reason = f"the agent did not submit findings within {tool_calls + 2} turns"
@@ -213,10 +225,17 @@ def run_dimension(
     return run
 
 
-def _answer(tool_call: ToolCall, available: dict[str, Callable[..., str]]) -> ToolMessage:
+def _answer(
+    tool_call: ToolCall, available: dict[str, Callable[..., str]], budget: ToolBudget
+) -> ToolMessage:
     name, call_id = tool_call["name"], tool_call["id"]
     tool = available.get(name)
     if tool is None:
+        # Counted like any refused call, so a model stuck on a misspelt name still runs
+        # out of calls and is told to submit.
+        if budget.used >= budget.limit:
+            return ToolMessage(LIMIT_REACHED, tool_call_id=call_id)
+        budget.used += 1
         return ToolMessage(f"error: there is no tool named {name!r}", tool_call_id=call_id)
     try:
         # Called through the budget wrapper, so a call with wrong arguments still counts.
