@@ -61,7 +61,8 @@ def glob_match(pattern: str, path: str) -> bool:
     return _glob_regex(pattern).fullmatch(path) is not None
 
 
-def _clean_path(path: str) -> str:
+def clean_path(path: str) -> str:
+    """A path inside the repository, spelled one way; ToolError for one that leaves it."""
     stripped = path.strip().strip("/")
     if stripped in ("", "."):
         return ""
@@ -105,7 +106,7 @@ class RepoTools:
 
     def read_file(self, path: str, start_line: int = 1, end_line: int | None = None) -> str:
         """Read a text file at the reviewed commit, optionally a 1-based line range."""
-        clean = _clean_path(path)
+        clean = clean_path(path)
         if not clean:
             raise ToolError("give a file path")
         if self.is_skipped(clean):
@@ -129,7 +130,7 @@ class RepoTools:
 
     def list_dir(self, path: str = "") -> str:
         """List one directory at the reviewed commit: type, size and name per entry."""
-        clean = _clean_path(path)
+        clean = clean_path(path)
         if clean and self.is_skipped(f"{clean}/"):
             raise ToolError(f"{clean} is in the skip list and is not read")
         target = f"{self._commit}:{clean}" if clean else f"{self._commit}^{{tree}}"
@@ -181,10 +182,25 @@ class RepoTools:
         count = min(max(max_entries, 1), MAX_LOG_ENTRIES)
         args = ["log", f"--max-count={count}", "--format=%h %ad %an%n    %s", "--date=short"]
         args.append(self._commit)
-        clean = _clean_path(path) if path else ""
+        clean = clean_path(path) if path else ""
         if clean:
             args += ["--", clean]
         return self._git(*args).decode("utf-8", "replace").strip() or "no commits"
+
+    def line_count(self, path: str) -> int | None:
+        """Lines in a file of the reviewed commit, or None when it does not exist.
+
+        Not an agent tool: the pipeline uses it to check where a finding points.
+        """
+        try:
+            clean = clean_path(path)
+        except ToolError:
+            return None
+        try:
+            data = self._git("cat-file", "blob", f"{self._commit}:{clean}")
+        except (GitError, ToolError):
+            return None
+        return data.count(b"\n") + (0 if data.endswith(b"\n") or not data else 1)
 
     def read_issue(self, number: int) -> str:
         """Read an issue or pull request of this repository: title, state, labels and body."""

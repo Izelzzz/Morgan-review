@@ -217,7 +217,8 @@ def test_agents_only_get_read_only_tools(tools: RepoTools) -> None:
     public = {name for name in dir(RepoTools) if not name.startswith("_")}
     # A new public method must be added here on purpose, after checking it cannot write.
     # issue_text is read_issue without the body cap, for the PR layer, not for agents.
-    assert public == {*given, "NAMES", "is_skipped", "issue_text"}
+    # line_count lets the pipeline check where a finding points; agents never get it.
+    assert public == {*given, "NAMES", "is_skipped", "issue_text", "line_count"}
 
 
 def test_an_invalid_pattern_and_an_unreachable_api_come_back_as_errors(
@@ -265,3 +266,10 @@ def test_a_hanging_git_command_is_killed_and_reported_to_the_agent(
 
     assert result.startswith("error: git cat-file timed out")
     assert time.monotonic() - started < 3
+
+
+def test_line_count_reads_the_reviewed_commit(tools: RepoTools) -> None:
+    assert tools.line_count("src/app.py") == 4
+    assert tools.line_count("big.txt") == 1  # no trailing newline
+    assert tools.line_count("src/missing.py") is None
+    assert tools.line_count("../outside") is None
