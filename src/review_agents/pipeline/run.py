@@ -36,6 +36,7 @@ from review_agents.credentials import TokenVault
 from review_agents.db import connect
 from review_agents.mirror import MirrorStore
 from review_agents.models import (
+    MAX_RETRIES,
     REQUEST_TIMEOUT_SECONDS,
     TokenBudget,
     UsageMeter,
@@ -44,6 +45,7 @@ from review_agents.models import (
     summary_usage,
 )
 from review_agents.pipeline.agent import AgentRun, Finding, run_dimension
+from review_agents.pipeline.merge import Candidate, Merged, merge, model_judge
 from review_agents.repo_config import RepoConfig, read_repo_config
 from review_agents.tools import RepoTools
 
@@ -67,15 +69,33 @@ class Job:
     groups: int
     dimension: str
     pack: ContextPack
+    run: int = 1
+    runs: int = 1
 
     @property
     def node(self) -> str:
         suffix = f".group{self.group}" if self.groups > 1 else ""
+        suffix += f".run{self.run}" if self.runs > 1 else ""
         return f"dimension.{self.dimension}{suffix}"
 
 
 def enabled_dimensions(config: RepoConfig) -> list[str]:
     return [d for d in DIMENSIONS if getattr(config.dimensions, d)]
+
+
+# Quick mode looks at edge cases and security only (architecture §4.3); Deep mode runs
+# each dimension three times and keeps what any run reports (D-022).
+QUICK_DIMENSIONS = ("edge_cases", "security")
+DEEP_RUNS = 3
+
+
+def mode_plan(config: RepoConfig) -> tuple[list[str], int]:
+    """The dimensions a review runs and how many times each, from the config's mode."""
+    enabled = enabled_dimensions(config)
+    if config.mode == "quick":
+        # With neither of them enabled, the first enabled one still makes it a review.
+        return [d for d in enabled if d in QUICK_DIMENSIONS] or enabled[:1], 1
+    return enabled, DEEP_RUNS if config.mode == "deep" else 1
 
 
 def _utc_now() -> str:
@@ -113,18 +133,18 @@ def fingerprint(snapshot: Snapshot, finding: Finding) -> str:
     return hashlib.sha256(f"{finding.file}\n{code}".encode()).hexdigest()
 
 
-def _insert_finding(
-    conn: sqlite3.Connection, review_id: int, finding: Finding, fingerprint: str
-) -> None:
+def _insert_finding(conn: sqlite3.Connection, review_id: int, merged: Merged) -> None:
+    finding = merged.finding
+    lead = next(c for c in merged.sources if c.finding is finding)
     conn.execute(
         "INSERT INTO findings (review_id, fingerprint, primary_dimension, dimensions, severity,"
-        " preexisting, file, line_start, line_end, title, body, suggestion, evidence)"
-        " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        " preexisting, file, line_start, line_end, title, body, suggestion, evidence, votes,"
+        " locations) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (
             review_id,
-            fingerprint,
+            lead.fingerprint,
             finding.dimension,
-            json.dumps([finding.dimension]),
+            json.dumps(merged.dimensions),
             finding.severity,
             finding.preexisting,
             finding.file,
@@ -134,6 +154,8 @@ def _insert_finding(
             finding.why,
             finding.suggestion,
             finding.evidence,
+            merged.votes,
+            json.dumps(merged.locations),
         ),
     )
 
@@ -146,6 +168,7 @@ def run_review(
     vault: TokenVault,
     store: MirrorStore,
     model_for: ModelFor,
+    judge_for: ModelFor | None = None,
     clock: Callable[[], float] = time.monotonic,
     review_seconds: float | None = None,
     wrap_up_seconds: float | None = None,
@@ -223,10 +246,12 @@ def run_review(
         _step(conn, review_id, f"context.groups.{len(packs)}", step)
 
     _check_not_superseded(conn, review_id)
+    dimensions, repeats = mode_plan(config)
     jobs = [
-        Job(index, len(packs), dimension, pack)
+        Job(index, len(packs), dimension, pack, run, repeats)
+        for run in range(1, repeats + 1)  # every first run is queued before any second one
         for index, pack in enumerate(packs, start=1)
-        for dimension in enabled_dimensions(config)
+        for dimension in dimensions
     ]
     runs = _run_dimensions(
         conn,
@@ -245,14 +270,33 @@ def run_review(
 
     _check_not_superseded(conn, review_id)
     snapshot = Snapshot(git_dir, head, tuple(skip))
+    candidates = [
+        Candidate(index, item, job.run, fingerprint(snapshot, item), job.node)
+        for index, (job, item) in enumerate(
+            ((job, item) for job, run in zip(jobs, runs, strict=True) for item in run.findings),
+            start=1,
+        )
+    ]
+    step = _now(conn)
+    judge = None
+    # One candidate has nothing to merge with; the judge is not asked.
+    if judge_for is not None and len(candidates) > 1:
+        left = (deadline - clock()) / (MAX_RETRIES + 1)  # the client's retries share it
+        timeout = max(1.0, min(REQUEST_TIMEOUT_SECONDS, left))
+        meter = UsageMeter(budget, review_usage(settings.db_path, review_id, "merge"))
+        judge = model_judge(judge_for(timeout), callbacks=[meter])
+    # A judge that fails or answers nonsense leaves the safe merge: the review still
+    # completes, and the step says the merge was degraded.
+    fallbacks: list[str] = []
+    merged = merge(candidates, judge, fallbacks.append)
+    _step(conn, review_id, "merge", step, fallbacks[0] if fallbacks else None)
     limit_hit = next((lim for lim in _LIMIT_ORDER if any(r.limit_hit == lim for r in runs)), None)
     # The findings and the review's end state commit together (reliability §5.3): never
     # half a review, and a review with stored findings is never claimed and run again.
     conn.execute("BEGIN IMMEDIATE")
     try:
-        for run in runs:
-            for item in run.findings:
-                _insert_finding(conn, review_id, item, fingerprint(snapshot, item))
+        for item in merged:
+            _insert_finding(conn, review_id, item)
         conn.execute(
             "UPDATE reviews SET limit_hit = ?, status = 'done', error = NULL,"
             " finished_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = ?",
@@ -375,6 +419,7 @@ def review_handler(
     if settings.finder_model is None:
         raise RuntimeError("REVIEW_AGENTS_FINDER_MODEL__* must be set to run reviews")
     endpoint = settings.finder_model
+    verifier = settings.verifier_model
     store = MirrorStore(settings.repos_dir)
 
     def handle(conn: sqlite3.Connection, review_id: int) -> None:
@@ -385,6 +430,9 @@ def review_handler(
             vault=vault,
             store=store,
             model_for=lambda timeout: chat_model(endpoint, timeout=timeout),
+            # The merge is judged by the strong model (D-022); without one, only the safe
+            # merge runs: one dimension's agent runs agreeing on overlapping lines.
+            judge_for=(lambda timeout: chat_model(verifier, timeout=timeout)) if verifier else None,
         )
 
     return handle

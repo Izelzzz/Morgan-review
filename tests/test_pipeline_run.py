@@ -20,8 +20,9 @@ from review_agents.context.git import Snapshot
 from review_agents.credentials import TokenVault
 from review_agents.db import connect, migrate
 from review_agents.mirror import MirrorStore
-from review_agents.models import BudgetExceededError
+from review_agents.models import MAX_RETRIES, BudgetExceededError
 from review_agents.pipeline.agent import SUBMIT_TOOL
+from review_agents.pipeline.merge import MERGE_TOOL
 from review_agents.pipeline.run import ReviewSuperseded, run_review, wait_for_summaries
 from review_agents.worker import claim_next, recover_interrupted
 
@@ -63,6 +64,40 @@ class ByDimension(BaseChatModel):
         if isinstance(reply, Exception):
             raise reply
         return ChatResult(generations=[ChatGeneration(message=reply)])
+
+
+class JudgeAll(BaseChatModel):
+    """A merge judge that puts every candidate into one group."""
+
+    kind: bool = False
+    text: bool = False  # answers in prose instead of calling the tool
+    unknown_id: bool = False  # names a candidate that does not exist
+
+    @property
+    def _llm_type(self) -> str:
+        return "judge-all"
+
+    def bind_tools(self, tools: Sequence[Any], **kwargs: Any) -> "JudgeAll":
+        return self
+
+    def _generate(
+        self,
+        messages: list[BaseMessage],
+        stop: list[str] | None = None,
+        run_manager: CallbackManagerForLLMRun | None = None,
+        **kwargs: Any,
+    ) -> ChatResult:
+        if self.text:
+            return ChatResult(generations=[ChatGeneration(message=AIMessage("they look alike"))])
+        ids = [int(i) for i in re.findall(r"^#(\d+) ", str(messages[-1].content), re.MULTILINE)]
+        ids += [999] if self.unknown_id else []
+        args = (
+            {"same_problem": [[i] for i in ids], "same_kind": [ids]}
+            if self.kind
+            else {"same_problem": [ids], "same_kind": []}
+        )
+        call = {"name": MERGE_TOOL, "args": args, "id": "m"}
+        return ChatResult(generations=[ChatGeneration(message=AIMessage("", tool_calls=[call]))])
 
 
 def finding(dimension: str, **changes: Any) -> dict[str, Any]:
@@ -143,7 +178,7 @@ class Setup:
         with closing(connect(self.settings.db_path)) as conn:
             rows = conn.execute(
                 "SELECT primary_dimension, dimensions, severity, file, title, body, suggestion,"
-                " fingerprint FROM findings WHERE review_id = ? ORDER BY id",
+                " fingerprint, votes, locations FROM findings WHERE review_id = ? ORDER BY id",
                 (review_id,),
             ).fetchall()
         return [dict(row) for row in rows]
@@ -265,7 +300,13 @@ def test_findings_are_written_all_at_once_or_not_at_all(
     setup: Setup, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     review_id = setup.queue()
-    model = ByDimension(scripts={d: [submit(finding(d))] for d in ("edge_cases", "security")})
+    # Two different problems, so the merge keeps both and there are two writes.
+    model = ByDimension(
+        scripts={
+            "edge_cases": [submit(finding("edge_cases", line_start=1, line_end=1))],
+            "security": [submit(finding("security", line_start=2, line_end=2))],
+        }
+    )
     from review_agents.pipeline import run as run_module
 
     original = run_module._insert_finding
@@ -374,3 +415,141 @@ def test_a_single_enabled_dimension_completes_the_review(setup: Setup) -> None:
     assert set(model.seen) == {"security"}
     assert [f["primary_dimension"] for f in setup.findings(review_id)] == ["security"]
     assert setup.steps(review_id)["config"] == ("ok", None)
+
+
+def test_quick_mode_runs_only_edge_cases_and_security(setup: Setup) -> None:
+    review_id = setup.queue("mode: quick\n")
+    model = ByDimension(scripts={})
+
+    setup.run(review_id, model)
+
+    assert set(model.seen) == {"edge_cases", "security"}
+
+
+def test_quick_mode_falls_back_to_an_enabled_dimension(setup: Setup) -> None:
+    others = "\n".join(f"  {d}: false" for d in ALL if d != "maintainability")
+    review_id = setup.queue(f"mode: quick\ndimensions:\n{others}\n")
+    model = ByDimension(scripts={})
+
+    setup.run(review_id, model)
+
+    assert set(model.seen) == {"maintainability"}
+
+
+def test_deep_mode_runs_each_dimension_three_times_and_counts_votes(setup: Setup) -> None:
+    others = "\n".join(f"  {d}: false" for d in ALL if d != "edge_cases")
+    review_id = setup.queue(f"mode: deep\ndimensions:\n{others}\n")
+    model = ByDimension(scripts={"edge_cases": [submit(finding("edge_cases"))]})
+
+    setup.run(review_id, model)
+
+    assert model.seen.count("edge_cases") == 3
+    [stored] = setup.findings(review_id)  # the same problem, reported in all three runs
+    assert stored["votes"] == 3
+    steps = setup.steps(review_id)
+    assert {"dimension.edge_cases.run1", "dimension.edge_cases.run3"} <= set(steps)
+
+
+def test_the_judge_merges_one_problem_two_dimensions_found(setup: Setup) -> None:
+    review_id = setup.queue()
+    model = ByDimension(
+        scripts={
+            "edge_cases": [submit(finding("edge_cases"))],
+            "security": [submit(finding("security", line_end=1, evidence="much more evidence"))],
+        }
+    )
+    judge = JudgeAll()
+
+    setup.run(review_id, model, judge_for=lambda timeout: judge)
+
+    [stored] = setup.findings(review_id)
+    assert json.loads(stored["dimensions"]) == ["edge_cases", "security"]
+    assert setup.steps(review_id)["merge"] == ("ok", None)
+
+
+@pytest.mark.parametrize(
+    ("judge", "reason"),
+    [
+        (JudgeAll(text=True), "judge failed: ValueError"),
+        (JudgeAll(unknown_id=True), "judge answer rejected"),
+    ],
+)
+def test_a_merge_that_falls_back_to_the_safe_merge_is_recorded(
+    setup: Setup, judge: JudgeAll, reason: str
+) -> None:
+    review_id = setup.queue()
+    model = ByDimension(
+        scripts={
+            "edge_cases": [submit(finding("edge_cases"))],
+            "security": [submit(finding("security"))],
+        }
+    )
+
+    setup.run(review_id, model, judge_for=lambda timeout: judge)
+
+    status, error = setup.steps(review_id)["merge"]
+    assert status == "error"
+    assert error is not None and error.startswith(reason)
+    assert len(setup.findings(review_id)) == 2  # the review still completes
+    assert setup.review(review_id)["status"] == "done"
+
+
+def test_without_a_judge_the_safe_merge_is_no_fallback(setup: Setup) -> None:
+    review_id = setup.queue()
+    model = ByDimension(
+        scripts={
+            "edge_cases": [submit(finding("edge_cases"))],
+            "security": [submit(finding("security"))],
+        }
+    )
+
+    setup.run(review_id, model)
+
+    assert setup.steps(review_id)["merge"] == ("ok", None)
+
+
+def test_one_kind_of_problem_is_stored_once_with_its_other_places(setup: Setup) -> None:
+    review_id = setup.queue()
+    model = ByDimension(
+        scripts={
+            "edge_cases": [
+                submit(
+                    finding("edge_cases", line_start=1, line_end=1),
+                    finding("edge_cases", line_start=2, line_end=2, title="again"),
+                )
+            ]
+        }
+    )
+
+    setup.run(review_id, model, judge_for=lambda timeout: JudgeAll(kind=True))
+
+    [stored] = setup.findings(review_id)
+    assert json.loads(stored["locations"]) == [["payments/refund.py", 2, 2]]
+
+
+def test_the_judge_is_not_asked_when_there_is_nothing_to_merge(setup: Setup) -> None:
+    asked: list[float] = []
+
+    def judge_for(timeout: float) -> JudgeAll:
+        asked.append(timeout)
+        return JudgeAll()
+
+    review_id = setup.queue()
+    model = ByDimension(scripts={"edge_cases": [submit(finding("edge_cases"))]})
+    setup.run(review_id, model, judge_for=judge_for)
+
+    assert asked == []
+
+
+def test_the_judge_and_its_retries_fit_in_the_time_left(setup: Setup) -> None:
+    asked: list[float] = []
+
+    def judge_for(timeout: float) -> JudgeAll:
+        asked.append(timeout)
+        return JudgeAll()
+
+    review_id = setup.queue()
+    model = ByDimension(scripts={d: [submit(finding(d))] for d in ("edge_cases", "security")})
+    setup.run(review_id, model, judge_for=judge_for, review_seconds=30.0)
+
+    assert len(asked) == 1 and asked[0] * (MAX_RETRIES + 1) <= 30.0
