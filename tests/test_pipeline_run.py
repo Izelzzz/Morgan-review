@@ -70,6 +70,8 @@ class JudgeAll(BaseChatModel):
     """A merge judge that puts every candidate into one group."""
 
     kind: bool = False
+    text: bool = False  # answers in prose instead of calling the tool
+    unknown_id: bool = False  # names a candidate that does not exist
 
     @property
     def _llm_type(self) -> str:
@@ -85,7 +87,10 @@ class JudgeAll(BaseChatModel):
         run_manager: CallbackManagerForLLMRun | None = None,
         **kwargs: Any,
     ) -> ChatResult:
+        if self.text:
+            return ChatResult(generations=[ChatGeneration(message=AIMessage("they look alike"))])
         ids = [int(i) for i in re.findall(r"^#(\d+) ", str(messages[-1].content), re.MULTILINE)]
+        ids += [999] if self.unknown_id else []
         args = (
             {"same_problem": [[i] for i in ids], "same_kind": [ids]}
             if self.kind
@@ -459,6 +464,47 @@ def test_the_judge_merges_one_problem_two_dimensions_found(setup: Setup) -> None
 
     [stored] = setup.findings(review_id)
     assert json.loads(stored["dimensions"]) == ["edge_cases", "security"]
+    assert setup.steps(review_id)["merge"] == ("ok", None)
+
+
+@pytest.mark.parametrize(
+    ("judge", "reason"),
+    [
+        (JudgeAll(text=True), "judge failed: ValueError"),
+        (JudgeAll(unknown_id=True), "judge answer rejected"),
+    ],
+)
+def test_a_merge_that_falls_back_to_the_safe_merge_is_recorded(
+    setup: Setup, judge: JudgeAll, reason: str
+) -> None:
+    review_id = setup.queue()
+    model = ByDimension(
+        scripts={
+            "edge_cases": [submit(finding("edge_cases"))],
+            "security": [submit(finding("security"))],
+        }
+    )
+
+    setup.run(review_id, model, judge_for=lambda timeout: judge)
+
+    status, error = setup.steps(review_id)["merge"]
+    assert status == "error"
+    assert error is not None and error.startswith(reason)
+    assert len(setup.findings(review_id)) == 2  # the review still completes
+    assert setup.review(review_id)["status"] == "done"
+
+
+def test_without_a_judge_the_safe_merge_is_no_fallback(setup: Setup) -> None:
+    review_id = setup.queue()
+    model = ByDimension(
+        scripts={
+            "edge_cases": [submit(finding("edge_cases"))],
+            "security": [submit(finding("security"))],
+        }
+    )
+
+    setup.run(review_id, model)
+
     assert setup.steps(review_id)["merge"] == ("ok", None)
 
 

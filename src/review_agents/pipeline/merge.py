@@ -165,18 +165,31 @@ def _checked(
     return all(len({cluster_of[i] for i in group}) <= 1 for group in decision.same_problem)
 
 
-def merge(candidates: list[Candidate], judge: Judge | None) -> list[Merged]:
-    """One finding per problem and per kind of problem, most severe and most voted first."""
+def merge(
+    candidates: list[Candidate],
+    judge: Judge | None,
+    fallback: Callable[[str], None] | None = None,
+) -> list[Merged]:
+    """One finding per problem and per kind of problem, most severe and most voted first.
+
+    When a judge was given but its answer cannot be used, `fallback` is told why; having
+    no judge at all is no fallback.
+    """
     decision: Decision | None = None
+    reason: str | None = None
     if judge is not None and candidates:
         groups = clusters(candidates)
         try:
             decision = judge(groups)
-        except Exception:
+        except Exception as error:
             log.exception("merging findings with the judge failed; using the safe merge")
+            reason = f"judge failed: {type(error).__name__}: {error}"
         if decision is not None and not _checked(decision, candidates, groups):
             log.warning("the judge's merge did not add up; using the safe merge")
             decision = None
+            reason = "judge answer rejected: ids unknown, repeated or spanning clusters"
+    if reason is not None and fallback is not None:
+        fallback(reason)
 
     # The judge's problems stand; every candidate it did not place gets the safe merge,
     # so an empty or partial answer still merges what plainly is one problem.

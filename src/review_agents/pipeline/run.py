@@ -285,8 +285,11 @@ def run_review(
         timeout = max(1.0, min(REQUEST_TIMEOUT_SECONDS, left))
         meter = UsageMeter(budget, review_usage(settings.db_path, review_id, "merge"))
         judge = model_judge(judge_for(timeout), callbacks=[meter])
-    merged = merge(candidates, judge)
-    _step(conn, review_id, "merge", step)
+    # A judge that fails or answers nonsense leaves the safe merge: the review still
+    # completes, and the step says the merge was degraded.
+    fallbacks: list[str] = []
+    merged = merge(candidates, judge, fallbacks.append)
+    _step(conn, review_id, "merge", step, fallbacks[0] if fallbacks else None)
     limit_hit = next((lim for lim in _LIMIT_ORDER if any(r.limit_hit == lim for r in runs)), None)
     # The findings and the review's end state commit together (reliability §5.3): never
     # half a review, and a review with stored findings is never claimed and run again.
