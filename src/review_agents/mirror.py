@@ -208,7 +208,7 @@ class MirrorStore:
                     _TRANSIENT_FETCH_ERRORS.search(str(exc))
                 )
                 backoff = 2**attempt + random.random()  # noqa: S311 - jitter, not security
-                # A retry needs time to wait and then to fetch; without it, fail now.
+                # A retry whose wait would end past the deadline is not worth starting.
                 if not transient or attempt == FETCH_ATTEMPTS or clock() + backoff >= deadline:
                     raise
             self._sleep(backoff)
