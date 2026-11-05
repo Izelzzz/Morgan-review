@@ -45,6 +45,7 @@ from review_agents.models import (
     summary_usage,
 )
 from review_agents.pipeline.agent import AgentRun, Finding, run_dimension
+from review_agents.pipeline.conversation import ConversationLimits
 from review_agents.pipeline.merge import Candidate, Merged, merge, model_judge
 from review_agents.repo_config import RepoConfig, read_repo_config
 from review_agents.tools import RepoTools
@@ -332,6 +333,13 @@ def _run_dimensions(
     repo = conn.execute("SELECT repo, head_sha FROM reviews WHERE id = ?", (review_id,)).fetchone()
 
     starts: dict[str, str] = {}
+    assert settings.finder_model is not None  # noqa: S101 - checked when the review starts
+    limits = ConversationLimits(
+        window=settings.finder_model.context_tokens,
+        result_tokens=settings.tool_result_tokens,
+        shortened_tokens=settings.shortened_result_tokens,
+        output_reserve=settings.output_reserve_tokens,
+    )
 
     def work(job: Job) -> AgentRun:
         starts[job.node] = _utc_now()  # when the job runs, not when it was queued
@@ -346,6 +354,7 @@ def _run_dimensions(
             callbacks=[meter],
             deadline=deadline,
             clock=clock,
+            limits=limits,
         )
 
     pool = ThreadPoolExecutor(max_workers=settings.model_concurrency)

@@ -35,6 +35,7 @@ class ByDimension(BaseChatModel):
     scripts: dict[str, list[Any]]
     delay: dict[str, float] = Field(default_factory=dict)
     seen: list[str] = Field(default_factory=list)
+    sent: list[list[BaseMessage]] = Field(default_factory=list)
     lock: Any = Field(default_factory=threading.Lock)
 
     @property
@@ -59,6 +60,7 @@ class ByDimension(BaseChatModel):
         time.sleep(self.delay.get(dimension, 0.0))
         with self.lock:
             self.seen.append(dimension)
+            self.sent.append(list(messages))
             script = self.scripts.get(dimension) or [submit()]
             reply = script.pop(0) if len(script) > 1 else script[0]
         if isinstance(reply, Exception):
@@ -553,3 +555,18 @@ def test_the_judge_and_its_retries_fit_in_the_time_left(setup: Setup) -> None:
     setup.run(review_id, model, judge_for=judge_for, review_seconds=30.0)
 
     assert len(asked) == 1 and asked[0] * (MAX_RETRIES + 1) <= 30.0
+
+
+def test_the_review_keeps_tool_results_within_the_server_limits(setup: Setup) -> None:
+    setup.settings = setup.settings.model_copy(update={"tool_result_tokens": 10})
+    review_id = setup.queue()
+    read = AIMessage(
+        "",
+        tool_calls=[{"name": "read_file", "args": {"path": "payments/refund.py"}, "id": "r1"}],
+    )
+    model = ByDimension(scripts={"edge_cases": [read, submit()]})
+
+    setup.run(review_id, model)
+
+    results = [str(m.content) for sent in model.sent for m in sent if m.type == "tool"]
+    assert results and all("Shortened" in r for r in results)

@@ -13,9 +13,16 @@ from pydantic import Field
 from review_agents.context.pack import SHARED_RULES, ContextPack
 from review_agents.context.pr_layer import PrLayer, PrRequest
 from review_agents.context.repo_layer import RepoLayer
+from review_agents.context.tokens import estimate_tokens
 from review_agents.mirror import MirrorStore
 from review_agents.models import MAX_RETRIES, REQUEST_TIMEOUT_SECONDS, BudgetExceededError
 from review_agents.pipeline.agent import SUBMIT_TOOL, AgentRun, run_dimension
+from review_agents.pipeline.conversation import (
+    REPEATED,
+    ConversationLimits,
+    conversation_tokens,
+    shorten,
+)
 from review_agents.tools import RepoTools
 
 FILES: dict[str, str | bytes] = {
@@ -456,3 +463,97 @@ def test_each_model_call_is_bounded_by_the_time_left(repo_tools: RepoTools) -> N
     # and its retries together fit in those 10 seconds.
     assert timeouts[0] == REQUEST_TIMEOUT_SECONDS
     assert timeouts[1] * (MAX_RETRIES + 1) <= 10.0
+
+
+LONG = "\n".join(f"value_{n} = compute({n}, factor={n * 7})" for n in range(1, 3001)) + "\n"
+
+
+@pytest.fixture
+def long_tools(tmp_path: Path) -> RepoTools:
+    upstream = Upstream(tmp_path, "octo/shop")
+    head = upstream.commit({**FILES, "big/table.py": LONG}, "init")
+    store = MirrorStore(tmp_path / "repos", remote_base=str(upstream.base))
+    git_dir = store.sync("octo/shop", ["refs/heads/main"], [head], None)
+    return RepoTools(git_dir, "octo/shop", head, [])
+
+
+def run_limited(model: ScriptedModel, tools: RepoTools, limits: ConversationLimits) -> AgentRun:
+    return run_dimension(
+        lambda left: model,
+        pack(),
+        "edge_cases",
+        tools,
+        tool_calls=25,
+        callbacks=[],
+        deadline=float("inf"),
+        clock=lambda: 0.0,
+        limits=limits,
+    )
+
+
+def tool_texts(model: ScriptedModel) -> list[str]:
+    return [str(m.content) for m in model.sent[-1] if isinstance(m, ToolMessage)]
+
+
+def test_a_long_tool_result_keeps_its_head_and_tail_and_says_how_to_read_the_rest(
+    long_tools: RepoTools,
+) -> None:
+    model = ScriptedModel(script=[call("read_file", {"path": "big/table.py"}), submit()])
+
+    run_limited(model, long_tools, ConversationLimits(result_tokens=1000))
+
+    [text] = tool_texts(model)
+    assert estimate_tokens(text) <= 1200
+    assert "1: value_1 = " in text and "3000: value_3000 = " in text
+    assert "1500: value_1500 = " not in text
+    assert "start_line" in text  # how to read what was left out
+    assert text.rstrip().endswith("</untrusted>")  # still inside its data block
+
+
+def test_older_results_shrink_when_the_conversation_nears_the_window(
+    long_tools: RepoTools,
+) -> None:
+    reads = [
+        call("read_file", {"path": "big/table.py", "start_line": s, "end_line": s + 199}, f"c{s}")
+        for s in (1, 1001, 2001)
+    ]
+    model = ScriptedModel(script=[*reads, submit()])
+    limits = ConversationLimits(
+        window=9000, result_tokens=4000, shortened_tokens=100, output_reserve=500
+    )
+
+    run_limited(model, long_tools, limits)
+
+    sent = model.sent[-1]
+    assert conversation_tokens(sent) + 500 <= 9000
+    first, *_, last = tool_texts(model)
+    assert "Shortened" in first  # the oldest result gave way
+    assert "Shortened" not in last and "2200: value_2200" in last
+    assert last.rstrip().endswith("</untrusted>") and first.rstrip().endswith("</untrusted>")
+
+
+def test_the_third_identical_call_is_reminded_to_change_course(repo_tools: RepoTools) -> None:
+    same = [call("list_dir", {}, f"c{n}") for n in range(3)]
+    model = ScriptedModel(script=[*same, call("list_dir", {"path": "payments"}, "c9"), submit()])
+
+    run_limited(model, repo_tools, ConversationLimits())
+
+    texts = tool_texts(model)
+    assert [REPEATED in t for t in texts] == [False, False, True, False]
+
+
+def test_a_result_of_a_few_very_long_lines_is_still_cut_to_its_limit() -> None:
+    minified = "\n".join(["x" * 30_000, "y" * 30_000])  # two lines, about 20k tokens
+
+    text = shorten(minified, 500, "read_file")
+
+    assert estimate_tokens(text) <= 1200
+    assert text.startswith("[Shortened") and "x" in text and "y" in text
+
+
+def test_a_cut_by_characters_stays_within_its_limit_in_any_script() -> None:
+    chinese = "\n".join(["退款金额" * 5000, "订单状态" * 5000])  # about 1 token a character
+
+    text = shorten(chinese, 500, "search_code")
+
+    assert estimate_tokens(text) <= 1200
