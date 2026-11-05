@@ -20,7 +20,7 @@ from review_agents.context.git import Snapshot
 from review_agents.credentials import TokenVault
 from review_agents.db import connect, migrate
 from review_agents.mirror import MirrorStore
-from review_agents.models import MAX_RETRIES, BudgetExceededError
+from review_agents.models import BudgetExceededError
 from review_agents.pipeline.agent import SUBMIT_TOOL
 from review_agents.pipeline.merge import MERGE_TOOL
 from review_agents.pipeline.run import ReviewSuperseded, run_review, wait_for_summaries
@@ -541,7 +541,7 @@ def test_the_judge_is_not_asked_when_there_is_nothing_to_merge(setup: Setup) -> 
     assert asked == []
 
 
-def test_the_judge_and_its_retries_fit_in_the_time_left(setup: Setup) -> None:
+def test_the_judge_gets_the_time_left_to_the_deadline(setup: Setup) -> None:
     asked: list[float] = []
 
     def judge_for(timeout: float) -> JudgeAll:
@@ -552,4 +552,4 @@ def test_the_judge_and_its_retries_fit_in_the_time_left(setup: Setup) -> None:
     model = ByDimension(scripts={d: [submit(finding(d))] for d in ("edge_cases", "security")})
     setup.run(review_id, model, judge_for=judge_for, review_seconds=30.0)
 
-    assert len(asked) == 1 and asked[0] * (MAX_RETRIES + 1) <= 30.0
+    assert len(asked) == 1 and 0 < asked[0] <= 30.0  # the time to the review's deadline
