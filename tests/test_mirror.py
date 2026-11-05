@@ -252,3 +252,33 @@ def test_a_timeout_also_kills_the_processes_git_started(
     else:
         os.kill(helper, 9)
         pytest.fail("the helper process outlived the timeout")
+
+
+def test_a_fetch_never_outlasts_the_review(
+    tmp_path: Path, upstream: Upstream, fake_git: Callable[[str], Path]
+) -> None:
+    # The fetch alone may wait five minutes, but the review has 0.3 seconds left.
+    upstream.commit({"a.py": "x = 1\n"}, "init")
+    counter = fake_git("exec sleep 30")
+    store, slept = store_with_fake_sleep(tmp_path, upstream)
+
+    started = time.monotonic()
+    with pytest.raises(GitTimeoutError):
+        store.sync("octo/app", MAIN, [], token=None, deadline=started + 0.3)
+
+    assert time.monotonic() - started < 5
+    assert counter.read_text().strip() == "1"  # no time left to try again
+    assert slept == []
+
+
+def test_no_fetch_starts_once_the_review_has_no_time_left(
+    tmp_path: Path, upstream: Upstream, fake_git: Callable[[str], Path]
+) -> None:
+    upstream.commit({"a.py": "x = 1\n"}, "init")
+    counter = fake_git("true")
+    store, _ = store_with_fake_sleep(tmp_path, upstream)
+
+    with pytest.raises(GitTimeoutError, match="no time left"):
+        store.sync("octo/app", MAIN, [], token=None, deadline=time.monotonic() - 1)
+
+    assert not counter.exists()

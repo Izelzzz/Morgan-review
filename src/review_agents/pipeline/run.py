@@ -46,7 +46,7 @@ from review_agents.models import (
 )
 from review_agents.pipeline.agent import AgentRun, Finding, run_dimension
 from review_agents.pipeline.merge import Candidate, Merged, merge, model_judge
-from review_agents.repo_config import RepoConfig, read_repo_config
+from review_agents.repo_config import MAX_REVIEW_MINUTES, RepoConfig, read_repo_config
 from review_agents.tools import RepoTools
 
 # Builds the finder model for one agent; its argument bounds each call in seconds.
@@ -188,7 +188,12 @@ def run_review(
     # The default branch for the config and repository layer; the PR's own head ref,
     # which GitHub keeps for forks too, for the commits under review.
     refs = [f"refs/heads/{review['default_branch']}", f"refs/pull/{review['pr']}/head"]
-    git_dir = store.sync(repo, refs, [review["base_sha"], head], token)
+    # The repository's own, shorter limit is read from the mirror, so the sync is
+    # bounded by the longest review there can be (decision D-028).
+    longest = review_seconds if review_seconds is not None else MAX_REVIEW_MINUTES * 60
+    git_dir = store.sync(
+        repo, refs, [review["base_sha"], head], token, deadline=started_at + longest, clock=clock
+    )
     _step(conn, review_id, "mirror.sync", step)
     step = _now(conn)
     loaded = read_repo_config(git_dir, review["default_branch"])

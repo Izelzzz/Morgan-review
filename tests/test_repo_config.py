@@ -65,7 +65,7 @@ skill_additions:
     config = loaded.config
     assert config.enabled_dimensions == ["spec_drift", "edge_cases", "security", "verifiability"]
     assert config.limits.tokens_per_review == 200_000
-    assert config.limits.tool_calls_per_agent == 25
+    assert config.limits.tool_calls_per_agent == 50
     assert config.custom_rules[0].paths == ["payments/**"]
     assert config.skill_additions == {"security": ".github/review-agents/security.md"}
 
@@ -81,8 +81,8 @@ def test_at_least_one_dimension_must_stay_enabled() -> None:
 @pytest.mark.parametrize(
     ("limit", "value"),
     [
-        ("tool_calls_per_agent", 26),
-        ("review_minutes", 16),
+        ("tool_calls_per_agent", 51),
+        ("review_minutes", 31),
         ("full_review_rounds", 4),
         ("replies_per_thread", 11),
         ("nits_per_report", 6),
@@ -102,6 +102,12 @@ def test_the_token_budget_is_the_service_ceiling_unless_the_repository_lowers_it
     assert lowered.token_budget(ceiling=1_500_000) == 200_000
     assert raised.errors == []
     assert raised.config.limits.token_budget(ceiling=1_500_000) == 1_500_000
+
+
+def test_a_review_runs_30_minutes_and_an_agent_50_tool_calls_by_default() -> None:
+    limits = parse_repo_config("").config.limits  # decision D-028
+
+    assert (limits.review_minutes, limits.tool_calls_per_agent) == (30, 50)
 
 
 def test_limits_can_be_lowered() -> None:

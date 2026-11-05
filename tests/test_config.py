@@ -79,3 +79,7 @@ def test_the_review_token_budget_is_a_service_setting(monkeypatch: pytest.Monkey
     monkeypatch.setenv("REVIEW_AGENTS_TOKENS_PER_REVIEW", "800000")
 
     assert Settings().tokens_per_review == 800_000
+
+
+def test_the_wrap_up_keeps_the_last_ten_minutes_by_default() -> None:
+    assert Settings().wrap_up_seconds == 600  # decision D-028
