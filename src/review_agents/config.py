@@ -16,6 +16,13 @@ class ModelEndpoint(BaseModel):
     api_key: SecretStr | None = None
     # The model's context window, which sizes what one request may hold.
     context_tokens: int = Field(default=128_000, ge=8_000)
+    # Replies stream, and a stream with no data at all (heartbeats count) for
+    # `idle_seconds` is stalled; turned off, a whole reply must arrive within two minutes,
+    # for services that stream tool calls badly (decisions D-029, D-030).
+    stream: bool = True
+    idle_seconds: float = Field(default=300.0, gt=0)
+    # Retries of a rate limit, server error, stall, broken connection or empty reply.
+    max_retries: int = Field(default=4, ge=0)
 
 
 class Observability(BaseModel):
@@ -70,8 +77,8 @@ class Settings(BaseSettings):
     # the model service's rate limit; local models may want 1.
     model_concurrency: int = Field(default=5, ge=1)
     # Of a review's time, what is kept after the dimension phase for merging, verifying and
-    # writing the report (decision D-022); to be tuned from measurements (#17).
-    wrap_up_seconds: float = Field(default=240.0, ge=0)
+    # writing the findings (decisions D-022, D-028); to be tuned from measurements (#17).
+    wrap_up_seconds: float = Field(default=600.0, ge=0)
     # An agent's tool conversation stays inside the model's window (decision D-030): one
     # tool result keeps at most this many tokens, head and tail; when the conversation
     # would not fit, older results are cut to a head and tail this long each, keeping

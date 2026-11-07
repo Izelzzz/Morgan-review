@@ -15,7 +15,7 @@ from review_agents.context.pr_layer import PrLayer, PrRequest
 from review_agents.context.repo_layer import RepoLayer
 from review_agents.context.tokens import estimate_tokens
 from review_agents.mirror import MirrorStore
-from review_agents.models import MAX_RETRIES, REQUEST_TIMEOUT_SECONDS, BudgetExceededError
+from review_agents.models import BudgetExceededError
 from review_agents.pipeline.agent import SUBMIT_TOOL, AgentRun, run_dimension
 from review_agents.pipeline.conversation import (
     REMOVED,
@@ -460,10 +460,8 @@ def test_each_model_call_is_bounded_by_the_time_left(repo_tools: RepoTools) -> N
         clock=lambda: next(times),
     )
 
-    # Early on a call may take its full limit; 10 seconds before the deadline, the call
-    # and its retries together fit in those 10 seconds.
-    assert timeouts[0] == REQUEST_TIMEOUT_SECONDS
-    assert timeouts[1] * (MAX_RETRIES + 1) <= 10.0
+    # Each turn's model gets the time to the deadline; its retries never wait past it.
+    assert timeouts == [1000.0, 10.0]
 
 
 LONG = "\n".join(f"value_{n} = compute({n}, factor={n * 7})" for n in range(1, 3001)) + "\n"

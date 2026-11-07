@@ -21,7 +21,7 @@ from langchain_core.tools import StructuredTool
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
 from review_agents.context.pack import ContextPack
-from review_agents.models import MAX_RETRIES, REQUEST_TIMEOUT_SECONDS, BudgetExceededError
+from review_agents.models import BudgetExceededError
 from review_agents.pipeline.conversation import (
     Conversation,
     ConversationLimits,
@@ -133,8 +133,8 @@ def run_dimension(
 ) -> AgentRun:
     """Run one dimension agent to its findings, or to a recorded reason it stopped.
 
-    `model_for` builds the model for each turn from the seconds that call may take, so
-    no call, with its retries, runs past the deadline.
+    `model_for` builds the model for each turn from the seconds left to the deadline, so
+    no call, nor a wait before one of its retries, runs past it.
     """
     budget = ToolBudget(tool_calls)
     conversation = Conversation(limits)
@@ -158,14 +158,12 @@ def run_dimension(
         if final and not told_to_submit:
             messages.append(HumanMessage(SUBMIT_NOW))
             told_to_submit = True
-        # The client retries a failed call, so the time left is shared by every attempt.
-        timeout = max(1.0, min(REQUEST_TIMEOUT_SECONDS, (deadline - now) / (MAX_RETRIES + 1)))
         try:
             conversation.fit(messages)
         except ConversationTooLong as exc:  # sending it would only fail at the service
             run.reason = str(exc)
             return run
-        bound = model_for(timeout).bind_tools([submit] if final else [*schemas, submit])
+        bound = model_for(deadline - now).bind_tools([submit] if final else [*schemas, submit])
         try:
             reply = bound.invoke(messages, config={"callbacks": list(callbacks)})
         except BudgetExceededError as exc:

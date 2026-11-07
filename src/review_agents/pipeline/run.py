@@ -13,6 +13,7 @@ Merging duplicate findings and the three modes come next (pipeline design ยง4, ย
 import hashlib
 import json
 import logging
+import math
 import sqlite3
 import threading
 import time
@@ -36,8 +37,6 @@ from review_agents.credentials import TokenVault
 from review_agents.db import connect
 from review_agents.mirror import MirrorStore
 from review_agents.models import (
-    MAX_RETRIES,
-    REQUEST_TIMEOUT_SECONDS,
     TokenBudget,
     UsageMeter,
     chat_model,
@@ -47,10 +46,10 @@ from review_agents.models import (
 from review_agents.pipeline.agent import AgentRun, Finding, run_dimension
 from review_agents.pipeline.conversation import ConversationLimits
 from review_agents.pipeline.merge import Candidate, Merged, merge, model_judge
-from review_agents.repo_config import RepoConfig, read_repo_config
+from review_agents.repo_config import MAX_REVIEW_MINUTES, RepoConfig, read_repo_config
 from review_agents.tools import RepoTools
 
-# Builds the finder model for one agent; its argument bounds each call in seconds.
+# Builds a model for one call; its argument is the seconds left to that call's deadline.
 ModelFor = Callable[[float], BaseChatModel]
 log = logging.getLogger(__name__)
 _summaries: dict[str, threading.Thread] = {}
@@ -189,7 +188,12 @@ def run_review(
     # The default branch for the config and repository layer; the PR's own head ref,
     # which GitHub keeps for forks too, for the commits under review.
     refs = [f"refs/heads/{review['default_branch']}", f"refs/pull/{review['pr']}/head"]
-    git_dir = store.sync(repo, refs, [review["base_sha"], head], token)
+    # The repository's own, shorter limit is read from the mirror, so the sync is
+    # bounded by the longest review there can be (decision D-028).
+    longest = review_seconds if review_seconds is not None else MAX_REVIEW_MINUTES * 60
+    git_dir = store.sync(
+        repo, refs, [review["base_sha"], head], token, deadline=started_at + longest, clock=clock
+    )
     _step(conn, review_id, "mirror.sync", step)
     step = _now(conn)
     loaded = read_repo_config(git_dir, review["default_branch"])
@@ -224,7 +228,7 @@ def run_review(
     )
     if any(m.summary is None for m in repo_layer.modules):
         summarize = model_summarizer(
-            model_for(REQUEST_TIMEOUT_SECONDS),
+            model_for(math.inf),  # summaries belong to no review and have no deadline
             UsageMeter(
                 TokenBudget(settings.summary_tokens_per_build),
                 summary_usage(settings.db_path, repo),
@@ -282,10 +286,8 @@ def run_review(
     judge = None
     # One candidate has nothing to merge with; the judge is not asked.
     if judge_for is not None and len(candidates) > 1:
-        left = (deadline - clock()) / (MAX_RETRIES + 1)  # the client's retries share it
-        timeout = max(1.0, min(REQUEST_TIMEOUT_SECONDS, left))
         meter = UsageMeter(budget, review_usage(settings.db_path, review_id, "merge"))
-        judge = model_judge(judge_for(timeout), callbacks=[meter])
+        judge = model_judge(judge_for(deadline - clock()), callbacks=[meter])
     # A judge that fails or answers nonsense leaves the safe merge: the review still
     # completes, and the step says the merge was degraded.
     fallbacks: list[str] = []
@@ -438,10 +440,10 @@ def review_handler(
             settings=settings,
             vault=vault,
             store=store,
-            model_for=lambda timeout: chat_model(endpoint, timeout=timeout),
+            model_for=lambda left: chat_model(endpoint, time_left=left),
             # The merge is judged by the strong model (D-022); without one, only the safe
             # merge runs: one dimension's agent runs agreeing on overlapping lines.
-            judge_for=(lambda timeout: chat_model(verifier, timeout=timeout)) if verifier else None,
+            judge_for=(lambda left: chat_model(verifier, time_left=left)) if verifier else None,
         )
 
     return handle
