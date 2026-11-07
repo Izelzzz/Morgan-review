@@ -24,10 +24,41 @@ from review_agents.models import BudgetExceededError
 from review_agents.pipeline.agent import SUBMIT_TOOL
 from review_agents.pipeline.merge import MERGE_TOOL
 from review_agents.pipeline.run import ReviewSuperseded, run_review, wait_for_summaries
+from review_agents.pipeline.verify import VERIFY_TOOL
 from review_agents.repo_config import MAX_REVIEW_MINUTES
 from review_agents.worker import claim_next, recover_interrupted
 
 DIMENSION = re.compile(r"^name: (\w+)$", re.MULTILINE)
+VERIFIER = "You are now a verifier"
+TITLE = re.compile(r"^title: (.+)$", re.MULTILINE)
+PLACE = re.compile(r"^location: (.+):(\d+)-(\d+)$", re.MULTILINE)
+
+
+def holds(severity: str | None = None) -> dict[str, Any]:
+    return {"holds": True, "severity": severity}
+
+
+def does_not_hold() -> dict[str, Any]:
+    return {"holds": False}
+
+
+def _verdict(answer: dict[str, Any], finding_text: str) -> AIMessage:
+    place = PLACE.search(finding_text)
+    assert place is not None
+    args: dict[str, Any] = {"holds": answer["holds"], "reason": "Read the lines."}
+    if answer.get("severity"):
+        args["severity"] = answer["severity"]
+    if answer["holds"]:
+        args["evidence"] = [
+            {
+                "file": place.group(1),
+                "line_start": int(place.group(2)),
+                "line_end": int(place.group(3)),
+                "shows": "the amount is not clamped",
+            }
+        ]
+    call = {"name": VERIFY_TOOL, "args": args, "id": "v"}
+    return AIMessage("", tool_calls=[call])
 
 
 class ByDimension(BaseChatModel):
@@ -35,7 +66,12 @@ class ByDimension(BaseChatModel):
 
     scripts: dict[str, list[Any]]
     delay: dict[str, float] = Field(default_factory=dict)
+    # A verifier's answer by the finding's title: holds() unless given; an exception
+    # is raised. Delays by title too.
+    verdicts: dict[str, Any] = Field(default_factory=dict)
     seen: list[str] = Field(default_factory=list)
+    checked: list[str] = Field(default_factory=list)  # titles of the findings verified
+    order: list[str] = Field(default_factory=list)  # every call: a dimension or "verify:<title>"
     sent: list[list[BaseMessage]] = Field(default_factory=list)
     lock: Any = Field(default_factory=threading.Lock)
 
@@ -53,6 +89,22 @@ class ByDimension(BaseChatModel):
         run_manager: CallbackManagerForLLMRun | None = None,
         **kwargs: Any,
     ) -> ChatResult:
+        if any(VERIFIER in str(m.content) for m in messages):
+            # The finding's block; a short review may have told the verifier to answer now.
+            text = next(
+                str(m.content) for m in messages if '<untrusted source="finding">' in str(m.content)
+            )
+            match = TITLE.search(text)
+            assert match is not None
+            title = match.group(1)
+            time.sleep(self.delay.get(f"verify:{title}", 0.0))
+            with self.lock:
+                self.checked.append(title)
+                self.order.append(f"verify:{title}")
+            answer = self.verdicts.get(title, holds())
+            if isinstance(answer, Exception):
+                raise answer
+            return ChatResult(generations=[ChatGeneration(message=_verdict(answer, text))])
         task = next((str(m.content) for m in messages if DIMENSION.search(str(m.content))), "")
         match = DIMENSION.search(task)
         if match is None:  # a module summary for the repository layer
@@ -61,6 +113,7 @@ class ByDimension(BaseChatModel):
         time.sleep(self.delay.get(dimension, 0.0))
         with self.lock:
             self.seen.append(dimension)
+            self.order.append(dimension)
             self.sent.append(list(messages))
             script = self.scripts.get(dimension) or [submit()]
             reply = script.pop(0) if len(script) > 1 else script[0]
@@ -74,6 +127,7 @@ class JudgeAll(BaseChatModel):
 
     kind: bool = False
     text: bool = False  # answers in prose instead of calling the tool
+    listings: list[str] = Field(default_factory=list)  # the candidates it was shown
     unknown_id: bool = False  # names a candidate that does not exist
 
     @property
@@ -92,6 +146,7 @@ class JudgeAll(BaseChatModel):
     ) -> ChatResult:
         if self.text:
             return ChatResult(generations=[ChatGeneration(message=AIMessage("they look alike"))])
+        self.listings.append(str(messages[-1].content))
         ids = [int(i) for i in re.findall(r"^#(\d+) ", str(messages[-1].content), re.MULTILINE)]
         ids += [999] if self.unknown_id else []
         args = (
@@ -180,8 +235,9 @@ class Setup:
     def findings(self, review_id: int) -> list[dict[str, Any]]:
         with closing(connect(self.settings.db_path)) as conn:
             rows = conn.execute(
-                "SELECT primary_dimension, dimensions, severity, file, title, body, suggestion,"
-                " fingerprint, votes, locations FROM findings WHERE review_id = ? ORDER BY id",
+                "SELECT primary_dimension, dimensions, severity, reported_severity, file, title,"
+                " body, suggestion, fingerprint, votes, locations, verdict FROM findings"
+                " WHERE review_id = ? ORDER BY id",
                 (review_id,),
             ).fetchall()
         return [dict(row) for row in rows]
@@ -193,6 +249,13 @@ class Setup:
                 (review_id,),
             ).fetchall()
         return {row["node"]: (row["status"], row["error"]) for row in rows}
+
+    def notes(self, review_id: int) -> dict[str, str | None]:
+        with closing(connect(self.settings.db_path)) as conn:
+            rows = conn.execute(
+                "SELECT node, note FROM steps WHERE review_id = ? ORDER BY id", (review_id,)
+            ).fetchall()
+        return {row["node"]: row["note"] for row in rows}
 
     def review(self, review_id: int) -> dict[str, Any]:
         with closing(connect(self.settings.db_path)) as conn:
@@ -258,12 +321,12 @@ def test_a_dimension_still_running_at_its_deadline_is_left_behind(setup: Setup) 
     )
 
     started = time.monotonic()
-    setup.run(review_id, model, review_seconds=2.5, wrap_up_seconds=1.0)
+    setup.run(review_id, model, review_seconds=2.5, after_submit_seconds=1.0)
 
     assert time.monotonic() - started < 2.8  # it did not wait for the slow dimension
     assert [f["primary_dimension"] for f in setup.findings(review_id)] == ["edge_cases"]
     status, error = setup.steps(review_id)["dimension.security"]
-    assert status == "error" and "deadline" in (error or "")
+    assert status == "error" and "latest submit time" in (error or "")
     assert setup.review(review_id)["limit_hit"] == "time"
 
 
@@ -341,7 +404,7 @@ def test_after_a_restart_a_review_without_a_token_is_queued_once_more(setup: Set
     assert row["status"] == "failed" and "restart" in row["error"]
 
 
-def test_a_review_shorter_than_the_wrap_up_reserve_still_reviews(setup: Setup) -> None:
+def test_a_review_shorter_than_the_after_submit_reserve_still_reviews(setup: Setup) -> None:
     review_id = setup.queue()
     model = ByDimension(scripts={"edge_cases": [submit(finding("edge_cases"))]})
 
@@ -589,3 +652,196 @@ def test_the_review_keeps_tool_results_within_the_server_limits(setup: Setup) ->
 
     results = [str(m.content) for sent in model.sent for m in sent if m.type == "tool"]
     assert results and all("Shortened" in r for r in results)
+
+
+# Verification (issue #10; decisions D-027, D-031, D-032).
+
+
+def verify_steps(setup: Setup, review_id: int) -> dict[str, tuple[str, str | None]]:
+    return {k: v for k, v in setup.steps(review_id).items() if k.startswith("verify.")}
+
+
+def test_a_finding_is_published_only_once_a_verifier_says_it_holds(setup: Setup) -> None:
+    review_id = setup.queue()
+    model = ByDimension(scripts={"edge_cases": [submit(finding("edge_cases"))]})
+
+    setup.run(review_id, model)
+
+    assert model.checked == ["edge_cases: refunds can exceed the paid amount"]
+    [written] = setup.findings(review_id)
+    verdict = json.loads(written["verdict"])
+    assert verdict["holds"] is True and verdict["reason"] == "Read the lines."
+    assert verdict["evidence"][0]["file"] == "payments/refund.py"
+    assert written["severity"] == written["reported_severity"] == "important"
+    assert list(verify_steps(setup, review_id).values()) == [("ok", None)]
+
+
+def test_a_finding_that_does_not_hold_is_not_published_and_the_step_says_why(
+    setup: Setup,
+) -> None:
+    review_id = setup.queue()
+    wrong = finding("security", title="security: nothing at all", line_start=2, line_end=2)
+    model = ByDimension(
+        scripts={
+            "edge_cases": [submit(finding("edge_cases", line_start=1, line_end=1))],
+            "security": [submit(wrong)],
+        },
+        verdicts={"security: nothing at all": does_not_hold()},
+    )
+
+    setup.run(review_id, model)
+
+    assert [f["title"] for f in setup.findings(review_id)] == [
+        "edge_cases: refunds can exceed the paid amount"
+    ]
+    notes = [n for k, n in setup.notes(review_id).items() if k.startswith("verify.")]
+    assert any(n and "security: nothing at all" in n and "does not hold" in n for n in notes)
+
+
+def test_a_verifier_may_change_the_level_and_the_reported_one_is_kept(setup: Setup) -> None:
+    review_id = setup.queue()
+    model = ByDimension(
+        scripts={"edge_cases": [submit(finding("edge_cases"))]},
+        verdicts={"edge_cases: refunds can exceed the paid amount": holds("blocking")},
+    )
+
+    setup.run(review_id, model)
+
+    [written] = setup.findings(review_id)
+    assert (written["severity"], written["reported_severity"]) == ("blocking", "important")
+
+
+def test_nits_are_published_without_verification(setup: Setup) -> None:
+    review_id = setup.queue()
+    model = ByDimension(scripts={"edge_cases": [submit(finding("edge_cases", severity="nit"))]})
+
+    setup.run(review_id, model)
+
+    assert model.checked == []
+    [written] = setup.findings(review_id)
+    assert written["severity"] == "nit" and written["verdict"] is None
+
+
+def test_quick_mode_publishes_without_verification(setup: Setup) -> None:
+    review_id = setup.queue("mode: quick\n")
+    model = ByDimension(scripts={"edge_cases": [submit(finding("edge_cases"))]})
+
+    setup.run(review_id, model)
+
+    assert model.checked == []
+    assert len(setup.findings(review_id)) == 1
+
+
+def test_findings_are_verified_while_slower_dimensions_still_work(setup: Setup) -> None:
+    review_id = setup.queue()
+    model = ByDimension(
+        scripts={"edge_cases": [submit(finding("edge_cases"))]}, delay={"security": 1.0}
+    )
+
+    setup.run(review_id, model)
+
+    order = model.order
+    assert order.index("verify:edge_cases: refunds can exceed the paid amount") < order.index(
+        "security"
+    )
+
+
+def test_one_dimension_s_repeated_runs_are_verified_once(setup: Setup) -> None:
+    review_id = setup.queue("mode: deep\n")
+    model = ByDimension(scripts={"edge_cases": [submit(finding("edge_cases"))]})
+
+    setup.run(review_id, model)
+
+    assert model.checked == ["edge_cases: refunds can exceed the paid amount"]
+    [written] = setup.findings(review_id)
+    assert written["votes"] == 3
+
+
+def test_a_failed_verification_leaves_the_others_and_is_not_published(setup: Setup) -> None:
+    review_id = setup.queue()
+    broken = finding("security", title="security: unverifiable", line_start=2, line_end=2)
+    model = ByDimension(
+        scripts={
+            "edge_cases": [submit(finding("edge_cases", line_start=1, line_end=1))],
+            "security": [submit(broken)],
+        },
+        verdicts={"security: unverifiable": RuntimeError("verifier unavailable")},
+    )
+
+    setup.run(review_id, model)
+
+    assert [f["primary_dimension"] for f in setup.findings(review_id)] == ["edge_cases"]
+    errors = [e for status, e in verify_steps(setup, review_id).values() if status == "error"]
+    assert len(errors) == 1 and "verifier unavailable" in (errors[0] or "")
+
+
+def test_a_review_none_of_whose_findings_could_be_verified_fails(setup: Setup) -> None:
+    review_id = setup.queue()
+    title = "edge_cases: refunds can exceed the paid amount"
+    model = ByDimension(
+        scripts={"edge_cases": [submit(finding("edge_cases"))]},
+        verdicts={title: RuntimeError("verifier unavailable")},
+    )
+
+    with pytest.raises(RuntimeError, match="no finding could be verified"):
+        setup.run(review_id, model)
+
+    assert setup.findings(review_id) == []
+
+
+def test_a_review_with_nothing_to_verify_does_not_fail(setup: Setup) -> None:
+    review_id = setup.queue()
+
+    setup.run(review_id, ByDimension(scripts={}))
+
+    assert setup.findings(review_id) == [] and setup.review(review_id)["status"] == "done"
+
+
+def test_verifiers_use_the_verifier_model_when_there_is_one(setup: Setup) -> None:
+    review_id = setup.queue()
+    finder = ByDimension(scripts={"edge_cases": [submit(finding("edge_cases"))]})
+    verifier = ByDimension(scripts={})
+
+    setup.run(review_id, finder, verifier_for=lambda left: verifier)
+
+    assert finder.checked == []
+    assert verifier.checked == ["edge_cases: refunds can exceed the paid amount"]
+
+
+def test_a_finding_still_unverified_at_the_end_is_not_published(setup: Setup) -> None:
+    review_id = setup.queue()
+    slow = finding("security", title="security: slow to check", line_start=2, line_end=2)
+    model = ByDimension(
+        scripts={
+            "edge_cases": [submit(finding("edge_cases", line_start=1, line_end=1))],
+            "security": [submit(slow)],
+        },
+        delay={"verify:security: slow to check": 4.0},
+    )
+
+    started = time.monotonic()
+    setup.run(review_id, model, review_seconds=2.5, after_submit_seconds=1.5)
+
+    assert time.monotonic() - started < 3.5  # the review did not wait for it
+    assert [f["primary_dimension"] for f in setup.findings(review_id)] == ["edge_cases"]
+    errors = [e for status, e in verify_steps(setup, review_id).values() if status == "error"]
+    assert errors and "deadline" in (errors[0] or "")
+
+
+def test_only_verified_findings_are_merged(setup: Setup) -> None:
+    review_id = setup.queue()
+    judge = JudgeAll()
+    model = ByDimension(
+        scripts={
+            "edge_cases": [submit(finding("edge_cases"))],
+            "security": [submit(finding("security"))],
+            "spec_drift": [submit(finding("spec_drift", title="spec_drift: not real"))],
+        },
+        verdicts={"spec_drift: not real": does_not_hold()},
+    )
+
+    setup.run(review_id, model, judge_for=lambda left: judge)
+
+    assert "spec_drift: not real" not in "\n".join(judge.listings)
+    [merged] = setup.findings(review_id)
+    assert sorted(json.loads(merged["dimensions"])) == ["edge_cases", "security"]

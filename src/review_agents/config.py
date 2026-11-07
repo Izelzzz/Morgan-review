@@ -76,9 +76,10 @@ class Settings(BaseSettings):
     # Model calls one review makes at a time (decision D-022), so a large PR cannot set off
     # the model service's rate limit; local models may want 1.
     model_concurrency: int = Field(default=5, ge=1)
-    # Of a review's time, what is kept after the dimension phase for merging, verifying and
-    # writing the findings (decisions D-022, D-028); to be tuned from measurements (#17).
-    wrap_up_seconds: float = Field(default=600.0, ge=0)
+    # The dimension agents hand in their findings at the latest this long before the
+    # review's end, so the slowest one's findings can still be verified; the others are
+    # verified as soon as they hand in (decision D-031). To be tuned from measurements (#17).
+    after_submit_seconds: float = Field(default=600.0, ge=0)
     # An agent's tool conversation stays inside the model's window (decision D-030): one
     # tool result keeps at most this many tokens, head and tail; when the conversation
     # would not fit, older results are cut to a head and tail this long each, keeping
@@ -91,6 +92,19 @@ class Settings(BaseSettings):
     # agents look them up with their tools (decision D-015); kept for comparison in #17
     # and set by whoever runs the service, never by a reviewed repository (D-017).
     surrounding_code: bool = False
+
+    @model_validator(mode="after")
+    def _verifier_fits_the_context(self) -> Self:
+        # A verifier reads the same context pack as the dimension agents, which is sized
+        # for the finder model's window (decision D-032).
+        finder, verifier = self.finder_model, self.verifier_model
+        if finder and verifier and verifier.context_tokens < finder.context_tokens:
+            raise ValueError(
+                f"the verifier model's window ({verifier.context_tokens} tokens) is smaller"
+                f" than the finder model's ({finder.context_tokens}); a verifier reads the"
+                " same context, so give it a model with at least as large a window"
+            )
+        return self
 
     @property
     def db_path(self) -> Path:

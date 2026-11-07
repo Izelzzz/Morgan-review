@@ -91,5 +91,24 @@ def test_tool_results_have_the_decided_limits_by_default() -> None:
     ) == (10_000, 500, 4_000)
 
 
-def test_the_wrap_up_keeps_the_last_ten_minutes_by_default() -> None:
-    assert Settings().wrap_up_seconds == 600  # decision D-028
+def test_dimension_agents_submit_ten_minutes_before_the_end_by_default() -> None:
+    assert Settings().after_submit_seconds == 600  # decision D-031: by minute 20 of 30
+
+
+def endpoint(context_tokens: int, model: str) -> dict[str, object]:
+    return {"base_url": "http://127.0.0.1:9/v1", "model": model, "context_tokens": context_tokens}
+
+
+def test_a_verifier_model_with_a_smaller_window_is_refused() -> None:
+    # The verifier reads the dimension agents' whole context pack (decision D-032).
+    with pytest.raises(ValidationError, match="verifier model's window"):
+        Settings(
+            finder_model=endpoint(128_000, "finder"),  # type: ignore[arg-type]
+            verifier_model=endpoint(32_000, "verifier"),  # type: ignore[arg-type]
+        )
+
+    same = Settings(
+        finder_model=endpoint(128_000, "finder"),  # type: ignore[arg-type]
+        verifier_model=endpoint(128_000, "verifier"),  # type: ignore[arg-type]
+    )
+    assert same.verifier_model is not None
