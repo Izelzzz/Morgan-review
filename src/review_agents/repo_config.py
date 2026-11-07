@@ -54,14 +54,22 @@ class Dimensions(_Strict):
     verifiability: bool = True
 
 
+# The longest a review may run and the most tools one dimension agent may call: safety
+# nets, not design limits (decisions D-016, D-028); a repository can only lower them.
+MAX_REVIEW_MINUTES = 30
+MAX_TOOL_CALLS_PER_AGENT = 50
+
+
 class Limits(_Strict):
     """Each limit defaults to the service ceiling and can only be lowered."""
 
     # The ceiling is the service setting `tokens_per_review` (decision D-009); a value
     # above it is lowered to it, since the repository cannot see what it is.
     tokens_per_review: int | None = Field(default=None, ge=1)
-    tool_calls_per_agent: int = Field(default=25, ge=1, le=25)
-    review_minutes: int = Field(default=15, ge=1, le=15)
+    tool_calls_per_agent: int = Field(
+        default=MAX_TOOL_CALLS_PER_AGENT, ge=1, le=MAX_TOOL_CALLS_PER_AGENT
+    )
+    review_minutes: int = Field(default=MAX_REVIEW_MINUTES, ge=1, le=MAX_REVIEW_MINUTES)
     full_review_rounds: int = Field(default=3, ge=1, le=3)
     replies_per_thread: int = Field(default=10, ge=1, le=10)
     nits_per_report: int = Field(default=5, ge=0, le=5)

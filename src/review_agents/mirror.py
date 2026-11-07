@@ -2,6 +2,7 @@
 
 import base64
 import fcntl
+import math
 import os
 import random
 import re
@@ -144,12 +145,20 @@ class MirrorStore:
                 fcntl.flock(lock, fcntl.LOCK_UN)
 
     def sync(
-        self, repo: str, refs: Sequence[str], commits: Sequence[str], token: str | None
+        self,
+        repo: str,
+        refs: Sequence[str],
+        commits: Sequence[str],
+        token: str | None,
+        *,
+        deadline: float = math.inf,
+        clock: Callable[[], float] = time.monotonic,
     ) -> Path:
         """Fetch `refs` into the mirror, creating it on first use; return its git dir.
 
         Later syncs only transfer objects the mirror does not have yet. Every commit in
-        `commits` must be present afterwards.
+        `commits` must be present afterwards. No fetch, nor the wait before a retry, runs
+        past `deadline` (a `clock` time).
         """
         for ref in refs:
             if not ref.startswith("refs/") or any(c in ref for c in " :^~?*[\\"):
@@ -162,17 +171,26 @@ class MirrorStore:
             if not (git_dir / "HEAD").exists():
                 run_git(git_dir, "init", "--bare", "--quiet")
             refspecs = [f"+{ref}:{ref}" for ref in refs]
-            self._fetch(git_dir, [url, *refspecs], env, token)
+            self._fetch(git_dir, [url, *refspecs], env, token, deadline, clock)
             for sha in commits:
                 if not self.has_commit(git_dir, sha):
                     raise MissingCommitError(f"{repo} has no commit {sha} after fetching")
         return git_dir
 
     def _fetch(
-        self, git_dir: Path, args: list[str], env: dict[str, str], token: str | None
+        self,
+        git_dir: Path,
+        args: list[str],
+        env: dict[str, str],
+        token: str | None,
+        deadline: float,
+        clock: Callable[[], float],
     ) -> None:
         """Fetch, retrying transient failures with exponential backoff and jitter."""
         for attempt in range(1, FETCH_ATTEMPTS + 1):
+            left = deadline - clock()
+            if left <= 0:
+                raise GitTimeoutError("no time left in the review to fetch the repository")
             try:
                 run_git(
                     git_dir,
@@ -182,16 +200,18 @@ class MirrorStore:
                     *args,
                     env=env,
                     secret=token,
-                    timeout=self._fetch_timeout,
+                    timeout=min(self._fetch_timeout, left),
                 )
                 return
             except GitError as exc:
                 transient = isinstance(exc, GitTimeoutError) or bool(
                     _TRANSIENT_FETCH_ERRORS.search(str(exc))
                 )
-                if not transient or attempt == FETCH_ATTEMPTS:
+                backoff = 2**attempt + random.random()  # noqa: S311 - jitter, not security
+                # A retry whose wait would end past the deadline is not worth starting.
+                if not transient or attempt == FETCH_ATTEMPTS or clock() + backoff >= deadline:
                     raise
-            self._sleep(2**attempt + random.random())  # noqa: S311 - jitter, not security
+            self._sleep(backoff)
 
     @staticmethod
     def has_commit(git_dir: Path, sha: str) -> bool:
