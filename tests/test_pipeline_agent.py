@@ -20,6 +20,7 @@ from review_agents.pipeline.agent import SUBMIT_TOOL, AgentRun, run_dimension
 from review_agents.pipeline.conversation import (
     REMOVED,
     REPEATED,
+    Conversation,
     ConversationLimits,
     conversation_tokens,
     shorten,
@@ -592,3 +593,50 @@ def test_an_agent_whose_conversation_cannot_fit_stops_instead_of_sending_it(
     assert result.status == "incomplete"
     assert result.reason is not None and "window" in result.reason
     assert model.sent == []
+
+
+def test_the_tool_definitions_count_against_the_window() -> None:
+    # The tool definitions go with every request, so they take room like the messages do.
+    text = "\n".join(f"line {n}" for n in range(400))
+    messages: list[BaseMessage] = []
+    Conversation(ConversationLimits()).answer(messages, "c1", "read_file", {}, text)
+    size = conversation_tokens(messages)
+    limits = ConversationLimits(window=size + 100, shortened_tokens=20, output_reserve=0)
+    messages = []
+    conversation = Conversation(limits, overhead=500)
+    conversation.answer(messages, "c1", "read_file", {}, text)
+
+    conversation.fit(messages)
+
+    assert conversation_tokens(messages) + 500 <= size + 100
+    assert "Shortened" in str(messages[0].content)
+
+
+def test_a_call_whose_result_was_removed_may_be_made_again_without_a_reminder() -> None:
+    big = "\n".join(f"line {n}" for n in range(400))
+    # Room for two removal notes, not for two shortened results.
+    limits = ConversationLimits(
+        window=2 * estimate_tokens(REMOVED) + 5, shortened_tokens=20, output_reserve=0
+    )
+    conversation = Conversation(limits)
+    messages: list[BaseMessage] = []
+    for n in range(2):
+        conversation.answer(messages, f"c{n}", "list_dir", {}, big)
+
+    conversation.fit(messages)
+    assert [str(m.content) for m in messages] == [REMOVED, REMOVED]
+    conversation.answer(messages, "c2", "list_dir", {}, "payments/")
+
+    # The agent was told to call again for what was removed; that is not repeating itself.
+    assert REPEATED not in str(messages[-1].content)
+
+
+def test_an_agent_counts_its_tool_definitions_before_sending(repo_tools: RepoTools) -> None:
+    model = ScriptedModel(script=[submit()])
+    # Room for the context pack's messages, not for them and the tool definitions.
+    pack_size = conversation_tokens(pack().messages("edge_cases"))
+    limits = ConversationLimits(window=pack_size + 10, output_reserve=0)
+
+    result = run_limited(model, repo_tools, limits)
+
+    assert result.status == "incomplete" and model.sent == []

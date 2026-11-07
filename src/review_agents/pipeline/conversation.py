@@ -99,6 +99,7 @@ def conversation_tokens(messages: Sequence[BaseMessage]) -> int:
 class _Result:
     index: int  # where its ToolMessage sits in the conversation
     tool: str
+    key: str  # the call, tool and arguments, as counted for repeats
     text: str  # the result as the tool returned it, before any wrapping
     suffix: str  # what follows the data block, such as a repeat reminder
     shortened: bool = False
@@ -110,6 +111,8 @@ class Conversation:
     """The tool results of one agent's conversation, so they can be cut and re-wrapped."""
 
     limits: ConversationLimits
+    # Tokens every request carries besides the messages: the tool definitions.
+    overhead: int = 0
     _results: list[_Result] = field(default_factory=list)
     _calls: Counter[str] = field(default_factory=Counter)
 
@@ -126,7 +129,7 @@ class Conversation:
             else ""
         )
         text = shorten(result, self.limits.result_tokens // 2, tool)
-        self._results.append(_Result(len(messages), tool, text, suffix))
+        self._results.append(_Result(len(messages), tool, key, text, suffix))
         messages.append(_message(tool, text, suffix, call_id))
 
     def fit(self, messages: list[BaseMessage]) -> None:
@@ -137,7 +140,7 @@ class Conversation:
         when the rest alone is too large does this give up: a request larger than the
         window is never sent.
         """
-        room = self.limits.window - self.limits.output_reserve
+        room = self.limits.window - self.limits.output_reserve - self.overhead
         total = conversation_tokens(messages)  # counted once; each change adjusts it
         for removing in (False, True):
             for result in self._results:
@@ -149,6 +152,8 @@ class Conversation:
                 assert isinstance(old, ToolMessage)  # noqa: S101 - set by answer()
                 if removing:
                     result.removed = True
+                    # It was removed, not seen: calling it again is not repeating oneself.
+                    self._calls[result.key] -= 1
                     new = ToolMessage(REMOVED, tool_call_id=old.tool_call_id)
                 else:
                     result.text = shorten(result.text, self.limits.shortened_tokens, result.tool)
@@ -159,7 +164,8 @@ class Conversation:
         if total > room:
             raise ConversationTooLong(
                 f"the conversation needs about {total} tokens, more than the {room} the"
-                " model's window leaves after the room kept for the reply"
+                " model's window leaves after the tool definitions and the room kept for"
+                " the reply"
             )
 
 

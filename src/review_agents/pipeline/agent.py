@@ -9,6 +9,7 @@ A failure ends this agent only; the pipeline carries on with the other dimension
 """
 
 import functools
+import json
 import math
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
@@ -18,9 +19,11 @@ from langchain_core.callbacks import BaseCallbackHandler
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, ToolCall, ToolMessage
 from langchain_core.tools import StructuredTool
+from langchain_core.utils.function_calling import convert_to_openai_tool
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
 from review_agents.context.pack import ContextPack
+from review_agents.context.tokens import estimate_tokens
 from review_agents.models import BudgetExceededError
 from review_agents.pipeline.conversation import (
     Conversation,
@@ -137,10 +140,11 @@ def run_dimension(
     no call, nor a wait before one of its retries, runs past it.
     """
     budget = ToolBudget(tool_calls)
-    conversation = Conversation(limits)
     available = agent_tools(tools, budget)
     schemas = [StructuredTool.from_function(f, name=n) for n, f in available.items()]
     submit = _submit_tool()
+    definitions = [convert_to_openai_tool(t) for t in [*schemas, submit]]
+    conversation = Conversation(limits, overhead=estimate_tokens(json.dumps(definitions)))
     messages: list[BaseMessage] = list(pack.messages(dimension))
     run = AgentRun(dimension, "incomplete")
     # One retry each: a reply in text instead of a call, and a malformed submission.
