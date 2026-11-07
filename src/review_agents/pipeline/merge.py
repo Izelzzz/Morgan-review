@@ -59,7 +59,7 @@ class Merged:
     sources: list[Candidate] = dc_field(default_factory=list)
 
 
-def _overlaps(a: Finding, b: Finding) -> bool:
+def overlaps(a: Finding, b: Finding) -> bool:
     return a.file == b.file and a.line_start <= b.line_end and b.line_start <= a.line_end
 
 
@@ -91,7 +91,7 @@ def clusters(candidates: list[Candidate]) -> list[list[Candidate]]:
         (a.id, b.id)
         for n, a in enumerate(candidates)
         for b in candidates[n + 1 :]
-        if a.fingerprint == b.fingerprint or _overlaps(a.finding, b.finding)
+        if a.fingerprint == b.fingerprint or overlaps(a.finding, b.finding)
     )
     return _union(candidates, attrgetter("id"), pairs)
 
@@ -106,7 +106,7 @@ def _safe_groups(candidates: list[Candidate]) -> list[list[Candidate]]:
     """
 
     def agree(a: Candidate, b: Candidate) -> bool:
-        return a.finding.dimension == b.finding.dimension and _overlaps(a.finding, b.finding)
+        return a.finding.dimension == b.finding.dimension and overlaps(a.finding, b.finding)
 
     linked = _union(
         candidates,

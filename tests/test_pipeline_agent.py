@@ -1,4 +1,5 @@
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -408,7 +409,8 @@ def test_both_retries_still_fit_after_the_tools_are_used_up(repo_tools: RepoTool
 def test_each_model_call_is_bounded_by_the_time_left(repo_tools: RepoTools) -> None:
     timeouts: list[float] = []
     model = ScriptedModel(script=[call("list_dir", {}), submit()])
-    times = iter([0.0, 990.0])
+    # Read before each turn, and again once its model call has a slot.
+    times = iter([0.0, 0.0, 990.0, 990.0])
 
     def model_for(timeout: float) -> ScriptedModel:
         timeouts.append(timeout)
@@ -620,3 +622,55 @@ def test_a_finding_whose_place_cannot_be_checked_in_time_is_kept(
     # Not known to be wrong, only not checked: the verifier reads it again later.
     assert [f.title for f in result.findings] == ["A refund can exceed the paid amount"]
     assert result.dropped == []
+
+
+def test_each_model_call_waits_for_a_slot(repo_tools: RepoTools) -> None:
+    entered: list[int] = []
+
+    @contextmanager
+    def slot() -> Iterator[None]:
+        entered.append(len(model.sent))
+        yield
+
+    model = ScriptedModel(script=[call("list_dir", {}), submit()])
+
+    run_dimension(
+        lambda left: model,
+        pack(),
+        "edge_cases",
+        repo_tools,
+        tool_calls=25,
+        callbacks=[],
+        clock=lambda: 0.0,
+        slot=slot,
+    )
+
+    assert entered == [0, 1]  # each call is made inside its slot
+
+
+def test_time_spent_waiting_for_a_slot_counts_against_the_deadline(
+    repo_tools: RepoTools,
+) -> None:
+    now = [0.0]
+
+    @contextmanager
+    def slow_slot() -> Iterator[None]:
+        now[0] += 100.0  # waited behind calls of a higher priority
+        yield
+
+    model = ScriptedModel(script=[submit()])
+
+    result = run_dimension(
+        lambda left: model,
+        pack(),
+        "edge_cases",
+        repo_tools,
+        tool_calls=25,
+        callbacks=[],
+        deadline=60.0,
+        clock=lambda: now[0],
+        slot=slow_slot,
+    )
+
+    assert result.status == "incomplete" and result.limit_hit == "time"
+    assert model.sent == []

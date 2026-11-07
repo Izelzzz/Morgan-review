@@ -14,6 +14,7 @@ import functools
 import json
 import math
 from collections.abc import Callable, Sequence
+from contextlib import AbstractContextManager, nullcontext
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
@@ -41,6 +42,9 @@ from review_agents.tools import (
     agent_tools,
     clean_path,
 )
+
+# Held around each model call: the review's share of the model service (decision D-031).
+Slot = Callable[[], AbstractContextManager[object]]
 
 SUBMIT_TOOL = "submit_findings"
 # Turns beyond the tool calls: one to submit, one retry for a reply in text, one for a
@@ -161,6 +165,7 @@ def tool_loop[T](
     deadline: float,
     clock: Callable[[], float],
     limits: ConversationLimits,
+    slot: Slot = nullcontext,
 ) -> LoopEnd[T]:
     """Let a model read the code with read-only tools until it hands in its answer.
 
@@ -194,15 +199,25 @@ def tool_loop[T](
             end.reason = str(exc)
             return end
         offered = [submit.tool] if final else [*schemas, submit.tool]
-        bound = model_for(deadline - now).bind_tools(offered)
-        try:
-            reply = bound.invoke(messages, config={"callbacks": list(callbacks)})
-        except BudgetExceededError as exc:
-            end.reason, end.limit_hit = str(exc), "tokens"
-            return end
-        except Exception as exc:  # one agent failing must not fail the review
-            end.reason = f"{type(exc).__name__}: {exc}"
-            return end
+        # The review's model calls are shared out by priority (D-031); the time spent
+        # waiting for one counts, so the time left is measured once it is ours.
+        with slot():
+            left = deadline - clock()
+            if left <= 0:
+                end.reason, end.limit_hit = "the review's deadline passed", "time"
+                return end
+            try:
+                reply = (
+                    model_for(left)
+                    .bind_tools(offered)
+                    .invoke(messages, config={"callbacks": list(callbacks)})
+                )
+            except BudgetExceededError as exc:
+                end.reason, end.limit_hit = str(exc), "tokens"
+                return end
+            except Exception as exc:  # one agent failing must not fail the review
+                end.reason = f"{type(exc).__name__}: {exc}"
+                return end
         if not isinstance(reply, AIMessage):
             end.reason = "the model returned no message"
             return end
@@ -278,6 +293,7 @@ def run_dimension(
     deadline: float = math.inf,
     clock: Callable[[], float],
     limits: ConversationLimits = ConversationLimits(),  # noqa: B008 - frozen, shared safely
+    slot: Slot = nullcontext,
 ) -> AgentRun:
     """Run one dimension agent to its findings, or to a recorded reason it stopped."""
     submit = Submit(_submit_tool(), Submission.model_validate, "findings list", SUBMIT_NOW)
@@ -291,6 +307,7 @@ def run_dimension(
         deadline=deadline,
         clock=clock,
         limits=limits,
+        slot=slot,
     )
     run = AgentRun(
         dimension,

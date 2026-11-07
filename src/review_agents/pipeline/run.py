@@ -1,28 +1,37 @@
 """One review from the queue to its stored findings (pipeline design §2, §6, §7).
 
-The steps run in order in plain Python (decision D-023): sync the mirror, read the
-config from the default branch, build the context, run the dimension agents side by
-side, write the findings. Between steps the review checks that a newer push has not
-superseded it (decision D-010).
+The steps run in plain Python (decision D-023): sync the mirror, read the config from
+the default branch, build the context, find and verify, merge, write the findings.
+Between steps the review checks that a newer push has not superseded it (D-010).
 
-A dimension that fails or runs out of time ends alone and is recorded in `steps`; only
-a failure to get the code, a superseded review or a failed write ends the review.
-Merging duplicate findings and the three modes come next (pipeline design §4, §5).
+Finding and verifying have no time limits of their own (decision D-031). The dimension
+agents run side by side; as each hands in, its findings are verified at once, one
+verifier per finding, while the others still work. The review's model calls are shared
+out by priority: verifying a 🔴, then a 🟡, then a dimension agent's next turn, then a 🔵.
+The agents hand in at the latest `after_submit_seconds` before the end; what is still
+unverified at the end is not published. Only verified findings, and nits, which are not
+verified, are merged and written.
+
+A dimension or a verification that fails or runs out of time ends alone and is recorded
+in `steps`; only a failure to get the code, a superseded review, a failed write, or no
+finding that needed verifying getting a verdict ends the review.
 """
 
 import hashlib
 import json
 import logging
 import math
+import queue
 import sqlite3
 import threading
 import time
 from collections.abc import Callable
-from concurrent.futures import Future, ThreadPoolExecutor, wait
+from concurrent.futures import Future, ThreadPoolExecutor
 from contextlib import closing
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 from langchain_core.language_models import BaseChatModel
 
@@ -43,9 +52,11 @@ from review_agents.models import (
     review_usage,
     summary_usage,
 )
-from review_agents.pipeline.agent import AgentRun, Finding, run_dimension
+from review_agents.pipeline.agent import AgentRun, Finding, Severity, run_dimension
 from review_agents.pipeline.conversation import ConversationLimits
-from review_agents.pipeline.merge import Candidate, Merged, merge, model_judge
+from review_agents.pipeline.merge import Candidate, Merged, merge, model_judge, overlaps
+from review_agents.pipeline.schedule import DIMENSION_TURN, Slots, verify_priority
+from review_agents.pipeline.verify import VERIFIER_TOOL_CALLS, VerificationRun, run_verifier
 from review_agents.repo_config import MAX_REVIEW_MINUTES, RepoConfig, read_repo_config
 from review_agents.tools import RepoTools
 
@@ -107,12 +118,17 @@ def _now(conn: sqlite3.Connection) -> str:
 
 
 def _step(
-    conn: sqlite3.Connection, review_id: int, node: str, started: str, error: str | None = None
+    conn: sqlite3.Connection,
+    review_id: int,
+    node: str,
+    started: str,
+    error: str | None = None,
+    note: str | None = None,
 ) -> None:
     conn.execute(
-        "INSERT INTO steps (review_id, node, started_at, finished_at, status, error)"
-        " VALUES (?, ?, ?, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), ?, ?)",
-        (review_id, node, started, "error" if error else "ok", error),
+        "INSERT INTO steps (review_id, node, started_at, finished_at, status, error, note)"
+        " VALUES (?, ?, ?, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), ?, ?, ?)",
+        (review_id, node, started, "error" if error else "ok", error, note),
     )
 
 
@@ -133,13 +149,49 @@ def fingerprint(snapshot: Snapshot, finding: Finding) -> str:
     return hashlib.sha256(f"{finding.file}\n{code}".encode()).hexdigest()
 
 
-def _insert_finding(conn: sqlite3.Connection, review_id: int, merged: Merged) -> None:
+@dataclass
+class _Check:
+    """One verification, and the same dimension's duplicates waiting on its verdict."""
+
+    number: int
+    members: list[Candidate]
+    pack: ContextPack
+    started: str = ""
+    run: VerificationRun | None = None
+
+    @property
+    def lead(self) -> Candidate:
+        return self.members[0]
+
+    def takes(self, candidate: Candidate) -> bool:
+        """The plain duplicate rule of the safe merge (D-024): one dimension, every pair of
+        lines overlapping, each agent run once. Such a copy needs no verifier of its own."""
+        return candidate.agent not in {m.agent for m in self.members} and all(
+            m.finding.dimension == candidate.finding.dimension
+            and overlaps(m.finding, candidate.finding)
+            for m in self.members
+        )
+
+
+@dataclass
+class _Published:
+    """What is known of each published candidate besides its finding."""
+
+    reported: dict[int, Severity] = field(default_factory=dict)
+    verdicts: dict[int, dict[str, object]] = field(default_factory=dict)
+
+
+def _insert_finding(
+    conn: sqlite3.Connection, review_id: int, merged: Merged, published: _Published
+) -> None:
     finding = merged.finding
     lead = next(c for c in merged.sources if c.finding is finding)
+    verdict = published.verdicts.get(lead.id)
     conn.execute(
         "INSERT INTO findings (review_id, fingerprint, primary_dimension, dimensions, severity,"
         " preexisting, file, line_start, line_end, title, body, suggestion, evidence, votes,"
-        " locations) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        " locations, reported_severity, verdict)"
+        " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (
             review_id,
             lead.fingerprint,
@@ -156,6 +208,8 @@ def _insert_finding(conn: sqlite3.Connection, review_id: int, merged: Merged) ->
             finding.evidence,
             merged.votes,
             json.dumps(merged.locations),
+            published.reported.get(lead.id, finding.severity),
+            json.dumps(verdict) if verdict is not None else None,
         ),
     )
 
@@ -169,11 +223,16 @@ def run_review(
     store: MirrorStore,
     model_for: ModelFor,
     judge_for: ModelFor | None = None,
+    verifier_for: ModelFor | None = None,
     clock: Callable[[], float] = time.monotonic,
     review_seconds: float | None = None,
-    wrap_up_seconds: float | None = None,
+    after_submit_seconds: float | None = None,
 ) -> None:
-    """Review one claimed review and store its findings; raise if it cannot be done."""
+    """Review one claimed review and store its findings; raise if it cannot be done.
+
+    `judge_for` merges and `verifier_for` verifies; without a verifier model the finder
+    model verifies (D-027), and without a judge only the safe merge runs (D-024).
+    """
     if settings.finder_model is None:
         raise RuntimeError("no finder model is configured")
     started_at = clock()
@@ -205,9 +264,11 @@ def run_review(
         review_seconds if review_seconds is not None else limits.review_minutes * 60
     )
     total = deadline - started_at
-    reserve = wrap_up_seconds if wrap_up_seconds is not None else settings.wrap_up_seconds
-    # A repository may shorten the review below the reserve; the dimensions keep most of it.
-    dimension_deadline = deadline - min(reserve, total / 3)
+    reserve = (
+        after_submit_seconds if after_submit_seconds is not None else settings.after_submit_seconds
+    )
+    # A repository may shorten the review below the reserve; the agents keep two thirds.
+    submit_by = deadline - min(reserve, total / 3)
     budget = TokenBudget(limits.token_budget(settings.tokens_per_review))
     skip = config.effective_skip_paths
     window = settings.finder_model.context_tokens
@@ -258,48 +319,65 @@ def run_review(
         for index, pack in enumerate(packs, start=1)
         for dimension in dimensions
     ]
-    runs = _run_dimensions(
+    # Quick mode publishes what it finds unverified (pipeline design §5).
+    verifying = config.mode != "quick"
+    if verifying and verifier_for is None:
+        _step(
+            conn,
+            review_id,
+            "verifier.model",
+            _now(conn),
+            note="no verifier model: the finder verifies",
+        )
+    work = _Work(
         conn,
         review_id,
-        jobs,
         settings=settings,
         token=token,
         git_dir=git_dir,
         skip=skip,
+        snapshot=Snapshot(git_dir, head, tuple(skip)),
         tool_calls=limits.tool_calls_per_agent,
         budget=budget,
         model_for=model_for,
+        verifier_for=verifier_for or model_for,
         clock=clock,
-        deadline=dimension_deadline,
     )
-
+    runs, checks, accepted, published = work.find_and_verify(
+        jobs, submit_by=submit_by, deadline=deadline, verifying=verifying
+    )
+    # A newer push makes this review superseded, whatever else went wrong in it.
     _check_not_superseded(conn, review_id)
-    snapshot = Snapshot(git_dir, head, tuple(skip))
-    candidates = [
-        Candidate(index, item, job.run, fingerprint(snapshot, item), job.node)
-        for index, (job, item) in enumerate(
-            ((job, item) for job, run in zip(jobs, runs, strict=True) for item in run.findings),
-            start=1,
-        )
-    ]
+    # D-004 as D-027 has it: findings that needed a verifier, none of which got a verdict,
+    # mean the verification itself failed; publishing the nits alone would hide that.
+    if checks and not any(c.run is not None and c.run.verdict is not None for c in checks):
+        first = next((c.run.reason for c in checks if c.run and c.run.reason), "no verdict")
+        raise RuntimeError(f"no finding could be verified ({len(checks)} tried): {first}")
+
     step = _now(conn)
     judge = None
-    # One candidate has nothing to merge with; the judge is not asked.
-    if judge_for is not None and len(candidates) > 1:
-        meter = UsageMeter(budget, review_usage(settings.db_path, review_id, "merge"))
-        judge = model_judge(judge_for(deadline - clock()), callbacks=[meter])
+    fallbacks: list[str] = []
+    # One candidate has nothing to merge with; the judge is not asked. It has until the
+    # review's end; without time left, the safe merge takes its place at once.
+    if judge_for is not None and len(accepted) > 1:
+        left = deadline - clock()
+        if left > 0:
+            meter = UsageMeter(budget, review_usage(settings.db_path, review_id, "merge"))
+            judge = model_judge(judge_for(left), callbacks=[meter])
+        else:
+            fallbacks.append("no time left to judge the merge")
     # A judge that fails or answers nonsense leaves the safe merge: the review still
     # completes, and the step says the merge was degraded.
-    fallbacks: list[str] = []
-    merged = merge(candidates, judge, fallbacks.append)
+    merged = merge(accepted, judge, fallbacks.append)
     _step(conn, review_id, "merge", step, fallbacks[0] if fallbacks else None)
-    limit_hit = next((lim for lim in _LIMIT_ORDER if any(r.limit_hit == lim for r in runs)), None)
+    hits = [r.limit_hit for r in runs] + [c.run.limit_hit for c in checks if c.run]
+    limit_hit = next((lim for lim in _LIMIT_ORDER if lim in hits), None)
     # The findings and the review's end state commit together (reliability §5.3): never
     # half a review, and a review with stored findings is never claimed and run again.
     conn.execute("BEGIN IMMEDIATE")
     try:
         for item in merged:
-            _insert_finding(conn, review_id, item)
+            _insert_finding(conn, review_id, item, published)
         conn.execute(
             "UPDATE reviews SET limit_hit = ?, status = 'done', error = NULL,"
             " finished_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = ?",
@@ -311,76 +389,266 @@ def run_review(
         raise
 
 
-def _run_dimensions(
-    conn: sqlite3.Connection,
-    review_id: int,
-    jobs: list[Job],
-    *,
-    settings: Settings,
-    token: str | None,
-    git_dir: Path,
-    skip: list[str],
-    tool_calls: int,
-    budget: TokenBudget,
-    model_for: ModelFor,
-    clock: Callable[[], float],
-    deadline: float,
-) -> list[AgentRun]:
-    """Every job side by side, at most `model_concurrency` at once, until the deadline.
+class _Work:
+    """The dimension agents and the verifiers of one review, sharing its model calls."""
 
-    A job still running at the deadline is left behind: every model call it makes is
-    built with a timeout that fits, retries included, in the time left, so its thread
-    ends by the deadline plus at most the one-second floor of a call's timeout.
-    """
-    repo = conn.execute("SELECT repo, head_sha FROM reviews WHERE id = ?", (review_id,)).fetchone()
+    def __init__(
+        self,
+        conn: sqlite3.Connection,
+        review_id: int,
+        *,
+        settings: Settings,
+        token: str | None,
+        git_dir: Path,
+        skip: list[str],
+        snapshot: Snapshot,
+        tool_calls: int,
+        budget: TokenBudget,
+        model_for: ModelFor,
+        verifier_for: ModelFor,
+        clock: Callable[[], float],
+    ) -> None:
+        assert settings.finder_model is not None  # noqa: S101 - checked when the review starts
+        self.conn, self.review_id, self.settings = conn, review_id, settings
+        self.token, self.git_dir, self.skip, self.snapshot = token, git_dir, skip, snapshot
+        self.tool_calls, self.budget, self.clock = tool_calls, budget, clock
+        self.model_for, self.verifier_for = model_for, verifier_for
+        row = conn.execute("SELECT repo, head_sha FROM reviews WHERE id = ?", (review_id,))
+        self.repo, self.head = row.fetchone()
+        self.slots = Slots(settings.model_concurrency)
+        self.events: queue.Queue[tuple[str, object, Future[Any] | None]] = queue.Queue()
+        self.starts: dict[str, str] = {}
+        self.candidates = 0  # ids given so far
 
-    starts: dict[str, str] = {}
-    assert settings.finder_model is not None  # noqa: S101 - checked when the review starts
-    limits = ConversationLimits(
-        window=settings.finder_model.context_tokens,
-        result_tokens=settings.tool_result_tokens,
-        shortened_tokens=settings.shortened_result_tokens,
-        output_reserve=settings.output_reserve_tokens,
-    )
-
-    def work(job: Job) -> AgentRun:
-        starts[job.node] = _utc_now()  # when the job runs, not when it was queued
-        tools = RepoTools(git_dir, repo["repo"], repo["head_sha"], skip, token=token)
-        meter = UsageMeter(budget, review_usage(settings.db_path, review_id, job.dimension))
-        return run_dimension(
-            model_for,
-            job.pack,
-            job.dimension,
-            tools,
-            tool_calls=tool_calls,
-            callbacks=[meter],
-            deadline=deadline,
-            clock=clock,
-            limits=limits,
+    def _limits(self, endpoint_tokens: int) -> ConversationLimits:
+        return ConversationLimits(
+            window=endpoint_tokens,
+            result_tokens=self.settings.tool_result_tokens,
+            shortened_tokens=self.settings.shortened_result_tokens,
+            output_reserve=self.settings.output_reserve_tokens,
         )
 
-    pool = ThreadPoolExecutor(max_workers=settings.model_concurrency)
-    futures: dict[Future[AgentRun], Job] = {pool.submit(work, job): job for job in jobs}
-    try:
-        wait(futures, timeout=max(0.0, deadline - clock()))
-    finally:
-        pool.shutdown(wait=False, cancel_futures=True)
-    runs = []
-    for future, job in futures.items():
-        if not future.done():
+    def _tools(self) -> RepoTools:
+        return RepoTools(self.git_dir, self.repo, self.head, self.skip, token=self.token)
+
+    def find_and_verify(
+        self, jobs: list[Job], *, submit_by: float, deadline: float, verifying: bool
+    ) -> tuple[list[AgentRun], list[_Check], list[Candidate], _Published]:
+        """Every job side by side, each one's findings verified as soon as it hands in.
+
+        Waits for the agents until `submit_by` and for the verifiers until `deadline`.
+        What is still running then is left behind: every model call it makes is built
+        to end, retries included, by its deadline, so its thread ends soon after.
+        """
+        settings = self.settings
+        assert settings.finder_model is not None  # noqa: S101 - checked when the review starts
+        finder_limits = self._limits(settings.finder_model.context_tokens)
+        verifier = settings.verifier_model or settings.finder_model
+        verifier_limits = self._limits(verifier.context_tokens)
+
+        def find(job: Job) -> AgentRun:
+            self.starts[job.node] = _utc_now()  # when the job runs, not when it was queued
+            meter = UsageMeter(
+                self.budget, review_usage(settings.db_path, self.review_id, job.dimension)
+            )
+            return run_dimension(
+                self.model_for,
+                job.pack,
+                job.dimension,
+                self._tools(),
+                tool_calls=self.tool_calls,
+                callbacks=[meter],
+                deadline=submit_by,
+                clock=self.clock,
+                limits=finder_limits,
+                slot=lambda: self.slots.held(DIMENSION_TURN),
+            )
+
+        def verify(check: _Check) -> None:
+            # Each check has a thread of its own and competes for model calls by priority
+            # (Slots): a pool would let checks already started hold every thread until
+            # they end, and a 🔴 handed in later would wait behind them.
+            check.started = _utc_now()
+            meter = UsageMeter(
+                self.budget, review_usage(settings.db_path, self.review_id, "verify")
+            )
+            priority = verify_priority(check.lead.finding.severity)
+            try:
+                run = run_verifier(
+                    self.verifier_for,
+                    check.pack,
+                    check.lead.finding,
+                    self._tools(),
+                    tool_calls=VERIFIER_TOOL_CALLS,
+                    callbacks=[meter],
+                    deadline=deadline,
+                    clock=self.clock,
+                    limits=verifier_limits,
+                    slot=lambda: self.slots.held(priority),
+                )
+            except Exception as exc:  # one verification failing must not fail the review
+                run = VerificationRun(
+                    check.lead.finding, "incomplete", reason=f"{type(exc).__name__}: {exc}"
+                )
+            # Only the review's thread stores the result.
+            self.events.put(("verified", (check, run), None))
+
+        finders = ThreadPoolExecutor(settings.model_concurrency, thread_name_prefix="find")
+        runs: dict[int, AgentRun] = {}  # by the job's place in `jobs`: a Job is not hashable
+        checks: list[_Check] = []
+        accepted: list[Candidate] = []
+        published = _Published()
+        unverified = 0
+
+        def done(kind: str, item: object) -> Callable[[Future[Any]], None]:
+            return lambda future: self.events.put((kind, item, future))
+
+        try:
+            for index, job in enumerate(jobs):
+                finders.submit(find, job).add_done_callback(done("found", index))
+            while True:
+                now = self.clock()
+                agents_out = len(runs) < len(jobs) and now < submit_by
+                checking = unverified > 0 and now < deadline
+                if not (agents_out or checking):
+                    break
+                try:
+                    kind, item, future = self.events.get(
+                        timeout=max(0.0, (deadline if checking else submit_by) - now)
+                    )
+                except queue.Empty:
+                    continue
+                if kind == "found":
+                    assert isinstance(item, int) and future is not None  # noqa: S101
+                    job = jobs[item]
+                    run = self._agent_run(job, future)
+                    runs[item] = run
+                    for candidate in self._candidates(job, run):
+                        finding = candidate.finding
+                        if not verifying or finding.severity == "nit":
+                            published.reported[candidate.id] = finding.severity
+                            accepted.append(candidate)
+                            continue
+                        same = next(
+                            (c for c in checks if c.pack is job.pack and c.takes(candidate)), None
+                        )
+                        if same is not None:
+                            same.members.append(candidate)
+                            if same.run is not None and same.run.verdict is not None:
+                                self._accept(same, [candidate], accepted, published)
+                            continue
+                        check = _Check(len(checks) + 1, [candidate], job.pack)
+                        checks.append(check)
+                        unverified += 1
+                        # A daemon: one still running at the deadline is left behind.
+                        threading.Thread(
+                            target=verify, args=(check,), name=f"verify-{check.number}", daemon=True
+                        ).start()
+                else:
+                    unverified -= 1
+                    assert isinstance(item, tuple)  # noqa: S101
+                    check, verification = item
+                    check.run = verification
+                    self._record(check)
+                    self._accept(check, check.members, accepted, published)
+        finally:
+            finders.shutdown(wait=False, cancel_futures=True)
+        for index, job in enumerate(jobs):
+            if index not in runs:
+                started = job.node in self.starts
+                run = AgentRun(job.dimension, "incomplete", limit_hit="time")
+                run.reason = (
+                    "did not hand in its findings by the latest submit time"
+                    if started
+                    else "not started before the latest submit time"
+                )
+                runs[index] = run
+                _step(
+                    self.conn,
+                    self.review_id,
+                    job.node,
+                    self.starts.get(job.node, _now(self.conn)),
+                    run.reason,
+                )
+        for check in checks:
+            if check.run is None:
+                check.run = VerificationRun(
+                    check.lead.finding,
+                    "incomplete",
+                    reason="the review's deadline passed before it was verified",
+                    limit_hit="time",
+                )
+                self._record(check)
+        return [runs[index] for index in range(len(jobs))], checks, accepted, published
+
+    def _agent_run(self, job: Job, future: Future[Any]) -> AgentRun:
+        if future.cancelled():
             run = AgentRun(job.dimension, "incomplete", limit_hit="time")
-            run.reason = "did not finish before the dimension phase deadline"
-        elif future.cancelled():
-            run = AgentRun(job.dimension, "incomplete", limit_hit="time")
-            run.reason = "not started before the dimension phase deadline"
+            run.reason = "not started before the latest submit time"
         elif (exc := future.exception()) is not None:
             run = AgentRun(job.dimension, "incomplete", reason=f"{type(exc).__name__}: {exc}")
         else:
-            run = future.result()
+            result = future.result()
+            assert isinstance(result, AgentRun)  # noqa: S101
+            run = result
         error = None if run.status == "done" else (run.reason or "incomplete")
-        _step(conn, review_id, job.node, starts.get(job.node, _now(conn)), error)
-        runs.append(run)
-    return runs
+        _step(
+            self.conn, self.review_id, job.node, self.starts.get(job.node, _now(self.conn)), error
+        )
+        return run
+
+    def _candidates(self, job: Job, run: AgentRun) -> list[Candidate]:
+        made = []
+        for item in run.findings:
+            self.candidates += 1
+            made.append(
+                Candidate(
+                    self.candidates, item, job.run, fingerprint(self.snapshot, item), job.node
+                )
+            )
+        return made
+
+    def _accept(
+        self,
+        check: _Check,
+        members: list[Candidate],
+        accepted: list[Candidate],
+        published: _Published,
+    ) -> None:
+        if check.run is None or check.run.verdict is None or not check.run.verdict.holds:
+            return
+        verdict = check.run.verdict
+        record: dict[str, object] = {
+            "holds": True,
+            "reason": verdict.reason,
+            "evidence": [e.model_dump() for e in verdict.evidence],
+        }
+        for member in members:
+            finding = member.finding.model_copy(update={"severity": verdict.severity})
+            kept = Candidate(member.id, finding, member.run, member.fingerprint, member.agent)
+            published.reported[member.id] = member.finding.severity
+            published.verdicts[member.id] = record
+            accepted.append(kept)
+
+    def _record(self, check: _Check) -> None:
+        run = check.run
+        assert run is not None  # noqa: S101
+        title = check.lead.finding.title
+        started = check.started or _now(self.conn)
+        node = f"verify.{check.number}"
+        if run.verdict is None:
+            _step(
+                self.conn, self.review_id, node, started, f"{title}: {run.reason or 'incomplete'}"
+            )
+            return
+        verdict, reported = run.verdict, check.lead.finding.severity
+        if not verdict.holds:
+            note = f"{title}: does not hold: {verdict.reason}"
+        elif verdict.severity != reported:
+            note = f"{title}: holds at {verdict.severity} (reported {reported})"
+        else:
+            note = f"{title}: holds"
+        _step(self.conn, self.review_id, node, started, note=note)
 
 
 def summarize_in_background(
@@ -444,6 +712,8 @@ def review_handler(
             # The merge is judged by the strong model (D-022); without one, only the safe
             # merge runs: one dimension's agent runs agreeing on overlapping lines.
             judge_for=(lambda left: chat_model(verifier, time_left=left)) if verifier else None,
+            # Without a verifier model, the finder model verifies (D-027).
+            verifier_for=(lambda left: chat_model(verifier, time_left=left)) if verifier else None,
         )
 
     return handle
