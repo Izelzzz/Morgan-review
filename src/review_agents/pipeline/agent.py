@@ -1,5 +1,7 @@
 """One dimension agent: read the code with read-only tools, then submit findings.
 
+The loop is shared with the verifier, which hands in a verdict instead of findings.
+
 Two layers make sure an agent stops (agent tools doc §5). The tool layer refuses calls
 past the limit. The loop layer offers only the submit tool once the tool calls are
 used up or the deadline is close, and gives up after `MAX_TURNS_AFTER_TOOLS` more
@@ -13,7 +15,7 @@ import json
 import math
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
-from typing import Literal
+from typing import Any, Literal
 
 from langchain_core.callbacks import BaseCallbackHandler
 from langchain_core.language_models import BaseChatModel
@@ -45,12 +47,13 @@ SUBMIT_TOOL = "submit_findings"
 MAX_TURNS_AFTER_TOOLS = 3
 # Below this much time before the deadline, the agent may only submit.
 SUBMIT_MARGIN_SECONDS = 30.0
-SUBMIT_ONLY = f"Not run: only {SUBMIT_TOOL} is available now."
-SUBMIT_IGNORED = "Ignored: only the last submission of a turn counts."
 SUBMIT_NOW = (
     f"Stop investigating. Call {SUBMIT_TOOL} now with the findings you have; an empty"
     " list is a valid review."
 )
+
+
+Severity = Literal["blocking", "important", "robustness", "nit"]
 
 
 class Finding(BaseModel):
@@ -60,7 +63,7 @@ class Finding(BaseModel):
 
     title: str = Field(min_length=1)
     # Set to the agent's own dimension: a model's spelling of it is not checked.
-    severity: Literal["blocking", "important", "robustness", "nit"]
+    severity: Severity
     dimension: str
     file: str = Field(min_length=1)
     line_start: int = Field(ge=1)
@@ -122,6 +125,145 @@ def check(finding: Finding, line_count: Callable[[str], int | None]) -> str | No
     return None
 
 
+@dataclass(frozen=True)
+class Submit[T]:
+    """How an agent hands in its answer: the tool, how its arguments are read, and words."""
+
+    tool: StructuredTool
+    parse: Callable[[dict[str, Any]], T]  # raises ValidationError on a malformed answer
+    what: str  # what is handed in, as the agent is told: "findings", "verdict"
+    now: str  # told once only the submit tool is left
+
+    @property
+    def name(self) -> str:
+        return self.tool.name
+
+
+@dataclass
+class LoopEnd[T]:
+    """How a tool loop ended: with the parsed answer, or with the reason it did not."""
+
+    answer: T | None = None
+    reason: str | None = None
+    limit_hit: Literal["time", "tokens", "tool_calls"] | None = None
+    tool_calls: int = 0
+
+
+def tool_loop[T](
+    model_for: Callable[[float], BaseChatModel],
+    messages: list[BaseMessage],
+    tools: RepoTools,
+    submit: Submit[T],
+    *,
+    tool_calls: int,
+    callbacks: Sequence[BaseCallbackHandler],
+    deadline: float,
+    clock: Callable[[], float],
+    limits: ConversationLimits,
+) -> LoopEnd[T]:
+    """Let a model read the code with read-only tools until it hands in its answer.
+
+    `model_for` builds the model for each turn from the seconds left to the deadline, so
+    no call, nor a wait before one of its retries, runs past it.
+    """
+    budget = ToolBudget(tool_calls)
+    available = agent_tools(tools, budget)
+    schemas = [StructuredTool.from_function(f, name=n) for n, f in available.items()]
+    definitions = [convert_to_openai_tool(t) for t in [*schemas, submit.tool]]
+    conversation = Conversation(limits, overhead=estimate_tokens(json.dumps(definitions)))
+    end: LoopEnd[T] = LoopEnd()
+    # One retry each: a reply in text instead of a call, and a malformed answer.
+    text_retry_used = False
+    format_retry_used = False
+    told_to_submit = False
+
+    for _ in range(tool_calls + MAX_TURNS_AFTER_TOOLS):
+        now = clock()
+        if now >= deadline:
+            end.reason, end.limit_hit = "the review's deadline passed", "time"
+            return end
+        forced_by_time = deadline - now < SUBMIT_MARGIN_SECONDS
+        final = budget.used >= tool_calls or forced_by_time
+        if final and not told_to_submit:
+            messages.append(HumanMessage(submit.now))
+            told_to_submit = True
+        try:
+            conversation.fit(messages)
+        except ConversationTooLong as exc:  # sending it would only fail at the service
+            end.reason = str(exc)
+            return end
+        offered = [submit.tool] if final else [*schemas, submit.tool]
+        bound = model_for(deadline - now).bind_tools(offered)
+        try:
+            reply = bound.invoke(messages, config={"callbacks": list(callbacks)})
+        except BudgetExceededError as exc:
+            end.reason, end.limit_hit = str(exc), "tokens"
+            return end
+        except Exception as exc:  # one agent failing must not fail the review
+            end.reason = f"{type(exc).__name__}: {exc}"
+            return end
+        if not isinstance(reply, AIMessage):
+            end.reason = "the model returned no message"
+            return end
+        messages.append(reply)
+
+        submitted: ToolCall | None = None
+        for tool_call in reply.tool_calls:
+            if tool_call["name"] == submit.name:
+                if submitted is not None:  # every call needs an answer, the ignored ones too
+                    ignored = "Ignored: only the last submission of a turn counts."
+                    messages.append(ToolMessage(ignored, tool_call_id=submitted["id"]))
+                submitted = tool_call
+                continue
+            end.tool_calls += 1
+            if final:  # only submit was offered: a tool must not eat the time that is left
+                only = f"Not run: only {submit.name} is available now."
+                messages.append(ToolMessage(only, tool_call_id=tool_call["id"]))
+            else:
+                _answer(tool_call, available, budget, messages, conversation)
+
+        if submitted is None and not reply.tool_calls:
+            if text_retry_used:
+                end.reason = f"the model answered in text twice instead of calling {submit.name}"
+                return end
+            text_retry_used = True
+            messages.append(HumanMessage(f"Report your {submit.what} by calling {submit.name}."))
+            continue
+        if submitted is None:
+            continue
+        try:
+            end.answer = submit.parse(submitted["args"])
+        except ValidationError as exc:
+            if format_retry_used:
+                end.reason = f"the {submit.what} were not in the expected format twice"
+                return end
+            format_retry_used = True
+            problems = "; ".join(
+                f"{'.'.join(map(str, e['loc']))}: {e['msg']}" for e in exc.errors()[:10]
+            )
+            messages.append(
+                ToolMessage(
+                    f"The {submit.what} are not in the expected format ({problems}). Call"
+                    f" {submit.name} again with every required field.",
+                    tool_call_id=submitted["id"],
+                )
+            )
+            continue
+        # A forced answer is complete but cut short; the report says by what.
+        if budget.used >= tool_calls:
+            end.limit_hit = "tool_calls"
+        elif forced_by_time:
+            end.limit_hit = "time"
+        return end
+
+    end.reason = (
+        f"the agent did not submit its {submit.what} within"
+        f" {tool_calls + MAX_TURNS_AFTER_TOOLS} turns"
+    )
+    end.limit_hit = "tool_calls"
+    return end
+
+
 def run_dimension(
     model_for: Callable[[float], BaseChatModel],
     pack: ContextPack,
@@ -134,120 +276,44 @@ def run_dimension(
     clock: Callable[[], float],
     limits: ConversationLimits = ConversationLimits(),  # noqa: B008 - frozen, shared safely
 ) -> AgentRun:
-    """Run one dimension agent to its findings, or to a recorded reason it stopped.
-
-    `model_for` builds the model for each turn from the seconds left to the deadline, so
-    no call, nor a wait before one of its retries, runs past it.
-    """
-    budget = ToolBudget(tool_calls)
-    available = agent_tools(tools, budget)
-    schemas = [StructuredTool.from_function(f, name=n) for n, f in available.items()]
-    submit = _submit_tool()
-    definitions = [convert_to_openai_tool(t) for t in [*schemas, submit]]
-    conversation = Conversation(limits, overhead=estimate_tokens(json.dumps(definitions)))
-    messages: list[BaseMessage] = list(pack.messages(dimension))
-    run = AgentRun(dimension, "incomplete")
-    # One retry each: a reply in text instead of a call, and a malformed submission.
-    text_retry_used = False
-    format_retry_used = False
-    told_to_submit = False
-
-    for _ in range(tool_calls + MAX_TURNS_AFTER_TOOLS):
-        now = clock()
-        if now >= deadline:
-            run.reason, run.limit_hit = "the review's deadline passed", "time"
-            return run
-        forced_by_time = deadline - now < SUBMIT_MARGIN_SECONDS
-        final = budget.used >= tool_calls or forced_by_time
-        if final and not told_to_submit:
-            messages.append(HumanMessage(SUBMIT_NOW))
-            told_to_submit = True
-        try:
-            conversation.fit(messages)
-        except ConversationTooLong as exc:  # sending it would only fail at the service
-            run.reason = str(exc)
-            return run
-        bound = model_for(deadline - now).bind_tools([submit] if final else [*schemas, submit])
-        try:
-            reply = bound.invoke(messages, config={"callbacks": list(callbacks)})
-        except BudgetExceededError as exc:
-            run.reason, run.limit_hit = str(exc), "tokens"
-            return run
-        except Exception as exc:  # one agent failing must not fail the review
-            run.reason = f"{type(exc).__name__}: {exc}"
-            return run
-        if not isinstance(reply, AIMessage):
-            run.reason = "the model returned no message"
-            return run
-        messages.append(reply)
-
-        submitted: ToolCall | None = None
-        for tool_call in reply.tool_calls:
-            if tool_call["name"] == SUBMIT_TOOL:
-                if submitted is not None:  # every call needs an answer, the ignored ones too
-                    messages.append(ToolMessage(SUBMIT_IGNORED, tool_call_id=submitted["id"]))
-                submitted = tool_call
-                continue
-            run.tool_calls += 1
-            if final:  # only submit was offered: a tool must not eat the time that is left
-                messages.append(ToolMessage(SUBMIT_ONLY, tool_call_id=tool_call["id"]))
-            else:
-                _answer(tool_call, available, budget, messages, conversation)
-
-        if submitted is None and not reply.tool_calls:
-            if text_retry_used:
-                run.reason = f"the model answered in text twice instead of calling {SUBMIT_TOOL}"
-                return run
-            text_retry_used = True
-            messages.append(HumanMessage(f"Report your findings by calling {SUBMIT_TOOL}."))
-            continue
-        if submitted is None:
-            continue
-        try:
-            submission = Submission.model_validate(submitted["args"])
-        except ValidationError as exc:
-            if format_retry_used:
-                run.reason = "the findings were not in the expected format twice"
-                return run
-            format_retry_used = True
-            problems = "; ".join(
-                f"{'.'.join(map(str, e['loc']))}: {e['msg']}" for e in exc.errors()[:10]
-            )
-            messages.append(
-                ToolMessage(
-                    f"The findings are not in the expected format ({problems}). Call"
-                    f" {SUBMIT_TOOL} again with every required field.",
-                    tool_call_id=submitted["id"],
-                )
-            )
-            continue
-        line_count = functools.cache(tools.line_count)
-        for item in submission.findings:
-            item.dimension = dimension
-            try:
-                # The same file must be spelled the same in every finding, as git spells
-                # it: merging compares paths, and GitHub rejects others in comments.
-                item.file = clean_path(item.file)
-            except ToolError as exc:
-                run.dropped.append(f"{item.title}: {exc}")
-                continue
-            problem = check(item, line_count)
-            if problem is None:
-                run.findings.append(item)
-            else:
-                run.dropped.append(f"{item.title}: {problem}")
-        run.status = "done"
-        # A forced submission is complete but cut short; the report says by what.
-        if budget.used >= tool_calls:
-            run.limit_hit = "tool_calls"
-        elif forced_by_time:
-            run.limit_hit = "time"
-        return run
-
-    run.reason = (
-        f"the agent did not submit findings within {tool_calls + MAX_TURNS_AFTER_TOOLS} turns"
+    """Run one dimension agent to its findings, or to a recorded reason it stopped."""
+    submit = Submit(_submit_tool(), Submission.model_validate, "findings", SUBMIT_NOW)
+    end = tool_loop(
+        model_for,
+        list(pack.messages(dimension)),
+        tools,
+        submit,
+        tool_calls=tool_calls,
+        callbacks=callbacks,
+        deadline=deadline,
+        clock=clock,
+        limits=limits,
     )
-    run.limit_hit = "tool_calls"
+    run = AgentRun(
+        dimension,
+        "incomplete",
+        reason=end.reason,
+        limit_hit=end.limit_hit,
+        tool_calls=end.tool_calls,
+    )
+    if end.answer is None:
+        return run
+    line_count = functools.cache(tools.line_count)
+    for item in end.answer.findings:
+        item.dimension = dimension
+        try:
+            # The same file must be spelled the same in every finding, as git spells
+            # it: merging compares paths, and GitHub rejects others in comments.
+            item.file = clean_path(item.file)
+        except ToolError as exc:
+            run.dropped.append(f"{item.title}: {exc}")
+            continue
+        problem = check(item, line_count)
+        if problem is None:
+            run.findings.append(item)
+        else:
+            run.dropped.append(f"{item.title}: {problem}")
+    run.status = "done"
     return run
 
 
