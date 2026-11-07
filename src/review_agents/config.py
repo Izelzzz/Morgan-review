@@ -16,6 +16,13 @@ class ModelEndpoint(BaseModel):
     api_key: SecretStr | None = None
     # The model's context window, which sizes what one request may hold.
     context_tokens: int = Field(default=128_000, ge=8_000)
+    # Replies stream, and a stream with no data at all (heartbeats count) for
+    # `idle_seconds` is stalled; turned off, a whole reply must arrive within two minutes,
+    # for services that stream tool calls badly (decisions D-029, D-030).
+    stream: bool = True
+    idle_seconds: float = Field(default=300.0, gt=0)
+    # Retries of a rate limit, server error, stall, broken connection or empty reply.
+    max_retries: int = Field(default=4, ge=0)
 
 
 class Observability(BaseModel):
