@@ -18,6 +18,7 @@ from review_agents.mirror import MirrorStore
 from review_agents.models import MAX_RETRIES, REQUEST_TIMEOUT_SECONDS, BudgetExceededError
 from review_agents.pipeline.agent import SUBMIT_TOOL, AgentRun, run_dimension
 from review_agents.pipeline.conversation import (
+    REMOVED,
     REPEATED,
     ConversationLimits,
     conversation_tokens,
@@ -557,3 +558,39 @@ def test_a_cut_by_characters_stays_within_its_limit_in_any_script() -> None:
     text = shorten(chinese, 500, "search_code")
 
     assert estimate_tokens(text) <= 1200
+
+
+def test_results_give_way_entirely_when_shortening_them_is_not_enough(
+    long_tools: RepoTools,
+) -> None:
+    reads = [
+        call("read_file", {"path": "big/table.py", "start_line": s, "end_line": s + 199}, f"c{s}")
+        for s in (1, 1001, 2001)
+    ]
+    model = ScriptedModel(script=[*reads, submit()])
+    # Room for the pack and about one shortened result, not three.
+    limits = ConversationLimits(
+        window=5200, result_tokens=4000, shortened_tokens=600, output_reserve=500
+    )
+
+    result = run_limited(model, long_tools, limits)
+
+    assert result.status == "done"
+    for sent in model.sent:  # no request ever exceeded the window
+        assert conversation_tokens(sent) + 500 <= 5200
+    first, *_ = tool_texts(model)
+    assert first.startswith(REMOVED)
+
+
+def test_an_agent_whose_conversation_cannot_fit_stops_instead_of_sending_it(
+    repo_tools: RepoTools,
+) -> None:
+    model = ScriptedModel(script=[submit()])
+    # The context pack alone is larger than the window leaves.
+    limits = ConversationLimits(window=600, output_reserve=500)
+
+    result = run_limited(model, repo_tools, limits)
+
+    assert result.status == "incomplete"
+    assert result.reason is not None and "window" in result.reason
+    assert model.sent == []

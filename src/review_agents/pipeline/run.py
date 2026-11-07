@@ -241,7 +241,7 @@ def run_review(
     pr_layer = build_pr_layer(
         conn, request, git_dir, config, token=token, surrounding_code=settings.surrounding_code
     )
-    packs = build_packs(repo_layer, pr_layer, window)
+    packs = build_packs(repo_layer, pr_layer, window, settings.output_reserve_tokens)
     _step(conn, review_id, "context.pr_layer", step)
     if len(packs) > 1:
         _step(conn, review_id, f"context.groups.{len(packs)}", step)

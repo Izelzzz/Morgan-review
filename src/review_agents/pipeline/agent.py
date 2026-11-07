@@ -22,7 +22,11 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_valida
 
 from review_agents.context.pack import ContextPack
 from review_agents.models import MAX_RETRIES, REQUEST_TIMEOUT_SECONDS, BudgetExceededError
-from review_agents.pipeline.conversation import Conversation, ConversationLimits
+from review_agents.pipeline.conversation import (
+    Conversation,
+    ConversationLimits,
+    ConversationTooLong,
+)
 from review_agents.tools import (
     LIMIT_REACHED,
     RepoTools,
@@ -156,7 +160,11 @@ def run_dimension(
             told_to_submit = True
         # The client retries a failed call, so the time left is shared by every attempt.
         timeout = max(1.0, min(REQUEST_TIMEOUT_SECONDS, (deadline - now) / (MAX_RETRIES + 1)))
-        conversation.fit(messages)
+        try:
+            conversation.fit(messages)
+        except ConversationTooLong as exc:  # sending it would only fail at the service
+            run.reason = str(exc)
+            return run
         bound = model_for(timeout).bind_tools([submit] if final else [*schemas, submit])
         try:
             reply = bound.invoke(messages, config={"callbacks": list(callbacks)})

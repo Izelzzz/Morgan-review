@@ -20,8 +20,13 @@ from review_agents.context.tokens import estimate_tokens
 # Roughly three bytes to a token (decision D-019), for a line too long to keep whole.
 _BYTES_PER_TOKEN = 3
 REPEATED = "You have made this exact call"
+REMOVED = "[Removed to fit the model's window: call the tool again if you still need it.]"
 # The same call (tool and arguments) this many times gets a reminder (decision D-030).
 REPEAT_REMINDER_AT = 3
+
+
+class ConversationTooLong(RuntimeError):
+    """Even with every tool result removed, the conversation does not fit the window."""
 
 
 @dataclass(frozen=True)
@@ -97,6 +102,7 @@ class _Result:
     text: str  # the result as the tool returned it, before any wrapping
     suffix: str  # what follows the data block, such as a repeat reminder
     shortened: bool = False
+    removed: bool = False
 
 
 @dataclass
@@ -124,21 +130,37 @@ class Conversation:
         messages.append(_message(tool, text, suffix, call_id))
 
     def fit(self, messages: list[BaseMessage]) -> None:
-        """Cut the oldest results first until the conversation and a reply fit the window."""
+        """Make the conversation and a reply fit the window, or raise ConversationTooLong.
+
+        The oldest results are cut to a short head and tail first; if that is not enough,
+        the oldest are removed, each leaving a line saying it can be read again. Only
+        when the rest alone is too large does this give up: a request larger than the
+        window is never sent.
+        """
         room = self.limits.window - self.limits.output_reserve
-        total = conversation_tokens(messages)  # counted once; each cut adjusts it
-        for result in self._results:
-            if total <= room:
-                return
-            if result.shortened:
-                continue
-            old = messages[result.index]
-            assert isinstance(old, ToolMessage)  # noqa: S101 - set by answer()
-            result.text = shorten(result.text, self.limits.shortened_tokens, result.tool)
-            result.shortened = True
-            new = _message(result.tool, result.text, result.suffix, old.tool_call_id)
-            messages[result.index] = new
-            total += estimate_tokens(str(new.content)) - estimate_tokens(str(old.content))
+        total = conversation_tokens(messages)  # counted once; each change adjusts it
+        for removing in (False, True):
+            for result in self._results:
+                if total <= room:
+                    return
+                if result.removed or (result.shortened and not removing):
+                    continue
+                old = messages[result.index]
+                assert isinstance(old, ToolMessage)  # noqa: S101 - set by answer()
+                if removing:
+                    result.removed = True
+                    new = ToolMessage(REMOVED, tool_call_id=old.tool_call_id)
+                else:
+                    result.text = shorten(result.text, self.limits.shortened_tokens, result.tool)
+                    result.shortened = True
+                    new = _message(result.tool, result.text, result.suffix, old.tool_call_id)
+                messages[result.index] = new
+                total += estimate_tokens(str(new.content)) - estimate_tokens(str(old.content))
+        if total > room:
+            raise ConversationTooLong(
+                f"the conversation needs about {total} tokens, more than the {room} the"
+                " model's window leaves after the room kept for the reply"
+            )
 
 
 def _message(tool: str, text: str, suffix: str, call_id: str | None) -> ToolMessage:

@@ -12,6 +12,7 @@ from review_agents.context.pack import (
     build_packs,
     fixed_tokens,
     module_finder,
+    pack_budget,
 )
 from review_agents.context.pr_layer import ChangedFile, PrLayer, PrRequest
 from review_agents.context.repo_layer import RepoLayer
@@ -125,3 +126,9 @@ def test_the_room_kept_for_other_groups_signatures_does_not_split_a_pr_that_fits
     window = int((without_signatures + changes + signature_tokens(pr) // 2) / (1 - AGENT_SHARE))
 
     assert len(build_packs(repo_layer(), pr, window_tokens=window)) == 1
+
+
+def test_a_pack_leaves_the_reply_its_reserve_even_in_a_small_window() -> None:
+    # Seventy percent of the window normally; never so much that the reply has no room.
+    assert pack_budget(128_000, output_reserve=4_000) == 89_600
+    assert pack_budget(8_000, output_reserve=4_000) == 4_000

@@ -81,10 +81,18 @@ def module_finder(repo: RepoLayer) -> Callable[[str], str]:
     return module_of
 
 
-def build_packs(repo: RepoLayer, layer: PrLayer, window_tokens: int) -> list[ContextPack]:
+def pack_budget(window_tokens: int, output_reserve: int = 0) -> int:
+    """Tokens one pack may take: `AGENT_SHARE` of the window is left for the agent's work,
+    and never less than the room kept for its reply (decision D-030)."""
+    return min(int(window_tokens * (1 - AGENT_SHARE)), window_tokens - output_reserve)
+
+
+def build_packs(
+    repo: RepoLayer, layer: PrLayer, window_tokens: int, output_reserve: int = 0
+) -> list[ContextPack]:
     """One pack per group of changes; a single pack when the whole PR fits (decision D-008)."""
     base = ContextPack(SHARED_RULES, repo, replace(layer, diffs={}, excerpts=[], notes=[]))
-    budget = int(window_tokens * (1 - AGENT_SHARE)) - fixed_tokens(base)
+    budget = pack_budget(window_tokens, output_reserve) - fixed_tokens(base)
     module_of = module_finder(repo)
     # Only a PR that does not fit is split (D-008), so the room for other groups'
     # signatures is kept back only once splitting is certain.
