@@ -19,11 +19,13 @@ RUN /app/.venv/bin/python -c "from review_agents.context.tokens import ENCODING;
 
 FROM python:3.12-slim@sha256:aa943ce411423c7582288f18707ff66eddcbaeb510502d747a72aeb34f30d159
 # The review reads repositories through git. Package versions follow the pinned base image's
-# Debian release; pinning each one would break the build on every security update. apt is
-# named too so a security fix released after the base image (CVE-2026-109518) is installed.
-# hadolint ignore=DL3008
+# Debian release; pinning each one would break the build on every security update. The
+# upgrade installs every security fix released after the base image (CVE-2026-109518 in
+# apt, CVE-2026-85091 in zlib), instead of naming each package as its CVE comes out.
+# hadolint ignore=DL3005,DL3008
 RUN apt-get update \
-    && apt-get install --yes --no-install-recommends apt git \
+    && apt-get upgrade --yes --no-install-recommends \
+    && apt-get install --yes --no-install-recommends git \
     && rm -rf /var/lib/apt/lists/*
 RUN useradd --system --uid 10001 --home-dir /nonexistent --shell /usr/sbin/nologin review \
     && mkdir /data && chown review /data
