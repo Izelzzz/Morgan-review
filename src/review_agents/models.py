@@ -1,11 +1,13 @@
 """Model access: OpenAI-compatible chat models, usage records and the token budget."""
 
+import email.utils
 import math
 import random
 import threading
 import time
 from collections.abc import Callable, Iterator
 from contextlib import closing
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 from uuid import UUID
@@ -43,6 +45,10 @@ class DeadlinePassedError(TimeoutError):
     """The call's deadline passed before its reply was complete."""
 
 
+class AttemptTimedOutError(TimeoutError):
+    """One attempt took longer than an attempt may (a whole reply's two minutes)."""
+
+
 class EmptyReplyError(RuntimeError):
     """The model replied with nothing: no text and no tool call."""
 
@@ -59,7 +65,14 @@ def _retry_after(headers: httpx2.Headers) -> float | None:
             try:
                 return max(0.0, float(str(value)) * scale)
             except ValueError:
-                continue  # an HTTP date: fall back to the backoff
+                pass
+            try:  # an HTTP date, the other form Retry-After takes
+                when = email.utils.parsedate_to_datetime(str(value))
+            except (TypeError, ValueError):
+                continue
+            if when.tzinfo is None:
+                when = when.replace(tzinfo=UTC)
+            return max(0.0, (when - datetime.now(UTC)).total_seconds())
     return None
 
 
@@ -70,7 +83,9 @@ def retry_wait(error: BaseException, retry: int, rng: random.Random) -> float | 
     reply with no finish reason. Not retried: request, permission and other client
     errors, and an empty reply cut by the output limit, which a resend would repeat.
     """
-    if isinstance(error, EmptyReplyError):
+    if isinstance(error, AttemptTimedOutError):
+        pass
+    elif isinstance(error, EmptyReplyError):
         if not error.retryable:
             return None
     elif isinstance(error, openai.APIStatusError):
@@ -114,6 +129,8 @@ class ReviewChatModel(ChatOpenAI):
     stream_replies: bool = True
     retries: int = 4
     deadline: float = math.inf
+    # The longest one attempt may take; a whole reply's two minutes when not streaming.
+    attempt_seconds: float = math.inf
     sleep_for: Callable[[float], None] = time.sleep
     clock: Callable[[], float] = time.monotonic
     rng: random.Random = Field(default_factory=random.Random)
@@ -173,35 +190,82 @@ class ReviewChatModel(ChatOpenAI):
         return result
 
     def _within_deadline(self, attempt: Callable[[threading.Event], ChatResult]) -> ChatResult:
-        """Run one attempt, giving it up when the deadline passes, however busy it is.
+        """Run one attempt, giving it up at its own limit or the deadline, however busy.
 
-        A reply that keeps coming is never stalled, so only this bounds it; the given-up
-        attempt stops reading at its next piece of data, or at its read timeout.
+        A reply that keeps coming is never stalled, so only this bounds it. A given-up
+        attempt stops reading at its next byte, heartbeats included, or at its read
+        timeout: the HTTP layer checks `cancel` on every piece it receives.
         """
         left = self.deadline - self.clock()
-        if math.isinf(left):
-            return attempt(threading.Event())
         if left <= 0:
             raise DeadlinePassedError("the call's deadline passed before it started")
         cancelled = threading.Event()
+        limit = min(self.attempt_seconds, left)
+        if math.isinf(limit):
+            return _with_cancel(cancelled, attempt)
         outcome: dict[str, Any] = {}
 
         def run() -> None:
             try:
-                outcome["result"] = attempt(cancelled)
+                outcome["result"] = _with_cancel(cancelled, attempt)
             except BaseException as error:  # handed to the caller below
                 outcome["error"] = error
 
         worker = threading.Thread(target=run, name="model-call", daemon=True)
         worker.start()
-        worker.join(left)
+        worker.join(limit)
         if worker.is_alive():
             cancelled.set()
+            if limit < left:  # this attempt's own limit: worth another try
+                raise AttemptTimedOutError(f"no complete reply within {limit:.0f} seconds")
             raise DeadlinePassedError(f"no complete reply within the {left:.0f} seconds left")
         if "error" in outcome:
             raise outcome["error"]
         result: ChatResult = outcome["result"]
         return result
+
+
+# The cancel flag of the attempt running on this thread. The HTTP client's response hook
+# runs on the thread that sends the request, so it finds the flag of its own attempt.
+_attempt = threading.local()
+
+
+def _with_cancel(
+    cancelled: threading.Event, attempt: Callable[[threading.Event], ChatResult]
+) -> ChatResult:
+    _attempt.cancelled = cancelled
+    try:
+        return attempt(cancelled)
+    finally:
+        _attempt.cancelled = None
+
+
+class _CancellableStream(httpx2.SyncByteStream):
+    """A response body that ends as soon as its attempt is given up."""
+
+    def __init__(self, inner: Any, cancelled: threading.Event) -> None:
+        self._inner = inner
+        self._cancelled = cancelled
+
+    def __iter__(self) -> Iterator[bytes]:
+        for piece in self._inner:
+            if self._cancelled.is_set():
+                raise httpx2.ReadError("the call was given up")
+            yield piece
+
+    def close(self) -> None:
+        self._inner.close()
+
+
+def _on_response(response: httpx2.Response) -> None:
+    cancelled = getattr(_attempt, "cancelled", None)
+    if cancelled is not None:
+        response.stream = _CancellableStream(response.stream, cancelled)
+
+
+# One client for every model call, as the SDK would share otherwise; proxies from the
+# environment are kept, since only a response hook is added.
+_HTTP_CLIENT = httpx2.Client(event_hooks={"response": [_on_response]})
 
 
 def chat_model(
@@ -224,6 +288,8 @@ def chat_model(
         base_url=str(endpoint.base_url),
         api_key=api_key,
         model=endpoint.model,
+        http_client=_HTTP_CLIENT,
+        attempt_seconds=math.inf if endpoint.stream else WHOLE_REPLY_SECONDS,
         timeout=httpx2.Timeout(wait, connect=min(CONNECT_TIMEOUT_SECONDS, wait)),
         max_retries=0,
         stream_usage=True,

@@ -1,10 +1,11 @@
-import contextlib
 import json
 import threading
 import time
 from collections.abc import Iterator
 from contextlib import closing
 from dataclasses import dataclass, field
+from datetime import UTC, datetime, timedelta
+from email.utils import format_datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -12,6 +13,7 @@ import openai
 import pytest
 from pydantic import SecretStr
 
+from review_agents import models
 from review_agents.config import ModelEndpoint
 from review_agents.db import connect, migrate
 from review_agents.models import (
@@ -40,6 +42,10 @@ class FakeService:
     # How each streamed reply is sent, one entry per request; the last entry repeats.
     plans: list["Plan"] = field(default_factory=lambda: [Plan()])
     bodies: list[dict[str, object]] = field(default_factory=list)
+    # Seconds between the pieces of a whole (unstreamed) reply, for the first request.
+    trickle: float = 0.0
+    # Replies the client hung up on before they were sent in full.
+    hangups: int = 0
 
 
 @dataclass
@@ -138,16 +144,23 @@ def service() -> Iterator[FakeService]:
                     self.send_header(name, value)
             self.end_headers()
             # The client may give up mid-reply after its timeout.
-            with contextlib.suppress(BrokenPipeError, ConnectionResetError):
+            try:
                 if stream:
                     plan = fake.plans[min(n, len(fake.plans)) - 1]
                     streamed(self, body["model"], plan, fake.cached)
+                elif status == 200 and fake.trickle and n == 1:
+                    for byte in completion(body["model"], fake.cached):
+                        self.wfile.write(bytes([byte]))
+                        self.wfile.flush()
+                        time.sleep(fake.trickle)
                 else:
                     self.wfile.write(
                         completion(body["model"], fake.cached)
                         if status == 200
                         else b'{"error": {}}'
                     )
+            except (BrokenPipeError, ConnectionResetError):
+                fake.hangups += 1
 
         def log_message(self, *args: object) -> None:
             pass
@@ -327,6 +340,52 @@ def test_a_reply_still_coming_at_the_deadline_is_given_up(service: FakeService) 
 
     assert time.monotonic() - started < 1.0
     assert len(service.requests) == 1  # past the deadline, nothing is retried
+
+
+def test_a_reply_trickling_in_without_streaming_is_cut_at_its_limit_and_retried(
+    service: FakeService, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Never 0.5 seconds without a byte, but far longer than the whole-reply limit.
+    monkeypatch.setattr(models, "WHOLE_REPLY_SECONDS", 0.5)
+    service.trickle = 0.05
+
+    reply = chat_model(endpoint(service, stream=False), sleep=Sleeps()).invoke("review")
+
+    assert reply.content == "no findings"
+    assert len(service.requests) == 2
+
+
+def test_a_call_given_up_at_its_deadline_hangs_up_even_on_heartbeats(
+    service: FakeService,
+) -> None:
+    # Heartbeats for 4 seconds keep the connection busy; the call has 0.5 seconds.
+    service.plans = [Plan(heartbeats=40, gap=0.1)]
+    before = set(threading.enumerate())
+
+    with pytest.raises(DeadlinePassedError):
+        chat_model(endpoint(service), time_left=0.5, sleep=Sleeps()).invoke("review")
+
+    def calls_running() -> list[threading.Thread]:
+        new = set(threading.enumerate()) - before
+        return [t for t in new if t.name == "model-call" and t.is_alive()]
+
+    hung_up = time.monotonic() + 1.5
+    while (service.hangups == 0 or calls_running()) and time.monotonic() < hung_up:
+        time.sleep(0.05)
+    assert service.hangups == 1  # the request ended, not just the caller's wait
+    assert calls_running() == []
+
+
+def test_a_retry_after_date_is_followed(service: FakeService) -> None:
+    when = datetime.now(UTC) + timedelta(seconds=3)
+    service.script = [(429, 0.0), (200, 0.0)]
+    service.retry_headers = {"Retry-After": format_datetime(when, usegmt=True)}
+    sleeps = Sleeps()
+
+    chat_model(endpoint(service), sleep=sleeps).invoke("review")
+
+    [wait] = sleeps.waits
+    assert 1.5 <= wait <= 3.5  # whole seconds in the header, and the request took a moment
 
 
 def test_heartbeats_keep_a_thinking_model_alive(service: FakeService) -> None:
