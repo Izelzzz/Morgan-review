@@ -25,7 +25,7 @@ from review_agents.context.markup import untrusted
 from review_agents.context.pack import ContextPack
 from review_agents.pipeline.agent import Finding, Severity, Submit, tool_loop
 from review_agents.pipeline.conversation import ConversationLimits
-from review_agents.tools import RepoTools, ToolError, clean_path
+from review_agents.tools import RepoTools, ToolError, ToolTimeoutError, clean_path
 
 VERIFY_TOOL = "submit_verdict"
 # Tool calls one verifier may make (decision D-029); it has no time limit of its own.
@@ -187,10 +187,22 @@ def run_verifier(
 
     def parse(args: dict[str, Any]) -> Answer:
         answer = Answer.model_validate(args)
-        problems = [p for e in answer.evidence if (p := _where_problem(e, line_count))]
-        if problems:
+        problems: list[str] = []
+        kept: list[Evidence] = []
+        for place in answer.evidence:
+            try:
+                problem = _where_problem(place, line_count)
+            except ToolTimeoutError as exc:  # not cached: checked again next time
+                problem = f"evidence {place.file} could not be checked: {exc}"
+            if problem is None:
+                kept.append(place)
+            else:
+                problems.append(problem)
+        if answer.holds and problems:
             raise ValueError("; ".join(problems))
-        return answer
+        # Evidence is optional for a finding that does not hold: a wrong place is
+        # dropped, and the verdict stands.
+        return answer.model_copy(update={"evidence": kept})
 
     submit = Submit(_verdict_tool(), parse, "verdict", VERIFY_NOW)
     end = tool_loop(

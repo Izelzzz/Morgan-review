@@ -37,6 +37,7 @@ from review_agents.tools import (
     RepoTools,
     ToolBudget,
     ToolError,
+    ToolTimeoutError,
     agent_tools,
     clean_path,
 )
@@ -310,7 +311,11 @@ def run_dimension(
         except ToolError as exc:
             run.dropped.append(f"{item.title}: {exc}")
             continue
-        problem = check(item, line_count)
+        try:
+            problem = check(item, line_count)
+        except ToolTimeoutError:
+            # Not known to be wrong, only not checked now; the verifier reads it again.
+            problem = None
         if problem is None:
             run.findings.append(item)
         else:

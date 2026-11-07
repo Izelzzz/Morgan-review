@@ -22,7 +22,7 @@ from review_agents.pipeline.conversation import (
     conversation_tokens,
     shorten,
 )
-from review_agents.tools import RepoTools
+from review_agents.tools import RepoTools, ToolTimeoutError
 
 FILES: dict[str, str | bytes] = {
     "payments/refund.py": "def refund(order, cents):\n    total = cents\n    return total\n",
@@ -604,3 +604,19 @@ def test_an_agent_counts_its_tool_definitions_before_sending(repo_tools: RepoToo
     result = run_limited(model, repo_tools, limits)
 
     assert result.status == "incomplete" and model.sent == []
+
+
+def test_a_finding_whose_place_cannot_be_checked_in_time_is_kept(
+    repo_tools: RepoTools, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def slow(path: str) -> int | None:
+        raise ToolTimeoutError("git cat-file timed out after 30s")
+
+    monkeypatch.setattr(repo_tools, "line_count", slow)
+    model = ScriptedModel(script=[submit(finding())])
+
+    result = run(model, repo_tools)
+
+    # Not known to be wrong, only not checked: the verifier reads it again later.
+    assert [f.title for f in result.findings] == ["A refund can exceed the paid amount"]
+    assert result.dropped == []

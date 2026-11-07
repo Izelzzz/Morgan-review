@@ -39,6 +39,10 @@ class ToolError(ValueError):
     """A request the tool refuses; its message is returned to the agent."""
 
 
+class ToolTimeoutError(ToolError):
+    """Git took too long: the request may be fine, it could only not be answered now."""
+
+
 @cache
 def _glob_regex(pattern: str) -> re.Pattern[str]:
     # `**/` matches any number of directories, `**` anything, `*` and `?` stay in one segment.
@@ -102,7 +106,7 @@ class RepoTools:
             return run_git(self._git_dir, *args, ok_codes=ok_codes, timeout=self._git_timeout)
         except GitTimeoutError as exc:
             # Not a GitError for the callers below, which read those as "not found".
-            raise ToolError(str(exc)) from None
+            raise ToolTimeoutError(str(exc)) from None
 
     def read_file(self, path: str, start_line: int = 1, end_line: int | None = None) -> str:
         """Read a text file at the reviewed commit, optionally a 1-based line range."""
@@ -190,7 +194,8 @@ class RepoTools:
     def line_count(self, path: str) -> int | None:
         """Lines in a file of the reviewed commit, or None when it does not exist.
 
-        Not an agent tool: the pipeline uses it to check where a finding points.
+        Not an agent tool: the pipeline uses it to check where a finding points. A git
+        that times out raises ToolTimeoutError: that says nothing about the file.
         """
         try:
             clean = clean_path(path)
@@ -198,6 +203,8 @@ class RepoTools:
             return None
         try:
             data = self._git("cat-file", "blob", f"{self._commit}:{clean}")
+        except ToolTimeoutError:
+            raise
         except (GitError, ToolError):
             return None
         return data.count(b"\n") + (0 if data.endswith(b"\n") or not data else 1)

@@ -17,6 +17,7 @@ from review_agents.tools import (
     RepoTools,
     ToolBudget,
     ToolError,
+    ToolTimeoutError,
     agent_tools,
     glob_match,
 )
@@ -273,3 +274,16 @@ def test_line_count_reads_the_reviewed_commit(tools: RepoTools) -> None:
     assert tools.line_count("big.txt") == 1  # no trailing newline
     assert tools.line_count("src/missing.py") is None
     assert tools.line_count("../outside") is None
+
+
+def test_line_count_reports_a_timeout_instead_of_a_missing_file(
+    checkout: tuple[Path, str], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    git_dir, head = checkout
+    monkeypatch.setenv("PATH", os.environ["PATH"])  # restored after the test
+    install_fake_git(tmp_path / "fakebin", "exec sleep 30")
+    tools = RepoTools(git_dir, "octo/app", head, [], git_timeout=0.3)
+
+    # A slow git says nothing about whether the file exists.
+    with pytest.raises(ToolTimeoutError, match="timed out"):
+        tools.line_count("src/app.py")

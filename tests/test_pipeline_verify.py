@@ -19,7 +19,7 @@ from review_agents.pipeline.verify import (
     VerificationRun,
     run_verifier,
 )
-from review_agents.tools import RepoTools
+from review_agents.tools import RepoTools, ToolTimeoutError
 
 FILES: dict[str, str | bytes] = {
     "payments/refund.py": "def refund(order, cents):\n    total = cents\n    return total\n",
@@ -279,3 +279,41 @@ def test_verifiers_of_one_review_share_their_opening_for_the_prompt_cache(
     assert len(first.sent[0]) == 4
     assert first.sent[0][:3] == second.sent[0][:3]
     assert "Another problem" in str(second.sent[0][-1].content)
+
+
+def test_a_finding_that_does_not_hold_keeps_its_verdict_when_a_place_is_wrong(
+    repo_tools: RepoTools,
+) -> None:
+    wrong = dict(SHOWN, file="payments/missing.py", shows="the caller caps it")
+    model = ScriptedModel(script=[verdict(False, evidence=[wrong, SHOWN])])
+
+    result = verify(model, repo_tools)
+
+    # Evidence is optional for a finding that does not hold: the wrong place is dropped,
+    # the verdict stands and the verifier is not asked again.
+    assert result.verdict is not None and not result.verdict.holds
+    assert [e.file for e in result.verdict.evidence] == ["payments/refund.py"]
+    assert len(model.sent) == 1
+
+
+def test_a_git_timeout_while_checking_evidence_is_checked_again(
+    repo_tools: RepoTools, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    real = repo_tools.line_count
+    calls: list[str] = []
+
+    def slow_once(path: str) -> int | None:
+        calls.append(path)
+        if len(calls) == 1:
+            raise ToolTimeoutError("git cat-file timed out after 30s")
+        return real(path)
+
+    monkeypatch.setattr(repo_tools, "line_count", slow_once)
+    model = ScriptedModel(script=[verdict(True, call_id="v0"), verdict(True)])
+
+    result = verify(model, repo_tools)
+
+    assert result.verdict is not None and result.verdict.holds
+    told = str(model.sent[1][-1].content)
+    assert "timed out" in told and "not in the reviewed commit" not in told
+    assert len(calls) == 2  # the timeout was not remembered as an answer
