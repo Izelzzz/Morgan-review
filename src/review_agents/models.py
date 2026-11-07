@@ -52,9 +52,10 @@ class AttemptTimedOutError(TimeoutError):
 class EmptyReplyError(RuntimeError):
     """The model replied with nothing: no text and no tool call."""
 
-    def __init__(self, message: str, *, retryable: bool) -> None:
+    def __init__(self, message: str, *, retryable: bool, result: ChatResult) -> None:
         super().__init__(message)
         self.retryable = retryable
+        self.result = result  # the service billed it all the same
 
 
 def _retry_after(headers: httpx2.Headers) -> float | None:
@@ -114,9 +115,12 @@ def _check_not_empty(result: ChatResult) -> None:
                 raise EmptyReplyError(
                     "the model replied with nothing before reaching its output limit",
                     retryable=False,
+                    result=result,
                 )
             if finish is None:
-                raise EmptyReplyError("the model replied with nothing", retryable=True)
+                raise EmptyReplyError(
+                    "the model replied with nothing", retryable=True, result=result
+                )
 
 
 class ReviewChatModel(ChatOpenAI):
@@ -153,6 +157,12 @@ class ReviewChatModel(ChatOpenAI):
             except DeadlinePassedError:
                 raise
             except Exception as error:
+                if isinstance(error, EmptyReplyError) and run_manager is not None:
+                    # Billed though thrown away: charged before any retry, which the
+                    # budget may now refuse.
+                    for handler in run_manager.handlers:
+                        if isinstance(handler, UsageMeter):
+                            handler.charge_wasted(error.result, self.model_name)
                 wait = retry_wait(error, retry, self.rng)
                 if wait is None or retry >= self.retries or self.clock() + wait >= self.deadline:
                     raise
@@ -404,16 +414,27 @@ class UsageMeter(BaseCallbackHandler):
     def on_llm_end(self, response: LLMResult, *, run_id: UUID, **kwargs: Any) -> None:
         started = self._started.pop(run_id, self._clock())
         duration_ms = int((self._clock() - started) * 1000)
-        input_tokens = cached = output_tokens = 0
-        for generations in response.generations:
-            for generation in generations:
-                usage = getattr(getattr(generation, "message", None), "usage_metadata", None)
-                if usage:
-                    input_tokens += usage["input_tokens"]
-                    output_tokens += usage["output_tokens"]
-                    details = usage.get("input_token_details") or {}
-                    cached += min(details.get("cache_read") or 0, usage["input_tokens"])
         model = (response.llm_output or {}).get("model_name", "")
+        generations = [g for batch in response.generations for g in batch]
+        self._charge(model, generations, duration_ms)
+
+    def charge_wasted(self, result: ChatResult, model: str) -> None:
+        """Charge an attempt a retry replaces, then refuse the retry if that spent it all."""
+        self._charge(model, list(result.generations), 0)
+        if self._budget.exhausted:
+            raise BudgetExceededError(
+                f"token budget of {self._budget.limit} used up ({self._budget.used} tokens)"
+            )
+
+    def _charge(self, model: str, generations: list[Any], duration_ms: int) -> None:
+        input_tokens = cached = output_tokens = 0
+        for generation in generations:
+            usage = getattr(getattr(generation, "message", None), "usage_metadata", None)
+            if usage:
+                input_tokens += usage["input_tokens"]
+                output_tokens += usage["output_tokens"]
+                details = usage.get("input_token_details") or {}
+                cached += min(details.get("cache_read") or 0, usage["input_tokens"])
         # Charged before the record is written: if writing fails, the budget still holds.
         self._budget.charge(charged_tokens(input_tokens, cached, output_tokens))
         self._record(model, input_tokens, cached, output_tokens, duration_ms)

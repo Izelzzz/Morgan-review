@@ -485,3 +485,32 @@ def test_an_empty_reply_cut_by_the_output_limit_is_not_retried(service: FakeServ
         chat_model(endpoint(service), sleep=Sleeps()).invoke("review")
 
     assert len(service.requests) == 1
+
+
+def test_an_attempt_thrown_away_for_an_empty_reply_is_still_charged(
+    service: FakeService, db: tuple[Path, int]
+) -> None:
+    # The service bills the first attempt too: 11 input and 7 output tokens each time.
+    service.plans = [Plan(content="", finish=None), Plan()]
+    budget = TokenBudget(500_000)
+    meter = UsageMeter(budget, review_usage(db[0], db[1], "security"))
+
+    chat_model(endpoint(service), sleep=Sleeps()).invoke("review", config={"callbacks": [meter]})
+
+    assert len(service.requests) == 2
+    assert budget.used == 36
+    assert len(usage_rows(db[0])) == 2
+
+
+def test_no_retry_is_sent_once_the_wasted_attempts_used_up_the_budget(
+    service: FakeService, db: tuple[Path, int]
+) -> None:
+    service.plans = [Plan(content="", finish=None)]
+    meter = UsageMeter(TokenBudget(18), review_usage(db[0], db[1], "security"))
+
+    with pytest.raises(BudgetExceededError):
+        chat_model(endpoint(service), sleep=Sleeps()).invoke(
+            "review", config={"callbacks": [meter]}
+        )
+
+    assert len(service.requests) == 1
