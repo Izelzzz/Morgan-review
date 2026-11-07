@@ -101,7 +101,14 @@ class ByDimension(BaseChatModel):
             with self.lock:
                 self.checked.append(title)
                 self.order.append(f"verify:{title}")
-            answer = self.verdicts.get(title, holds())
+            with self.lock:  # a list is a verifier's turns, one per model call
+                answer = self.verdicts.get(title, holds())
+                if isinstance(answer, list):
+                    answer = answer.pop(0) if len(answer) > 1 else answer[0]
+            if callable(answer):  # something happening while the verifier works
+                answer = answer()
+            if isinstance(answer, AIMessage):
+                return ChatResult(generations=[ChatGeneration(message=answer)])
             if isinstance(answer, Exception):
                 raise answer
             return ChatResult(generations=[ChatGeneration(message=_verdict(answer, text))])
@@ -845,3 +852,57 @@ def test_only_verified_findings_are_merged(setup: Setup) -> None:
     assert "spec_drift: not real" not in "\n".join(judge.listings)
     [merged] = setup.findings(review_id)
     assert sorted(json.loads(merged["dimensions"])) == ["edge_cases", "security"]
+
+
+def test_a_blocking_finding_is_verified_ahead_of_robustness_ones_already_started(
+    setup: Setup,
+) -> None:
+    # One model call at a time; two robustness checks take many turns each.
+    setup.settings = setup.settings.model_copy(update={"model_concurrency": 1})
+    review_id = setup.queue()
+    looks = [
+        AIMessage("", tool_calls=[{"name": "list_dir", "args": {}, "id": f"l{n}"}])
+        for n in range(6)
+    ]
+    slow_a = finding(
+        "edge_cases", title="edge_cases: a", severity="robustness", line_start=1, line_end=1
+    )
+    slow_b = finding(
+        "edge_cases", title="edge_cases: b", severity="robustness", line_start=2, line_end=2
+    )
+    urgent = finding("security", title="security: urgent", severity="blocking")
+    model = ByDimension(
+        scripts={"edge_cases": [submit(slow_a, slow_b)], "security": [submit(urgent)]},
+        delay={"security": 0.3, "verify:edge_cases: a": 0.1, "verify:edge_cases: b": 0.1},
+        verdicts={"edge_cases: a": [*looks, holds()], "edge_cases: b": [*list(looks), holds()]},
+    )
+
+    setup.run(review_id, model)
+
+    order = model.order
+    # Its first call comes as soon as a call ends, not once a robustness check is done.
+    assert order.index("verify:security: urgent") < len(order) - 1 - order[::-1].index(
+        "verify:edge_cases: a"
+    )
+    assert order.index("verify:security: urgent") < len(order) - 1 - order[::-1].index(
+        "verify:edge_cases: b"
+    )
+
+
+def test_a_review_superseded_while_verifying_is_superseded_not_failed(setup: Setup) -> None:
+    review_id = setup.queue()
+    newer = setup.queue(head="c" * 40)
+    title = "edge_cases: refunds can exceed the paid amount"
+
+    def pushed_then_failed() -> Any:
+        with closing(connect(setup.settings.db_path)) as conn:
+            conn.execute("UPDATE reviews SET superseded_by = ? WHERE id = ?", (newer, review_id))
+        raise RuntimeError("verifier unavailable")
+
+    model = ByDimension(
+        scripts={"edge_cases": [submit(finding("edge_cases"))]},
+        verdicts={title: pushed_then_failed},
+    )
+
+    with pytest.raises(ReviewSuperseded):
+        setup.run(review_id, model)

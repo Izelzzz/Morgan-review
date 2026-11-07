@@ -18,7 +18,6 @@ finding that needed verifying getting a verdict ends the review.
 """
 
 import hashlib
-import heapq
 import json
 import logging
 import math
@@ -347,13 +346,14 @@ def run_review(
     runs, checks, accepted, published = work.find_and_verify(
         jobs, submit_by=submit_by, deadline=deadline, verifying=verifying
     )
+    # A newer push makes this review superseded, whatever else went wrong in it.
+    _check_not_superseded(conn, review_id)
     # D-004 as D-027 has it: findings that needed a verifier, none of which got a verdict,
     # mean the verification itself failed; publishing the nits alone would hide that.
     if checks and not any(c.run is not None and c.run.verdict is not None for c in checks):
         first = next((c.run.reason for c in checks if c.run and c.run.reason), "no verdict")
         raise RuntimeError(f"no finding could be verified ({len(checks)} tried): {first}")
 
-    _check_not_superseded(conn, review_id)
     step = _now(conn)
     judge = None
     fallbacks: list[str] = []
@@ -416,9 +416,7 @@ class _Work:
         row = conn.execute("SELECT repo, head_sha FROM reviews WHERE id = ?", (review_id,))
         self.repo, self.head = row.fetchone()
         self.slots = Slots(settings.model_concurrency)
-        self.events: queue.Queue[tuple[str, object, Future[Any]]] = queue.Queue()
-        self.pending: list[tuple[int, int, _Check]] = []  # verifications not yet started
-        self.lock = threading.Lock()
+        self.events: queue.Queue[tuple[str, object, Future[Any] | None]] = queue.Queue()
         self.starts: dict[str, str] = {}
         self.candidates = 0  # ids given so far
 
@@ -466,11 +464,10 @@ class _Work:
                 slot=lambda: self.slots.held(DIMENSION_TURN),
             )
 
-        def verify() -> tuple[_Check, VerificationRun]:
-            # The highest-priority verification waiting, not the one this task was queued
-            # for: the result names its check, and only the review's thread stores it.
-            with self.lock:
-                _, _, check = heapq.heappop(self.pending)
+        def verify(check: _Check) -> None:
+            # Each check has a thread of its own and competes for model calls by priority
+            # (Slots): a pool would let checks already started hold every thread until
+            # they end, and a 🔴 handed in later would wait behind them.
             check.started = _utc_now()
             meter = UsageMeter(
                 self.budget, review_usage(settings.db_path, self.review_id, "verify")
@@ -493,10 +490,10 @@ class _Work:
                 run = VerificationRun(
                     check.lead.finding, "incomplete", reason=f"{type(exc).__name__}: {exc}"
                 )
-            return check, run
+            # Only the review's thread stores the result.
+            self.events.put(("verified", (check, run), None))
 
         finders = ThreadPoolExecutor(settings.model_concurrency, thread_name_prefix="find")
-        verifiers = ThreadPoolExecutor(settings.model_concurrency, thread_name_prefix="verify")
         runs: dict[int, AgentRun] = {}  # by the job's place in `jobs`: a Job is not hashable
         checks: list[_Check] = []
         accepted: list[Candidate] = []
@@ -522,7 +519,7 @@ class _Work:
                 except queue.Empty:
                     continue
                 if kind == "found":
-                    assert isinstance(item, int)  # noqa: S101
+                    assert isinstance(item, int) and future is not None  # noqa: S101
                     job = jobs[item]
                     run = self._agent_run(job, future)
                     runs[item] = run
@@ -542,21 +539,20 @@ class _Work:
                             continue
                         check = _Check(len(checks) + 1, [candidate], job.pack)
                         checks.append(check)
-                        with self.lock:
-                            priority = verify_priority(finding.severity)
-                            heapq.heappush(self.pending, (priority, check.number, check))
                         unverified += 1
-                        verifiers.submit(verify).add_done_callback(done("verified", None))
+                        # A daemon: one still running at the deadline is left behind.
+                        threading.Thread(
+                            target=verify, args=(check,), name=f"verify-{check.number}", daemon=True
+                        ).start()
                 else:
                     unverified -= 1
-                    if not future.cancelled():
-                        check, verification = future.result()
-                        check.run = verification
-                        self._record(check)
-                        self._accept(check, check.members, accepted, published)
+                    assert isinstance(item, tuple)  # noqa: S101
+                    check, verification = item
+                    check.run = verification
+                    self._record(check)
+                    self._accept(check, check.members, accepted, published)
         finally:
             finders.shutdown(wait=False, cancel_futures=True)
-            verifiers.shutdown(wait=False, cancel_futures=True)
         for index, job in enumerate(jobs):
             if index not in runs:
                 started = job.node in self.starts
