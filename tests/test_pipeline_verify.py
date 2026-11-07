@@ -119,6 +119,12 @@ def test_a_finding_that_does_not_hold_is_answered_as_such(repo_tools: RepoTools)
     assert not result.verdict.holds
 
 
+def test_a_level_given_with_does_not_hold_is_ignored(repo_tools: RepoTools) -> None:
+    result = verify(ScriptedModel(script=[verdict(False, "nit")]), repo_tools)
+
+    assert result.verdict is not None and result.verdict.severity == "blocking"
+
+
 def test_the_verifier_reads_the_code_with_its_tools_before_answering(
     repo_tools: RepoTools,
 ) -> None:
@@ -148,6 +154,7 @@ def test_the_verifier_sees_the_intent_and_only_the_finding_s_own_diff(
     assert "+    total = cents" in text  # the diff of the finding's file
     assert "Refunds are clamped." not in text  # another file's diff: read it if needed
     assert "README.md" in text  # still listed among the changed files
+    assert "## Changes" not in str(rest[0].content)  # no heading left without diffs
 
 
 def test_the_finding_is_given_as_untrusted_data(repo_tools: RepoTools) -> None:
@@ -171,7 +178,7 @@ def test_a_malformed_verdict_is_asked_again_once(repo_tools: RepoTools) -> None:
     assert result.status == "done"
     twice = verify(ScriptedModel(script=[bad, bad]), repo_tools)
     assert twice.status == "incomplete" and twice.verdict is None
-    assert twice.reason is not None and "format" in twice.reason
+    assert twice.reason == "the verdict was not in the expected format twice"
 
 
 def test_a_verifier_out_of_tool_calls_must_answer(repo_tools: RepoTools) -> None:
@@ -212,6 +219,8 @@ def test_verifiers_of_one_review_share_their_opening_for_the_prompt_cache(
     verify(first, repo_tools)
     verify(second, repo_tools, candidate=finding(file="README.md", line_start=1, line_end=1))
 
-    assert first.sent[0][:2] == second.sent[0][:2]
+    # Rules, intent and task are shared; only the diff and the finding come after.
+    assert len(first.sent[0]) == 4
+    assert first.sent[0][:3] == second.sent[0][:3]
     assert first.sent[0][-1] != second.sent[0][-1]
     assert "Refunds are clamped." in str(second.sent[0][-1].content)

@@ -131,7 +131,7 @@ class Submit[T]:
 
     tool: StructuredTool
     parse: Callable[[dict[str, Any]], T]  # raises ValidationError on a malformed answer
-    what: str  # what is handed in, as the agent is told: "findings", "verdict"
+    what: str  # what is handed in, a noun taking "was": "findings list", "verdict"
     now: str  # told once only the submit tool is left
 
     @property
@@ -235,7 +235,7 @@ def tool_loop[T](
             end.answer = submit.parse(submitted["args"])
         except ValidationError as exc:
             if format_retry_used:
-                end.reason = f"the {submit.what} were not in the expected format twice"
+                end.reason = f"the {submit.what} was not in the expected format twice"
                 return end
             format_retry_used = True
             problems = "; ".join(
@@ -243,8 +243,8 @@ def tool_loop[T](
             )
             messages.append(
                 ToolMessage(
-                    f"The {submit.what} are not in the expected format ({problems}). Call"
-                    f" {submit.name} again with every required field.",
+                    f"The {submit.what} you submitted is not in the expected format"
+                    f" ({problems}). Call {submit.name} again with every required field.",
                     tool_call_id=submitted["id"],
                 )
             )
@@ -277,7 +277,7 @@ def run_dimension(
     limits: ConversationLimits = ConversationLimits(),  # noqa: B008 - frozen, shared safely
 ) -> AgentRun:
     """Run one dimension agent to its findings, or to a recorded reason it stopped."""
-    submit = Submit(_submit_tool(), Submission.model_validate, "findings", SUBMIT_NOW)
+    submit = Submit(_submit_tool(), Submission.model_validate, "findings list", SUBMIT_NOW)
     end = tool_loop(
         model_for,
         list(pack.messages(dimension)),
