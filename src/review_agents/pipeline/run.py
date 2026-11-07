@@ -7,7 +7,7 @@ Between steps the review checks that a newer push has not superseded it (D-010).
 Finding and verifying have no time limits of their own (decision D-031). The dimension
 agents run side by side; as each hands in, its findings are verified at once, one
 verifier per finding, while the others still work. The review's model calls are shared
-out by value: verifying a 🔴, then a 🟡, then a dimension agent's next turn, then a 🔵.
+out by priority: verifying a 🔴, then a 🟡, then a dimension agent's next turn, then a 🔵.
 The agents hand in at the latest `after_submit_seconds` before the end; what is still
 unverified at the end is not published. Only verified findings, and nits, which are not
 verified, are merged and written.
@@ -467,7 +467,7 @@ class _Work:
             )
 
         def verify() -> tuple[_Check, VerificationRun]:
-            # The most valuable verification waiting, not the one this task was queued
+            # The highest-priority verification waiting, not the one this task was queued
             # for: the result names its check, and only the review's thread stores it.
             with self.lock:
                 _, _, check = heapq.heappop(self.pending)

@@ -655,7 +655,7 @@ def test_time_spent_waiting_for_a_slot_counts_against_the_deadline(
 
     @contextmanager
     def slow_slot() -> Iterator[None]:
-        now[0] += 100.0  # waited behind more valuable calls
+        now[0] += 100.0  # waited behind calls of a higher priority
         yield
 
     model = ScriptedModel(script=[submit()])

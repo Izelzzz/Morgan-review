@@ -23,7 +23,7 @@ def test_verifying_comes_before_finding_more_and_robustness_after() -> None:
     assert [name for name, _ in order] == ["blocking", "important", "dimension", "robustness"]
 
 
-def test_a_free_slot_goes_to_the_most_valuable_waiter() -> None:
+def test_a_free_slot_goes_to_the_waiter_of_the_highest_priority() -> None:
     slots = Slots(1)
     got: list[str] = []
     holder = threading.Event()
@@ -41,7 +41,7 @@ def test_a_free_slot_goes_to_the_most_valuable_waiter() -> None:
     threads = [threading.Thread(target=hold)]
     threads[0].start()
     holder.wait(5)
-    # Queued in the worst order: the least valuable first.
+    # Queued in the worst order: the lowest priority first.
     for name, priority in [
         ("robustness", verify_priority("robustness")),
         ("dimension", DIMENSION_TURN),

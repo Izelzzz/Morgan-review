@@ -199,7 +199,7 @@ def tool_loop[T](
             end.reason = str(exc)
             return end
         offered = [submit.tool] if final else [*schemas, submit.tool]
-        # The review's model calls are shared out by value (D-031); the time spent
+        # The review's model calls are shared out by priority (D-031); the time spent
         # waiting for one counts, so the time left is measured once it is ours.
         with slot():
             left = deadline - clock()

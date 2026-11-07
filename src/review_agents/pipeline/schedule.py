@@ -2,9 +2,10 @@
 
 A review has a fixed number of model calls in flight (`model_concurrency`), shared by
 the dimension agents and the verifiers. Phases have no time limits of their own: when a
-call ends, its slot goes to the most valuable call waiting. Only a verified finding is
-published, so verifying what was found comes before finding more, and the more severe
-a finding, the sooner it is verified. A call that is running is never interrupted.
+call ends, its slot goes to the waiting call of the highest priority. Only a verified
+finding is published, so verifying what was found comes before finding more, and the
+more severe a finding, the sooner it is verified. A call that is running is never
+interrupted.
 """
 
 import heapq
@@ -26,7 +27,7 @@ def verify_priority(severity: Severity) -> int:
 
 
 class Slots:
-    """`count` model calls at once; a freed slot goes to the lowest priority number.
+    """`count` model calls at once; a freed slot goes to the highest priority (lowest number).
 
     Waiters of the same priority are served in the order they came.
     """
