@@ -77,8 +77,8 @@ class Settings(BaseSettings):
     # the model service's rate limit; local models may want 1.
     model_concurrency: int = Field(default=5, ge=1)
     # Of a review's time, what is kept after the dimension phase for merging, verifying and
-    # writing the report (decision D-022); to be tuned from measurements (#17).
-    wrap_up_seconds: float = Field(default=240.0, ge=0)
+    # writing the findings (decisions D-022, D-028); to be tuned from measurements (#17).
+    wrap_up_seconds: float = Field(default=600.0, ge=0)
 
     # Preload the callers, tests and types of changed code into the PR layer. Off: the
     # agents look them up with their tools (decision D-015); kept for comparison in #17

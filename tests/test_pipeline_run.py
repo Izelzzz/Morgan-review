@@ -24,6 +24,7 @@ from review_agents.models import BudgetExceededError
 from review_agents.pipeline.agent import SUBMIT_TOOL
 from review_agents.pipeline.merge import MERGE_TOOL
 from review_agents.pipeline.run import ReviewSuperseded, run_review, wait_for_summaries
+from review_agents.repo_config import MAX_REVIEW_MINUTES
 from review_agents.worker import claim_next, recover_interrupted
 
 DIMENSION = re.compile(r"^name: (\w+)$", re.MULTILINE)
@@ -342,7 +343,7 @@ def test_a_review_shorter_than_the_wrap_up_reserve_still_reviews(setup: Setup) -
     review_id = setup.queue()
     model = ByDimension(scripts={"edge_cases": [submit(finding("edge_cases"))]})
 
-    # 60 seconds in all, less than the 240-second reserve on its own.
+    # 60 seconds in all, less than the 600-second reserve on its own.
     setup.run(review_id, model, review_seconds=60.0)
 
     assert [f["primary_dimension"] for f in setup.findings(review_id)] == ["edge_cases"]
@@ -553,3 +554,21 @@ def test_the_judge_gets_the_time_left_to_the_deadline(setup: Setup) -> None:
     setup.run(review_id, model, judge_for=judge_for, review_seconds=30.0)
 
     assert len(asked) == 1 and 0 < asked[0] <= 30.0  # the time to the review's deadline
+
+
+def test_the_mirror_sync_gets_the_time_the_review_has(setup: Setup) -> None:
+    # The repository's own, shorter limit is in the mirror, so the sync is bounded by the
+    # longest review there can be (decision D-028).
+    review_id = setup.queue()
+    model = ByDimension(scripts={"edge_cases": [submit(finding("edge_cases"))]})
+    sync = setup.store.sync
+    deadlines: list[float] = []
+
+    def recording_sync(*args: Any, deadline: float, **kwargs: Any) -> Path:
+        deadlines.append(deadline)
+        return sync(*args, deadline=deadline, **kwargs)
+
+    setup.store.sync = recording_sync  # type: ignore[method-assign,assignment]
+    setup.run(review_id, model, clock=lambda: 1000.0)
+
+    assert deadlines == [1000.0 + MAX_REVIEW_MINUTES * 60]
