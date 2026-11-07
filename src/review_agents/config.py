@@ -79,6 +79,13 @@ class Settings(BaseSettings):
     # Of a review's time, what is kept after the dimension phase for merging, verifying and
     # writing the findings (decisions D-022, D-028); to be tuned from measurements (#17).
     wrap_up_seconds: float = Field(default=600.0, ge=0)
+    # An agent's tool conversation stays inside the model's window (decision D-030): one
+    # tool result keeps at most this many tokens, head and tail; when the conversation
+    # would not fit, older results are cut to a head and tail this long each, keeping
+    # room for the reply.
+    tool_result_tokens: int = Field(default=10_000, ge=1)
+    shortened_result_tokens: int = Field(default=500, ge=1)
+    output_reserve_tokens: int = Field(default=4_000, ge=0)
 
     # Preload the callers, tests and types of changed code into the PR layer. Off: the
     # agents look them up with their tools (decision D-015); kept for comparison in #17

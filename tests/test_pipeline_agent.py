@@ -13,9 +13,18 @@ from pydantic import Field
 from review_agents.context.pack import SHARED_RULES, ContextPack
 from review_agents.context.pr_layer import PrLayer, PrRequest
 from review_agents.context.repo_layer import RepoLayer
+from review_agents.context.tokens import estimate_tokens
 from review_agents.mirror import MirrorStore
 from review_agents.models import BudgetExceededError
 from review_agents.pipeline.agent import SUBMIT_TOOL, AgentRun, run_dimension
+from review_agents.pipeline.conversation import (
+    REMOVED,
+    REPEATED,
+    Conversation,
+    ConversationLimits,
+    conversation_tokens,
+    shorten,
+)
 from review_agents.tools import RepoTools
 
 FILES: dict[str, str | bytes] = {
@@ -454,3 +463,180 @@ def test_each_model_call_is_bounded_by_the_time_left(repo_tools: RepoTools) -> N
 
     # Each turn's model gets the time to the deadline; its retries never wait past it.
     assert timeouts == [1000.0, 10.0]
+
+
+LONG = "\n".join(f"value_{n} = compute({n}, factor={n * 7})" for n in range(1, 3001)) + "\n"
+
+
+@pytest.fixture
+def long_tools(tmp_path: Path) -> RepoTools:
+    upstream = Upstream(tmp_path, "octo/shop")
+    head = upstream.commit({**FILES, "big/table.py": LONG}, "init")
+    store = MirrorStore(tmp_path / "repos", remote_base=str(upstream.base))
+    git_dir = store.sync("octo/shop", ["refs/heads/main"], [head], None)
+    return RepoTools(git_dir, "octo/shop", head, [])
+
+
+def run_limited(model: ScriptedModel, tools: RepoTools, limits: ConversationLimits) -> AgentRun:
+    return run_dimension(
+        lambda left: model,
+        pack(),
+        "edge_cases",
+        tools,
+        tool_calls=25,
+        callbacks=[],
+        deadline=float("inf"),
+        clock=lambda: 0.0,
+        limits=limits,
+    )
+
+
+def tool_texts(model: ScriptedModel) -> list[str]:
+    return [str(m.content) for m in model.sent[-1] if isinstance(m, ToolMessage)]
+
+
+def test_a_long_tool_result_keeps_its_head_and_tail_and_says_how_to_read_the_rest(
+    long_tools: RepoTools,
+) -> None:
+    model = ScriptedModel(script=[call("read_file", {"path": "big/table.py"}), submit()])
+
+    run_limited(model, long_tools, ConversationLimits(result_tokens=1000))
+
+    [text] = tool_texts(model)
+    assert estimate_tokens(text) <= 1200
+    assert "1: value_1 = " in text and "3000: value_3000 = " in text
+    assert "1500: value_1500 = " not in text
+    assert "start_line" in text  # how to read what was left out
+    assert text.rstrip().endswith("</untrusted>")  # still inside its data block
+
+
+def test_older_results_shrink_when_the_conversation_nears_the_window(
+    long_tools: RepoTools,
+) -> None:
+    reads = [
+        call("read_file", {"path": "big/table.py", "start_line": s, "end_line": s + 199}, f"c{s}")
+        for s in (1, 1001, 2001)
+    ]
+    model = ScriptedModel(script=[*reads, submit()])
+    limits = ConversationLimits(
+        window=9000, result_tokens=4000, shortened_tokens=100, output_reserve=500
+    )
+
+    run_limited(model, long_tools, limits)
+
+    sent = model.sent[-1]
+    assert conversation_tokens(sent) + 500 <= 9000
+    first, *_, last = tool_texts(model)
+    assert "Shortened" in first  # the oldest result gave way
+    assert "Shortened" not in last and "2200: value_2200" in last
+    assert last.rstrip().endswith("</untrusted>") and first.rstrip().endswith("</untrusted>")
+
+
+def test_the_third_identical_call_is_reminded_to_change_course(repo_tools: RepoTools) -> None:
+    same = [call("list_dir", {}, f"c{n}") for n in range(3)]
+    model = ScriptedModel(script=[*same, call("list_dir", {"path": "payments"}, "c9"), submit()])
+
+    run_limited(model, repo_tools, ConversationLimits())
+
+    texts = tool_texts(model)
+    assert [REPEATED in t for t in texts] == [False, False, True, False]
+
+
+def test_a_result_of_a_few_very_long_lines_is_still_cut_to_its_limit() -> None:
+    minified = "\n".join(["x" * 30_000, "y" * 30_000])  # two lines, about 20k tokens
+
+    text = shorten(minified, 500, "read_file")
+
+    assert estimate_tokens(text) <= 1200
+    assert text.startswith("[Shortened") and "x" in text and "y" in text
+
+
+def test_a_cut_by_characters_stays_within_its_limit_in_any_script() -> None:
+    chinese = "\n".join(["退款金额" * 5000, "订单状态" * 5000])  # about 1 token a character
+
+    text = shorten(chinese, 500, "search_code")
+
+    assert estimate_tokens(text) <= 1200
+
+
+def test_results_give_way_entirely_when_shortening_them_is_not_enough(
+    long_tools: RepoTools,
+) -> None:
+    reads = [
+        call("read_file", {"path": "big/table.py", "start_line": s, "end_line": s + 199}, f"c{s}")
+        for s in (1, 1001, 2001)
+    ]
+    model = ScriptedModel(script=[*reads, submit()])
+    # Room for the pack and about one shortened result, not three.
+    limits = ConversationLimits(
+        window=5200, result_tokens=4000, shortened_tokens=600, output_reserve=500
+    )
+
+    result = run_limited(model, long_tools, limits)
+
+    assert result.status == "done"
+    for sent in model.sent:  # no request ever exceeded the window
+        assert conversation_tokens(sent) + 500 <= 5200
+    first, *_ = tool_texts(model)
+    assert first.startswith(REMOVED)
+
+
+def test_an_agent_whose_conversation_cannot_fit_stops_instead_of_sending_it(
+    repo_tools: RepoTools,
+) -> None:
+    model = ScriptedModel(script=[submit()])
+    # The context pack alone is larger than the window leaves.
+    limits = ConversationLimits(window=600, output_reserve=500)
+
+    result = run_limited(model, repo_tools, limits)
+
+    assert result.status == "incomplete"
+    assert result.reason is not None and "window" in result.reason
+    assert model.sent == []
+
+
+def test_the_tool_definitions_count_against_the_window() -> None:
+    # The tool definitions go with every request, so they take room like the messages do.
+    text = "\n".join(f"line {n}" for n in range(400))
+    messages: list[BaseMessage] = []
+    Conversation(ConversationLimits()).answer(messages, "c1", "read_file", {}, text)
+    size = conversation_tokens(messages)
+    limits = ConversationLimits(window=size + 100, shortened_tokens=20, output_reserve=0)
+    messages = []
+    conversation = Conversation(limits, overhead=500)
+    conversation.answer(messages, "c1", "read_file", {}, text)
+
+    conversation.fit(messages)
+
+    assert conversation_tokens(messages) + 500 <= size + 100
+    assert "Shortened" in str(messages[0].content)
+
+
+def test_a_call_whose_result_was_removed_may_be_made_again_without_a_reminder() -> None:
+    big = "\n".join(f"line {n}" for n in range(400))
+    # Room for two removal notes, not for two shortened results.
+    limits = ConversationLimits(
+        window=2 * estimate_tokens(REMOVED) + 5, shortened_tokens=20, output_reserve=0
+    )
+    conversation = Conversation(limits)
+    messages: list[BaseMessage] = []
+    for n in range(2):
+        conversation.answer(messages, f"c{n}", "list_dir", {}, big)
+
+    conversation.fit(messages)
+    assert [str(m.content) for m in messages] == [REMOVED, REMOVED]
+    conversation.answer(messages, "c2", "list_dir", {}, "payments/")
+
+    # The agent was told to call again for what was removed; that is not repeating itself.
+    assert REPEATED not in str(messages[-1].content)
+
+
+def test_an_agent_counts_its_tool_definitions_before_sending(repo_tools: RepoTools) -> None:
+    model = ScriptedModel(script=[submit()])
+    # Room for the context pack's messages, not for them and the tool definitions.
+    pack_size = conversation_tokens(pack().messages("edge_cases"))
+    limits = ConversationLimits(window=pack_size + 10, output_reserve=0)
+
+    result = run_limited(model, repo_tools, limits)
+
+    assert result.status == "incomplete" and model.sent == []

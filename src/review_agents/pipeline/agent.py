@@ -9,6 +9,7 @@ A failure ends this agent only; the pipeline carries on with the other dimension
 """
 
 import functools
+import json
 import math
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
@@ -18,11 +19,17 @@ from langchain_core.callbacks import BaseCallbackHandler
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, ToolCall, ToolMessage
 from langchain_core.tools import StructuredTool
+from langchain_core.utils.function_calling import convert_to_openai_tool
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
-from review_agents.context.markup import untrusted
 from review_agents.context.pack import ContextPack
+from review_agents.context.tokens import estimate_tokens
 from review_agents.models import BudgetExceededError
+from review_agents.pipeline.conversation import (
+    Conversation,
+    ConversationLimits,
+    ConversationTooLong,
+)
 from review_agents.tools import (
     LIMIT_REACHED,
     RepoTools,
@@ -125,6 +132,7 @@ def run_dimension(
     callbacks: Sequence[BaseCallbackHandler],
     deadline: float = math.inf,
     clock: Callable[[], float],
+    limits: ConversationLimits = ConversationLimits(),  # noqa: B008 - frozen, shared safely
 ) -> AgentRun:
     """Run one dimension agent to its findings, or to a recorded reason it stopped.
 
@@ -135,6 +143,8 @@ def run_dimension(
     available = agent_tools(tools, budget)
     schemas = [StructuredTool.from_function(f, name=n) for n, f in available.items()]
     submit = _submit_tool()
+    definitions = [convert_to_openai_tool(t) for t in [*schemas, submit]]
+    conversation = Conversation(limits, overhead=estimate_tokens(json.dumps(definitions)))
     messages: list[BaseMessage] = list(pack.messages(dimension))
     run = AgentRun(dimension, "incomplete")
     # One retry each: a reply in text instead of a call, and a malformed submission.
@@ -152,6 +162,11 @@ def run_dimension(
         if final and not told_to_submit:
             messages.append(HumanMessage(SUBMIT_NOW))
             told_to_submit = True
+        try:
+            conversation.fit(messages)
+        except ConversationTooLong as exc:  # sending it would only fail at the service
+            run.reason = str(exc)
+            return run
         bound = model_for(deadline - now).bind_tools([submit] if final else [*schemas, submit])
         try:
             reply = bound.invoke(messages, config={"callbacks": list(callbacks)})
@@ -177,7 +192,7 @@ def run_dimension(
             if final:  # only submit was offered: a tool must not eat the time that is left
                 messages.append(ToolMessage(SUBMIT_ONLY, tool_call_id=tool_call["id"]))
             else:
-                messages.append(_answer(tool_call, available, budget))
+                _answer(tool_call, available, budget, messages, conversation)
 
         if submitted is None and not reply.tool_calls:
             if text_retry_used:
@@ -237,20 +252,29 @@ def run_dimension(
 
 
 def _answer(
-    tool_call: ToolCall, available: dict[str, Callable[..., str]], budget: ToolBudget
-) -> ToolMessage:
+    tool_call: ToolCall,
+    available: dict[str, Callable[..., str]],
+    budget: ToolBudget,
+    messages: list[BaseMessage],
+    conversation: Conversation,
+) -> None:
     name, call_id = tool_call["name"], tool_call["id"]
     tool = available.get(name)
     if tool is None:
         # Counted like any refused call, so a model stuck on a misspelt name still runs
         # out of calls and is told to submit.
         if budget.used >= budget.limit:
-            return ToolMessage(LIMIT_REACHED, tool_call_id=call_id)
+            messages.append(ToolMessage(LIMIT_REACHED, tool_call_id=call_id))
+            return
         budget.used += 1
-        return ToolMessage(f"error: there is no tool named {name!r}", tool_call_id=call_id)
+        messages.append(
+            ToolMessage(f"error: there is no tool named {name!r}", tool_call_id=call_id)
+        )
+        return
     try:
         # Called through the budget wrapper, so a call with wrong arguments still counts.
         result = tool(**tool_call["args"])
     except Exception as exc:  # wrong arguments, or a tool that broke: this call fails only
-        return ToolMessage(f"error: {exc}", tool_call_id=call_id)
-    return ToolMessage(untrusted(f"tool:{name}", result), tool_call_id=call_id)
+        messages.append(ToolMessage(f"error: {exc}", tool_call_id=call_id))
+        return
+    conversation.answer(messages, call_id, name, tool_call["args"], result)
