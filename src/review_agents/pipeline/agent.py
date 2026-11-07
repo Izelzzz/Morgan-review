@@ -130,7 +130,7 @@ class Submit[T]:
     """How an agent hands in its answer: the tool, how its arguments are read, and words."""
 
     tool: StructuredTool
-    parse: Callable[[dict[str, Any]], T]  # raises ValidationError on a malformed answer
+    parse: Callable[[dict[str, Any]], T]  # raises ValueError on a malformed answer
     what: str  # what is handed in, a noun taking "was": "findings list", "verdict"
     now: str  # told once only the submit tool is left
 
@@ -233,13 +233,15 @@ def tool_loop[T](
             continue
         try:
             end.answer = submit.parse(submitted["args"])
-        except ValidationError as exc:
+        except ValueError as exc:  # ValidationError, or a check of the program's own
             if format_retry_used:
                 end.reason = f"the {submit.what} was not in the expected format twice"
                 return end
             format_retry_used = True
-            problems = "; ".join(
-                f"{'.'.join(map(str, e['loc']))}: {e['msg']}" for e in exc.errors()[:10]
+            problems = (
+                "; ".join(f"{'.'.join(map(str, e['loc']))}: {e['msg']}" for e in exc.errors()[:10])
+                if isinstance(exc, ValidationError)
+                else str(exc)
             )
             messages.append(
                 ToolMessage(

@@ -104,12 +104,11 @@ class PrLayer:
             parts.append(NO_SPEC_NOTE)
         parts.append("## Changed files")
         parts.append("\n".join(f.describe() for f in self.files))
-        if self.diffs:
-            heading = "## Changes"
-            if req.previous_head:
-                heading += f" since the previous review ({req.previous_head[:12]})"
-            parts.append(heading)
-            parts.extend(untrusted(f"diff:{path}", text) for path, text in self.diffs.items())
+        heading = "## Changes"
+        if req.previous_head:
+            heading += f" since the previous review ({req.previous_head[:12]})"
+        parts.append(heading)
+        parts.extend(untrusted(f"diff:{path}", text) for path, text in self.diffs.items())
         if self.excerpts:
             parts.append("## Code around the changes")
             for excerpt in self.excerpts:
