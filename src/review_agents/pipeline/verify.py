@@ -12,6 +12,7 @@ confirm in the code does not hold.
 import functools
 import math
 from collections.abc import Callable, Sequence
+from contextlib import nullcontext
 from dataclasses import dataclass
 from typing import Any, Literal
 
@@ -23,7 +24,7 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 
 from review_agents.context.markup import untrusted
 from review_agents.context.pack import ContextPack
-from review_agents.pipeline.agent import Finding, Severity, Submit, tool_loop
+from review_agents.pipeline.agent import Finding, Severity, Slot, Submit, tool_loop
 from review_agents.pipeline.conversation import ConversationLimits
 from review_agents.tools import RepoTools, ToolError, ToolTimeoutError, clean_path
 
@@ -181,6 +182,7 @@ def run_verifier(
     deadline: float = math.inf,
     clock: Callable[[], float],
     limits: ConversationLimits = ConversationLimits(),  # noqa: B008 - frozen, shared safely
+    slot: Slot = nullcontext,
 ) -> VerificationRun:
     """Verify one finding, or record why it could not be verified."""
     line_count = functools.cache(tools.line_count)
@@ -215,6 +217,7 @@ def run_verifier(
         deadline=deadline,
         clock=clock,
         limits=limits,
+        slot=slot,
     )
     run = VerificationRun(
         finding,
