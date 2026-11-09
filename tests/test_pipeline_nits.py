@@ -109,3 +109,21 @@ def test_a_model_that_cannot_be_built_leaves_the_nits_as_they_are() -> None:
     result = merge_nits(SEVEN, broken, limit=5, callbacks=[], language="zh")
 
     assert result.items == SEVEN and "no such endpoint" in (result.problem or "")
+
+
+def test_a_group_without_its_reason_or_suggestion_is_not_used() -> None:
+    title_only = call(NIT_TOOL, {"groups": [{"ids": list(range(1, 8)), "title": "Naming"}]})
+
+    result = merged(ScriptedModel(script=[title_only]), SEVEN)
+
+    assert result.items == SEVEN and result.problem is not None
+
+
+def test_a_merged_nit_is_pre_existing_only_when_all_of_its_nits_are() -> None:
+    mixed = [nit(1, preexisting=True), *SEVEN[1:]]
+    old = [nit(n, preexisting=True) for n in range(1, 8)]
+
+    for items, expected in ((mixed, False), (old, True)):
+        result = merged(ScriptedModel(script=[groups(list(range(1, 8)))]), items)
+
+        assert result.items[0].preexisting is expected

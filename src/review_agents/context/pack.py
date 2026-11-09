@@ -33,14 +33,14 @@ NO_ROOM_NOTE = (
 )
 
 
-_LANGUAGE_NAMES: dict[Language, str] = {"zh": "Simplified Chinese", "en": "English"}
+LANGUAGE_NAMES: dict[Language, str] = {"zh": "Simplified Chinese", "en": "English"}
 
 
 def language_note(language: Language) -> str:
     """The language an agent writes in, told after its task (decision D-034)."""
     return (
         f"Write every title, why, suggestion and reason, and the explanation and what each"
-        f" place shows in a basis, in {_LANGUAGE_NAMES[language]}. Keep file paths, code and"
+        f" place shows in a basis, in {LANGUAGE_NAMES[language]}. Keep file paths, code and"
         " identifiers as they are, and copy each quote exactly as it is written in its"
         " source: a quote is never translated."
     )
@@ -81,7 +81,7 @@ def fixed_tokens(base: ContextPack) -> int:
     Split packs carry the definitions other groups change on top of this, at most
     `signature_tokens`; a pack that is not split has no other groups.
     """
-    longest_note = max(estimate_tokens(language_note(lang)) for lang in _LANGUAGE_NAMES)
+    longest_note = max(estimate_tokens(language_note(lang)) for lang in LANGUAGE_NAMES)
     longest_task = max(estimate_tokens(task(d)) for d in DIMENSIONS) + longest_note
     return estimate_tokens(base.shared_rules) + estimate_tokens(base.prefix) + longest_task
 

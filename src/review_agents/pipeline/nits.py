@@ -16,12 +16,12 @@ from langchain_core.tools import StructuredTool
 from pydantic import BaseModel, Field
 
 from review_agents.context.markup import untrusted
+from review_agents.context.pack import LANGUAGE_NAMES
 from review_agents.repo_config import Language
 from review_agents.report import Item
 
 NIT_TOOL = "submit_nit_groups"
 NIT_MERGE_SECONDS = 120
-LANGUAGE_NAMES: dict[Language, str] = {"zh": "Simplified Chinese", "en": "English"}
 
 NIT_INSTRUCTIONS = """You group the small findings (nits) of one code review so the report
 lists at most {limit} of them, without losing any.
@@ -39,9 +39,11 @@ Call {tool} once with the groups."""
 
 class _Group(BaseModel):
     ids: list[int] = Field(min_length=1, description="The ids of the nits in this group.")
+    # Each replaces what its nits said, so none may be left out: a group without them
+    # would lose the nits' own reasons, and the merge is not used.
     title: str = Field(min_length=1)
-    why: str = ""
-    suggestion: str = ""
+    why: str = Field(min_length=1)
+    suggestion: str = Field(min_length=1)
 
 
 class _Args(BaseModel):
@@ -132,6 +134,8 @@ def _merge(
                 why=group.why,
                 suggestion=group.suggestion,
                 dimensions=sorted({d for m in members for d in m.dimensions}),
+                # Pre-existing only when every one of them is: a new nit is not old.
+                preexisting=all(m.preexisting for m in members),
                 locations=places,
                 bases=[b for m in members for b in m.bases],
             )

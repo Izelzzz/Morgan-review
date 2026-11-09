@@ -1049,7 +1049,10 @@ def eight_nits() -> dict[str, list[Any]]:
 def test_nits_past_the_limit_are_merged_by_the_strong_model(setup: Setup) -> None:
     review_id = setup.queue()
     model = ByDimension(scripts=eight_nits())
-    groups = [{"ids": [1, 2, 3, 4], "title": "a"}, {"ids": [5, 6, 7, 8], "title": "b"}]
+    groups = [
+        {"ids": ids, "title": title, "why": "w", "suggestion": "s"}
+        for ids, title in (([1, 2, 3, 4], "a"), ([5, 6, 7, 8], "b"))
+    ]
     strong = ScriptedModel(script=[call(NIT_TOOL, {"groups": groups})])
 
     setup.run(review_id, model, verifier_for=lambda left: strong)
