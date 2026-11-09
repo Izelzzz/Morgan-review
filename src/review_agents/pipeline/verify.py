@@ -22,7 +22,7 @@ from langchain_core.tools import StructuredTool
 from pydantic import BaseModel, Field
 
 from review_agents.context.markup import untrusted
-from review_agents.context.pack import ContextPack
+from review_agents.context.pack import ContextPack, language_note
 from review_agents.pipeline.agent import (
     Finding,
     Severity,
@@ -147,7 +147,7 @@ def verifier_messages(pack: ContextPack, finding: Finding) -> list[BaseMessage]:
     return [
         SystemMessage(pack.shared_rules),
         HumanMessage(pack.prefix),
-        HumanMessage(VERIFY_TASK),
+        HumanMessage(f"{VERIFY_TASK}\n\n{language_note(pack.language)}"),
         HumanMessage(untrusted("finding", _describe(finding))),
     ]
 

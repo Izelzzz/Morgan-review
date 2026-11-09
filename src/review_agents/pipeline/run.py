@@ -56,6 +56,7 @@ from review_agents.pipeline.agent import AgentRun, Finding, Severity, run_dimens
 from review_agents.pipeline.basis import Basis, describe, supported
 from review_agents.pipeline.conversation import ConversationLimits
 from review_agents.pipeline.merge import Candidate, Merged, merge, model_judge, overlaps
+from review_agents.pipeline.nits import NIT_MERGE_SECONDS, merge_nits
 from review_agents.pipeline.schedule import DIMENSION_TURN, Slots, verify_priority
 from review_agents.pipeline.verify import VERIFIER_TOOL_CALLS, VerificationRun, run_verifier
 from review_agents.repo_config import MAX_REVIEW_MINUTES, RepoConfig, read_repo_config
@@ -349,7 +350,9 @@ def run_review(
     pr_layer = build_pr_layer(
         conn, request, git_dir, config, token=token, surrounding_code=settings.surrounding_code
     )
-    packs = build_packs(repo_layer, pr_layer, window, settings.output_reserve_tokens)
+    packs = build_packs(
+        repo_layer, pr_layer, window, settings.output_reserve_tokens, config.language
+    )
     # For the report: the whole PR's lines, not only this round's, since GitHub takes
     # inline comments on those. Read with the rest of the code, before any model call.
     patches = pr_patches(git_dir, review["base_sha"], head, pr_layer.files)
@@ -419,8 +422,24 @@ def run_review(
     hits = [r.limit_hit for r in runs] + [c.run.limit_hit for c in checks if c.run]
     limit_hit = next((lim for lim in _LIMIT_ORDER if lim in hits), None)
     binary = sorted(path for path, patch in patches.items() if is_binary(patch))
+    items = [_item(m, published) for m in merged]
+    nits = sum(1 for i in items if i.severity == "nit")
+    if 0 < limits.nits_per_report < nits:
+        # One call to the strong model, outside the review's time (D-034, D-035).
+        step = _now(conn)
+        meter = UsageMeter(budget, review_usage(settings.db_path, review_id, "nits"))
+        strong = verifier_for or model_for
+        nit_merge = merge_nits(
+            items,
+            lambda: strong(NIT_MERGE_SECONDS),
+            limit=limits.nits_per_report,
+            callbacks=[meter],
+            language=config.language,
+        )
+        items = nit_merge.items
+        _step(conn, review_id, "report.nits", step, nit_merge.problem)
     report = build_report(
-        [_item(m, published) for m in merged],
+        items,
         changed={path: added_lines(patch) for path, patch in patches.items()},
         missed=[
             MissedStep(

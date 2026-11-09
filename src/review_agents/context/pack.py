@@ -17,6 +17,7 @@ from review_agents.context.grouping import grouped_layers, signature_tokens
 from review_agents.context.pr_layer import PrLayer
 from review_agents.context.repo_layer import RepoLayer
 from review_agents.context.tokens import estimate_tokens
+from review_agents.repo_config import Language
 
 DIMENSIONS = ("spec_drift", "edge_cases", "security", "maintainability", "verifiability")
 _SKILLS = files("review_agents") / "skills"
@@ -30,6 +31,19 @@ NO_ROOM_NOTE = (
     "The intent, repository layer and file list alone leave no room for the changes in"
     " one review window; each group is larger than the window."
 )
+
+
+_LANGUAGE_NAMES: dict[Language, str] = {"zh": "Simplified Chinese", "en": "English"}
+
+
+def language_note(language: Language) -> str:
+    """The language an agent writes in, told after its task (decision D-034)."""
+    return (
+        f"Write every title, why, suggestion and reason, and the explanation and what each"
+        f" place shows in a basis, in {_LANGUAGE_NAMES[language]}. Keep file paths, code and"
+        " identifiers as they are, and copy each quote exactly as it is written in its"
+        " source: a quote is never translated."
+    )
 
 
 def task(dimension: str) -> str:
@@ -46,6 +60,7 @@ class ContextPack:
     shared_rules: str
     repo: RepoLayer
     pr: PrLayer
+    language: Language = "zh"
 
     @property
     def prefix(self) -> str:
@@ -56,7 +71,7 @@ class ContextPack:
         return [
             SystemMessage(self.shared_rules),
             HumanMessage(self.prefix),
-            HumanMessage(task(dimension)),
+            HumanMessage(f"{task(dimension)}\n\n{language_note(self.language)}"),
         ]
 
 
@@ -66,7 +81,8 @@ def fixed_tokens(base: ContextPack) -> int:
     Split packs carry the definitions other groups change on top of this, at most
     `signature_tokens`; a pack that is not split has no other groups.
     """
-    longest_task = max(estimate_tokens(task(d)) for d in DIMENSIONS)
+    longest_note = max(estimate_tokens(language_note(lang)) for lang in _LANGUAGE_NAMES)
+    longest_task = max(estimate_tokens(task(d)) for d in DIMENSIONS) + longest_note
     return estimate_tokens(base.shared_rules) + estimate_tokens(base.prefix) + longest_task
 
 
@@ -88,21 +104,27 @@ def pack_budget(window_tokens: int, output_reserve: int = 0) -> int:
 
 
 def build_packs(
-    repo: RepoLayer, layer: PrLayer, window_tokens: int, output_reserve: int = 0
+    repo: RepoLayer,
+    layer: PrLayer,
+    window_tokens: int,
+    output_reserve: int = 0,
+    language: Language = "zh",
 ) -> list[ContextPack]:
     """One pack per group of changes; a single pack when the whole PR fits (decision D-008)."""
-    base = ContextPack(SHARED_RULES, repo, replace(layer, diffs={}, excerpts=[], notes=[]))
+    base = ContextPack(
+        SHARED_RULES, repo, replace(layer, diffs={}, excerpts=[], notes=[]), language
+    )
     budget = pack_budget(window_tokens, output_reserve) - fixed_tokens(base)
     module_of = module_finder(repo)
     # Only a PR that does not fit is split (D-008), so the room for other groups'
     # signatures is kept back only once splitting is certain.
     whole = grouped_layers(layer, module_of, max(budget, 1))
     if budget >= 1 and len(whole) == 1 and whole[0].group is None:
-        return [ContextPack(SHARED_RULES, repo, layer)]
+        return [ContextPack(SHARED_RULES, repo, layer, language)]
     room = budget - signature_tokens(layer)
     if room < 1:
         # Every unit then gets a group of its own, flagged as larger than the window.
         layer = replace(layer, notes=[*layer.notes, NO_ROOM_NOTE])
         room = 1
     groups = grouped_layers(layer, module_of, room)
-    return [ContextPack(SHARED_RULES, repo, group) for group in groups]
+    return [ContextPack(SHARED_RULES, repo, group, language) for group in groups]

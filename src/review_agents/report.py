@@ -15,12 +15,11 @@ import json
 import re
 from collections.abc import Sequence
 from dataclasses import asdict, dataclass, field
-from typing import Literal
 
 from review_agents.pipeline.agent import Severity
 from review_agents.pipeline.basis import Basis, Place, checked_out
+from review_agents.repo_config import Language
 
-Language = Literal["zh", "en"]
 SUMMARY_MARKER = "<!-- review-agents:summary -->"
 LEVELS: tuple[Severity, ...] = ("blocking", "important", "robustness", "nit")
 INLINE: tuple[Severity, ...] = ("blocking", "important")
