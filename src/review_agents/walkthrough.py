@@ -23,7 +23,7 @@ from langchain_core.messages import BaseMessage, HumanMessage
 from langchain_core.tools import StructuredTool
 from pydantic import BaseModel, Field
 
-from review_agents.context.pack import ContextPack, language_note
+from review_agents.context.pack import LANGUAGE_NAMES, ContextPack
 from review_agents.context.pr_layer import GIT_TIMEOUT_SECONDS, PrLayer
 from review_agents.mirror import run_git
 from review_agents.pipeline.agent import Slot, Submit, tool_loop
@@ -42,11 +42,15 @@ WALKTHROUGH_TASK = (
     f" and hand in with `{WALKTHROUGH_TOOL}`.\n\n{SKILL}"
 )
 WALKTHROUGH_NOW = f"Stop investigating. Call {WALKTHROUGH_TOOL} now with what you know."
-# A citation in code font: `path:line` or `path:start-end`. Every one is checked, a
-# file in the root without an extension too; the skill asks for hosts and ports to be
-# written otherwise, and the two that are common anyway are let through.
-_REFERENCE = re.compile(r"`([^`\s]+?):(\d+)(?:-(\d+))?`")
-_HOST = re.compile(r"localhost|\d{1,3}(?:\.\d{1,3}){3}")
+# A citation in code font: `path:line`, `path:start-end`, or GitHub's `path#L12-L20`.
+# A name with neither a folder nor a dot is checked only when the reviewed commit has
+# such a file: `Dockerfile:999999` is caught, while `postgres:16`, `node:20` or `03:30`
+# are an image tag and a time. An IP address and port is not a file either.
+_REFERENCE = re.compile(r"`([^`\s#]+?)(?::(\d+)(?:-(\d+))?|#L(\d+)(?:-L(\d+))?)`")
+_HOST = re.compile(r"\d{1,3}(?:\.\d{1,3}){3}")
+# The walkthrough describes; it needs fewer reads than a dimension agent, and what it
+# spends is taken from the review's shared budget.
+WALKTHROUGH_TOOL_CALLS = 20
 # Git too slow to say whether a cited file is there gets one more try.
 CHECK_TRIES = 2
 
@@ -83,7 +87,7 @@ class Walkthrough(BaseModel):
     what: Card
     impact: Card
     diagram: str = Field(default="", description="Optional: Mermaid source, without fences.")
-    problems: list[Problem] = Field(min_length=1, max_length=5)
+    problems: list[Problem] = Field(min_length=2, max_length=5)
     changes: list[Change] = Field(min_length=1)
     impacts: list[Impact] = Field(default_factory=list)
     deploy_notes: list[str] = Field(default_factory=list)
@@ -131,11 +135,15 @@ def reference_problems(
     seen = set()
     for text in walkthrough.texts():
         for match in _REFERENCE.finditer(text):
-            path, start = match.group(1), int(match.group(2))
-            end = int(match.group(3) or start)
+            path = match.group(1)
+            start = int(match.group(2) or match.group(4))
+            end = int(match.group(3) or match.group(5) or start)
             if "://" in path or _HOST.fullmatch(path) or (path, start, end) in seen:
                 continue
             seen.add((path, start, end))
+            lines = _counted(line_count, path)
+            if lines is None and "/" not in path and "." not in path:
+                continue  # an image tag, a time: no such file, so not a citation of one
             cited = match.group(0).strip("`")
             if start < 1:
                 problems.append(f"{cited} has no line 0")
@@ -143,7 +151,6 @@ def reference_problems(
             if end < start:
                 problems.append(f"{cited} ends before it starts")
                 continue
-            lines = _counted(line_count, path)
             if lines is None:
                 problems.append(f"{path} is not in the reviewed commit")
             elif end > lines:
@@ -180,7 +187,11 @@ def _submit_tool() -> StructuredTool:
 def walkthrough_messages(pack: ContextPack) -> list[BaseMessage]:
     """The dimension agents' opening, then the walkthrough's task in the review's language."""
     opening = pack.messages("security")[:2]
-    return [*opening, HumanMessage(f"{WALKTHROUGH_TASK}\n\n{language_note(pack.language)}")]
+    language = (
+        f"Write the walkthrough in {LANGUAGE_NAMES[pack.language]}. Keep file paths, code and"
+        " identifiers as they are."
+    )
+    return [*opening, HumanMessage(f"{WALKTHROUGH_TASK}\n\n{language}")]
 
 
 def run_walkthrough(

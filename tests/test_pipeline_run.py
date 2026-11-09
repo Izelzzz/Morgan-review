@@ -1102,7 +1102,10 @@ def walkthrough_answer() -> AIMessage:
         "why": card,
         "what": card,
         "impact": card,
-        "problems": [{"title": "Over-refunds", "explanation": "More was refunded than paid."}],
+        "problems": [
+            {"title": "Over-refunds", "explanation": "More was refunded than paid."},
+            {"title": "No cap", "explanation": "Nothing compared it with the payment."},
+        ],
         "changes": [{"title": "Clamp", "body": "`payments/refund.py:2` clamps the amount."}],
     }
     return AIMessage("", tool_calls=[{"name": WALKTHROUGH_TOOL, "args": args, "id": "w"}])

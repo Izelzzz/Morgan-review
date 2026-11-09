@@ -28,7 +28,7 @@ import time
 from collections.abc import Callable
 from concurrent.futures import Future, ThreadPoolExecutor
 from contextlib import closing
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -72,6 +72,7 @@ from review_agents.report import (
 )
 from review_agents.tools import RepoTools
 from review_agents.walkthrough import (
+    WALKTHROUGH_TOOL_CALLS,
     WalkthroughRun,
     pr_facts,
     render_failed,
@@ -495,7 +496,7 @@ def run_review(
         conn.execute(
             "UPDATE reviews SET limit_hit = ?, status = 'done', error = NULL, report = ?,"
             " finished_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = ?",
-            (limit_hit, json.dumps(report.as_json() | {"walkthrough": walkthrough}), review_id),
+            (limit_hit, json.dumps(replace(report, walkthrough=walkthrough).as_json()), review_id),
         )
         conn.execute("COMMIT")
     except BaseException:
@@ -598,7 +599,7 @@ class _Work:
                 self.model_for,
                 walkthrough_pack,
                 self._tools(),
-                tool_calls=self.tool_calls,
+                tool_calls=min(self.tool_calls, WALKTHROUGH_TOOL_CALLS),
                 callbacks=[meter],
                 deadline=submit_by,
                 clock=self.clock,

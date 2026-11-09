@@ -98,12 +98,15 @@ class Report:
     summary: str
     comments: list[Comment] = field(default_factory=list)
     counts: dict[str, int | bool] = field(default_factory=dict)
+    # The first comment, the walkthrough (D-035); set once it is written.
+    walkthrough: str | None = None
 
     def as_json(self) -> dict[str, object]:
         return {
             "summary": self.summary,
             "comments": [asdict(c) for c in self.comments],
             "counts": self.counts,
+            "walkthrough": self.walkthrough,
         }
 
 

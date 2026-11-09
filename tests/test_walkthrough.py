@@ -63,7 +63,10 @@ def answer(**changes: Any) -> dict[str, Any]:
         "why": card,
         "what": card,
         "impact": card,
-        "problems": [{"title": "Over-refunds", "explanation": "Customers got more back."}],
+        "problems": [
+            {"title": "Over-refunds", "explanation": "Customers got more back."},
+            {"title": "No cap", "explanation": "Nothing compared the amount with the payment."},
+        ],
         "changes": [
             {
                 "title": "Clamp in `refund`",
@@ -101,7 +104,7 @@ def test_the_walkthrough_follows_the_reviewers_opening_and_its_language(
     assert [m.content for m in sent[:2]] == [m.content for m in pack().messages("security")[:2]]
     task = str(sent[2].content)
     assert "walkthrough" in task and "`submit_walkthrough`" in task
-    assert "in English" in task.rsplit("\n\n", 1)[-1]
+    assert task.rsplit("\n\n", 1)[-1].startswith("Write the walkthrough in English.")
 
 
 @pytest.mark.parametrize(
@@ -111,7 +114,8 @@ def test_the_walkthrough_follows_the_reviewers_opening_and_its_language(
         ("`payments/refund.py:2-40`", "payments/refund.py has only 3 lines"),
         # A file in the root without an extension is a file too.
         ("`Dockerfile:999999`", "Dockerfile has only 1 lines"),
-        ("`Makefile:3`", "Makefile is not in the reviewed commit"),
+        ("`payments/refund.py#L40`", "payments/refund.py has only 3 lines"),
+        ("`payments/missing.py#L1-L2`", "payments/missing.py is not in the reviewed commit"),
         ("`README.md:0`", "README.md:0 has no line 0"),
         ("`README.md:0-1`", "README.md:0-1 has no line 0"),
         ("`empty.txt:1`", "empty.txt has only 0 lines"),
@@ -192,7 +196,7 @@ def test_the_comment_shows_the_cards_and_folds_the_details() -> None:
 
     assert "**一句话：** Refunds are clamped to what was paid." in text
     assert "```mermaid\nflowchart LR\n  A --> B\n```" in text
-    assert "<summary><b>01　为什么要改</b>（1 个问题）</summary>" in text
+    assert "<summary><b>01　为什么要改</b>（2 个问题）</summary>" in text
     assert "<summary><b>02　怎么改的</b>" in text
     assert "> [!WARNING]" in text and "Run migration 0010." in text
     # Folded sections close.
@@ -242,8 +246,9 @@ def test_the_facts_come_from_git_and_the_pr_text(tmp_path: Path) -> None:
     assert facts.decisions == ["D-031", "D-035"]
 
 
-def test_a_host_and_port_is_not_taken_for_a_file(repo_tools: RepoTools) -> None:
-    hosts = answer(changes=[{"title": "t", "body": "Calls `127.0.0.1:9` and `localhost:8080`."}])
+def test_a_host_an_image_tag_or_a_time_is_not_taken_for_a_file(repo_tools: RepoTools) -> None:
+    text = "Calls `127.0.0.1:9` and `localhost:8080`, runs `postgres:16` on `node:20` at `03:30`."
+    hosts = answer(changes=[{"title": "t", "body": text}])
     model = ScriptedModel(script=[call(WALKTHROUGH_TOOL, hosts)])
 
     assert run(model, repo_tools).status == "done"

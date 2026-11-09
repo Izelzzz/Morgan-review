@@ -17,7 +17,7 @@ Read before you write. Never describe code you have not read, and never guess a 
 
 ## What to write
 
-Fill the fields of `submit_walkthrough`, in the language the task names. The program lays them out as a comment and adds the facts it knows itself: the branch, the files changed with lines added and removed, the commits, and the decisions the PR references.
+Fill the fields of `submit_walkthrough`, in the language the task names. The program lays them out as a comment and adds the facts it knows itself: the files changed with lines added and removed, the commits, and the decisions the PR references.
 
 ### 1. At a glance
 

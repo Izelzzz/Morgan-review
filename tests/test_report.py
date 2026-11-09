@@ -301,7 +301,7 @@ def test_chinese_and_english_reports_have_the_same_structure() -> None:
 def test_the_report_as_json_is_what_the_api_returns() -> None:
     data = report([item()]).as_json()
 
-    assert set(data) == {"summary", "comments", "counts"}
+    assert set(data) == {"summary", "comments", "counts", "walkthrough"}
     assert data["comments"][0] | {"body": ""} == {
         "path": "payments/refund.py",
         "start_line": 11,
