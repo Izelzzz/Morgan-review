@@ -323,3 +323,9 @@ def test_spec_drift_is_named_as_the_architecture_names_it() -> None:
     scope = Scope("standard", ["spec_drift"], 1, 1, 1, [], [], finder_verifies=False)
 
     assert "规格漂移" in report([], scope=scope).summary
+
+
+def test_a_mermaid_arrow_in_model_text_is_kept() -> None:
+    result = report([item(severity="robustness", why="A --> B")])
+
+    assert "A --> B" in result.summary

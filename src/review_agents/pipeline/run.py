@@ -71,6 +71,13 @@ from review_agents.report import (
     is_binary,
 )
 from review_agents.tools import RepoTools
+from review_agents.walkthrough import (
+    WalkthroughRun,
+    pr_facts,
+    render_failed,
+    render_walkthrough,
+    run_walkthrough,
+)
 
 # Builds a model for one call; its argument is the seconds left to that call's deadline.
 ModelFor = Callable[[float], BaseChatModel]
@@ -356,6 +363,7 @@ def run_review(
     # For the report: the whole PR's lines, not only this round's, since GitHub takes
     # inline comments on those. Read with the rest of the code, before any model call.
     patches = pr_patches(git_dir, review["base_sha"], head, pr_layer.files)
+    facts = pr_facts(git_dir, pr_layer)  # for the walkthrough's header and file table
     _step(conn, review_id, "context.pr_layer", step)
     if len(packs) > 1:
         _step(conn, review_id, f"context.groups.{len(packs)}", step)
@@ -392,8 +400,9 @@ def run_review(
         verifier_for=verifier_for or model_for,
         clock=clock,
     )
+    # The walkthrough reads the first group: the whole PR when it is not split.
     runs, checks, accepted, published = work.find_and_verify(
-        jobs, submit_by=submit_by, deadline=deadline, verifying=verifying
+        jobs, packs[0], submit_by=submit_by, deadline=deadline, verifying=verifying
     )
     # A newer push makes this review superseded, whatever else went wrong in it.
     _check_not_superseded(conn, review_id)
@@ -471,6 +480,12 @@ def run_review(
         language=config.language,
         nits_per_report=limits.nits_per_report,
     )
+    written = work.walkthrough
+    walkthrough = (
+        render_walkthrough(written.walkthrough, facts, config.language)
+        if written is not None and written.walkthrough is not None
+        else render_failed((written and written.reason) or "incomplete", config.language)
+    )
     # The findings and the review's end state commit together (reliability §5.3): never
     # half a review, and a review with stored findings is never claimed and run again.
     conn.execute("BEGIN IMMEDIATE")
@@ -480,7 +495,7 @@ def run_review(
         conn.execute(
             "UPDATE reviews SET limit_hit = ?, status = 'done', error = NULL, report = ?,"
             " finished_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = ?",
-            (limit_hit, json.dumps(report.as_json()), review_id),
+            (limit_hit, json.dumps(report.as_json() | {"walkthrough": walkthrough}), review_id),
         )
         conn.execute("COMMIT")
     except BaseException:
@@ -519,6 +534,7 @@ class _Work:
         self.starts: dict[str, str] = {}
         self.candidates = 0  # ids given so far
         self.dropped = 0  # Quick-mode findings left out for want of a basis
+        self.walkthrough: WalkthroughRun | None = None
 
     def _limits(self, endpoint_tokens: int) -> ConversationLimits:
         return ConversationLimits(
@@ -532,9 +548,18 @@ class _Work:
         return RepoTools(self.git_dir, self.repo, self.head, self.skip, token=self.token)
 
     def find_and_verify(
-        self, jobs: list[Job], *, submit_by: float, deadline: float, verifying: bool
+        self,
+        jobs: list[Job],
+        walkthrough_pack: ContextPack,
+        *,
+        submit_by: float,
+        deadline: float,
+        verifying: bool,
     ) -> tuple[list[AgentRun], list[_Check], list[Candidate], _Published]:
         """Every job side by side, each one's findings verified as soon as it hands in.
+
+        The walkthrough agent works alongside the dimension agents, at their priority and
+        by their latest submit time (D-035); its run is left in `self.walkthrough`.
 
         Waits for the agents until `submit_by` and for the verifiers until `deadline`.
         What is still running then is left behind: every model call it makes is built
@@ -555,6 +580,23 @@ class _Work:
                 self.model_for,
                 job.pack,
                 job.dimension,
+                self._tools(),
+                tool_calls=self.tool_calls,
+                callbacks=[meter],
+                deadline=submit_by,
+                clock=self.clock,
+                limits=finder_limits,
+                slot=lambda: self.slots.held(DIMENSION_TURN),
+            )
+
+        def write() -> WalkthroughRun:
+            self.starts["walkthrough"] = _utc_now()
+            meter = UsageMeter(
+                self.budget, review_usage(settings.db_path, self.review_id, "walkthrough")
+            )
+            return run_walkthrough(
+                self.model_for,
+                walkthrough_pack,
                 self._tools(),
                 tool_calls=self.tool_calls,
                 callbacks=[meter],
@@ -604,11 +646,14 @@ class _Work:
             return lambda future: self.events.put((kind, item, future))
 
         try:
+            # Queued first, so it is not left waiting for a thread behind the dimensions.
+            finders.submit(write).add_done_callback(done("written", None))
             for index, job in enumerate(jobs):
                 finders.submit(find, job).add_done_callback(done("found", index))
             while True:
                 now = self.clock()
-                agents_out = len(runs) < len(jobs) and now < submit_by
+                writing = self.walkthrough is None
+                agents_out = (len(runs) < len(jobs) or writing) and now < submit_by
                 checking = unverified > 0 and now < deadline
                 if not (agents_out or checking):
                     break
@@ -617,6 +662,10 @@ class _Work:
                         timeout=max(0.0, (deadline if checking else submit_by) - now)
                     )
                 except queue.Empty:
+                    continue
+                if kind == "written":
+                    assert future is not None  # noqa: S101
+                    self._written(future)
                     continue
                 if kind == "found":
                     assert isinstance(item, int) and future is not None  # noqa: S101
@@ -672,6 +721,15 @@ class _Work:
                     self.starts.get(job.node, _now(self.conn)),
                     run.reason,
                 )
+        if self.walkthrough is None:
+            reason = (
+                "did not hand in its walkthrough by the latest submit time"
+                if "walkthrough" in self.starts
+                else "not started before the latest submit time"
+            )
+            self.walkthrough = WalkthroughRun("incomplete", reason=reason, limit_hit="time")
+            begun = self.starts.get("walkthrough", _now(self.conn))
+            _step(self.conn, self.review_id, "walkthrough", begun, reason)
         for check in checks:
             if check.run is None:
                 check.run = VerificationRun(
@@ -682,6 +740,19 @@ class _Work:
                 )
                 self._record(check)
         return [runs[index] for index in range(len(jobs))], checks, accepted, published
+
+    def _written(self, future: Future[Any]) -> None:
+        if future.cancelled():
+            return  # recorded once the agents' time is over
+        exc = future.exception()
+        if exc is not None:
+            run = WalkthroughRun("incomplete", reason=f"{type(exc).__name__}: {exc}")
+        else:
+            run = future.result()
+        self.walkthrough = run
+        error = None if run.status == "done" else (run.reason or "incomplete")
+        started = self.starts.get("walkthrough", _now(self.conn))
+        _step(self.conn, self.review_id, "walkthrough", started, error)
 
     def _agent_run(self, job: Job, future: Future[Any]) -> AgentRun:
         if future.cancelled():
