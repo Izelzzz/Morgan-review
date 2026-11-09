@@ -49,12 +49,18 @@ def _verdict(answer: dict[str, Any], finding_text: str) -> AIMessage:
     if answer.get("severity"):
         args["severity"] = answer["severity"]
     if answer["holds"]:
-        args["evidence"] = [
+        args["basis"] = [
             {
-                "file": place.group(1),
-                "line_start": int(place.group(2)),
-                "line_end": int(place.group(3)),
-                "shows": "the amount is not clamped",
+                "kind": "path",
+                "places": [
+                    {
+                        "file": place.group(1),
+                        "line_start": int(place.group(2)),
+                        "line_end": int(place.group(3)),
+                        "shows": "the amount is not clamped",
+                    }
+                ],
+                "explanation": "The amount is returned as requested.",
             }
         ]
     call = {"name": VERIFY_TOOL, "args": args, "id": "v"}
@@ -688,7 +694,8 @@ def test_a_finding_is_published_only_once_a_verifier_says_it_holds(setup: Setup)
     [written] = setup.findings(review_id)
     verdict = json.loads(written["verdict"])
     assert verdict["holds"] is True and verdict["reason"] == "Read the lines."
-    assert verdict["evidence"][0]["file"] == "payments/refund.py"
+    assert verdict["basis"][0]["places"][0]["file"] == "payments/refund.py"
+    assert verdict["basis"][0]["check"]["status"] == "ok"
     assert written["severity"] == written["reported_severity"] == "important"
     assert list(verify_steps(setup, review_id).values()) == [("ok", None)]
 
