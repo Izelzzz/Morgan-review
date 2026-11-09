@@ -265,9 +265,9 @@ def test_open_findings_from_earlier_rounds_appear_once(fx: Fixture) -> None:
             for fingerprint, status in (("f1", "open"), ("f2", "fixed")):
                 conn.execute(
                     "INSERT INTO findings (review_id, fingerprint, primary_dimension, severity,"
-                    " file, line_start, line_end, title, body, evidence, status)"
+                    " file, line_start, line_end, title, body, status)"
                     " VALUES (?, ?, 'edge_cases', 'important', 'payments/refund.py', 6, 6, ?,"
-                    " 'b', 'e', ?)",
+                    " 'b', ?)",
                     (review, fingerprint, f"title {fingerprint}", status),
                 )
 

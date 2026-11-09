@@ -209,6 +209,24 @@ class RepoTools:
             return None
         return data.count(b"\n") + (0 if data.endswith(b"\n") or not data else 1)
 
+    def text(self, path: str) -> str | None:
+        """A file of the reviewed commit as text, or None when it does not exist.
+
+        Not an agent tool: the pipeline uses it to check what a finding quotes. A git
+        that times out raises ToolTimeoutError: that says nothing about the file.
+        """
+        try:
+            clean = clean_path(path)
+        except ToolError:
+            return None
+        try:
+            data = self._git("cat-file", "blob", f"{self._commit}:{clean}")
+        except ToolTimeoutError:
+            raise
+        except (GitError, ToolError):
+            return None
+        return data.decode("utf-8", "replace")
+
     def read_issue(self, number: int) -> str:
         """Read an issue or pull request of this repository: title, state, labels and body."""
         return self.issue_text(number, MAX_ISSUE_CHARS)

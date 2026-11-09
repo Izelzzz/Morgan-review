@@ -25,6 +25,7 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 from review_agents.context.markup import untrusted
 from review_agents.context.pack import ContextPack
 from review_agents.pipeline.agent import Finding, Severity, Slot, Submit, tool_loop
+from review_agents.pipeline.basis import describe
 from review_agents.pipeline.conversation import ConversationLimits
 from review_agents.tools import RepoTools, ToolError, ToolTimeoutError, clean_path
 
@@ -35,8 +36,12 @@ VERIFIER_TOOL_CALLS = 30
 VERIFY_TASK = f"""You are now a verifier, not a reviewer. Another reviewer reported the
 candidate finding below. Decide whether it holds.
 
-- Read the code with your tools. The finding's evidence is a claim: check it against the
-  code, from the caller or input it names to the failure it describes.
+- Read the code with your tools. The finding's basis is a claim: check each one against
+  the code. For a quoted rule, check that it says what the finding takes it to say in its
+  context, and that the code really breaks it; for a path, that every step really
+  happens. The program has already checked that the files, lines and quotes are there;
+  where it says it could not confirm a basis, find the evidence yourself or the finding
+  does not hold.
 - It holds when the problem is real at the place it names and is reached the way it says,
   or in the usage scenario the pull request describes.
 - It does not hold when the code does not do what it claims, the path cannot be reached,
@@ -150,9 +155,10 @@ def _describe(finding: Finding) -> str:
             f"dimension: {finding.dimension}",
             f"location: {finding.file}:{finding.line_start}-{finding.line_end}",
             f"preexisting: {str(finding.preexisting).lower()}",
-            f"evidence: {finding.evidence}",
             f"why: {finding.why}",
             f"suggestion: {finding.suggestion}",
+            "basis:" if finding.basis else "basis: none given",
+            *(describe(b) for b in finding.basis),
         ]
     )
 

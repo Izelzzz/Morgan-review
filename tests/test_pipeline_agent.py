@@ -31,6 +31,15 @@ FILES: dict[str, str | bytes] = {
 }
 
 
+BASIS: dict[str, Any] = {
+    "kind": "spec",
+    "source": "pr",
+    "quote": "Never refund more than paid.",
+    "places": [{"file": "payments/refund.py", "line_start": 2, "line_end": 3, "shows": "no cap"}],
+    "explanation": "The requested amount is refunded whatever was paid.",
+}
+
+
 def finding(**changes: Any) -> dict[str, Any]:
     base = {
         "title": "A refund can exceed the paid amount",
@@ -39,7 +48,7 @@ def finding(**changes: Any) -> dict[str, Any]:
         "file": "payments/refund.py",
         "line_start": 2,
         "line_end": 3,
-        "evidence": "refund(order, 10_000) on an order paid 100 returns 10_000",
+        "basis": [BASIS],
         "why": "Customers are refunded more than they paid.",
         "suggestion": "Clamp to order.paid.",
         "preexisting": False,
@@ -158,7 +167,6 @@ def test_findings_that_point_nowhere_are_dropped_with_a_reason(repo_tools: RepoT
                 finding(),
                 finding(title="Missing file", file="payments/gone.py"),
                 finding(title="Past the end", line_start=2, line_end=99),
-                finding(title="No evidence", severity="blocking", evidence=""),
             )
         ]
     )
@@ -167,7 +175,7 @@ def test_findings_that_point_nowhere_are_dropped_with_a_reason(repo_tools: RepoT
 
     assert [f.title for f in result.findings] == ["A refund can exceed the paid amount"]
     reasons = " ".join(result.dropped)
-    for title in ("Missing file", "Past the end", "No evidence"):
+    for title in ("Missing file", "Past the end"):
         assert title in reasons
 
 
@@ -674,3 +682,43 @@ def test_time_spent_waiting_for_a_slot_counts_against_the_deadline(
 
     assert result.status == "incomplete" and result.limit_hit == "time"
     assert model.sent == []
+
+
+def test_every_basis_is_checked_and_says_how_it_checked_out(repo_tools: RepoTools) -> None:
+    moved = dict(BASIS, source="README.md:9", quote="# Shop")
+    wrong = dict(BASIS, source="docs/policy.md:3")
+    model = ScriptedModel(script=[submit(finding(basis=[BASIS, moved, wrong]))])
+
+    result = run(model, repo_tools)
+
+    [kept] = result.findings
+    statuses = [(b.check.status if b.check else None) for b in kept.basis]
+    assert statuses == ["ok", "corrected", "failed"]
+    assert kept.basis[1].source == "README.md:1"  # the quote's real line
+    problem = kept.basis[2].check.problem if kept.basis[2].check else ""
+    assert "docs/policy.md is not in the reviewed commit" in (problem or "")
+
+
+def test_a_finding_whose_basis_does_not_check_out_is_kept_for_the_verifier(
+    repo_tools: RepoTools,
+) -> None:
+    # Decision D-036: the dimension agent does not submit again; the verifier decides.
+    unbased = finding(title="No basis", severity="blocking", basis=[])
+    misquoted = finding(title="Misquoted", basis=[dict(BASIS, quote="Refund at most once.")])
+    model = ScriptedModel(script=[submit(unbased, misquoted)])
+
+    result = run(model, repo_tools)
+
+    assert [f.title for f in result.findings] == ["No basis", "Misquoted"]
+    assert result.dropped == []
+    assert len(model.sent) == 1  # not asked to submit again
+
+
+def test_a_model_cannot_mark_its_own_basis_as_checked(repo_tools: RepoTools) -> None:
+    claimed = dict(BASIS, source="docs/policy.md:3", check={"status": "ok"})
+    model = ScriptedModel(script=[submit(finding(basis=[claimed]))])
+
+    result = run(model, repo_tools)
+
+    [kept] = result.findings
+    assert kept.basis[0].check is not None and kept.basis[0].check.status == "failed"

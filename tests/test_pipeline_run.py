@@ -173,7 +173,17 @@ def finding(dimension: str, **changes: Any) -> dict[str, Any]:
         "file": "payments/refund.py",
         "line_start": 1,
         "line_end": 2,
-        "evidence": "refund(order, 10_000) on an order paid 100",
+        "basis": [
+            {
+                "kind": "spec",
+                "source": "pr",
+                "quote": "Never refund more than paid.",
+                "places": [
+                    {"file": "payments/refund.py", "line_start": 1, "line_end": 2, "shows": "s"}
+                ],
+                "explanation": "refund(order, 10_000) on an order paid 100",
+            }
+        ],
         "why": "Customers are refunded more than they paid.",
         "suggestion": "Clamp to order.paid.",
         **changes,
@@ -243,7 +253,7 @@ class Setup:
         with closing(connect(self.settings.db_path)) as conn:
             rows = conn.execute(
                 "SELECT primary_dimension, dimensions, severity, reported_severity, file, title,"
-                " body, suggestion, fingerprint, votes, locations, verdict FROM findings"
+                " body, suggestion, fingerprint, votes, locations, verdict, basis FROM findings"
                 " WHERE review_id = ? ORDER BY id",
                 (review_id,),
             ).fetchall()
@@ -528,7 +538,7 @@ def test_the_judge_merges_one_problem_two_dimensions_found(setup: Setup) -> None
     model = ByDimension(
         scripts={
             "edge_cases": [submit(finding("edge_cases"))],
-            "security": [submit(finding("security", line_end=1, evidence="much more evidence"))],
+            "security": [submit(finding("security", line_end=1, why="much more to say"))],
         }
     )
     judge = JudgeAll()
@@ -906,3 +916,42 @@ def test_a_review_superseded_while_verifying_is_superseded_not_failed(setup: Set
 
     with pytest.raises(ReviewSuperseded):
         setup.run(review_id, model)
+
+
+# Bases (issue #68; decision D-036).
+
+
+def test_a_published_finding_keeps_its_bases_and_how_they_checked_out(setup: Setup) -> None:
+    review_id = setup.queue()
+    model = ByDimension(scripts={"edge_cases": [submit(finding("edge_cases"))]})
+
+    setup.run(review_id, model)
+
+    [written] = setup.findings(review_id)
+    [stored] = json.loads(written["basis"])
+    assert stored["kind"] == "spec" and stored["quote"] == "Never refund more than paid."
+    assert stored["check"] == {"status": "ok", "problem": None}
+
+
+def test_quick_mode_does_not_publish_an_important_finding_whose_basis_did_not_check_out(
+    setup: Setup,
+) -> None:
+    # Quick mode has no verifier to look again (decision D-036).
+    review_id = setup.queue("mode: quick\n")
+    misquoted = finding("edge_cases", title="edge_cases: misquoted", line_start=2, line_end=2)
+    misquoted["basis"] = [dict(misquoted["basis"][0], quote="Refund twice.")]
+    robust = finding("security", severity="robustness", title="security: robust", basis=[])
+    model = ByDimension(
+        scripts={
+            "edge_cases": [submit(finding("edge_cases", line_start=1, line_end=1), misquoted)],
+            "security": [submit(robust)],
+        }
+    )
+
+    setup.run(review_id, model)
+
+    titles = [f["title"] for f in setup.findings(review_id)]
+    assert "edge_cases: misquoted" not in titles
+    assert {"edge_cases: refunds can exceed the paid amount", "security: robust"} <= set(titles)
+    notes = [n for n in setup.notes(review_id).values() if n]
+    assert any("edge_cases: misquoted" in n and "the quote is not in" in n for n in notes)

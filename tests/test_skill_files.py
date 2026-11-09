@@ -59,7 +59,10 @@ def test_shared_rules_define_every_severity_and_the_evidence_rule() -> None:
 
     for level in ["🔴 blocking", "🟡 important", "🔵 robustness", "⚪ nit"]:
         assert level in text
-    assert "Every 🔴 and 🟡 needs evidence" in text
+    assert "Every 🔴 and 🟡 needs at least one basis" in text
+    for kind in ("`spec`", "`contract`", "`convention`", "`path`"):  # decision D-036
+        assert kind in text
+    assert "`evidence`" not in text  # replaced by `basis`
 
 
 def test_every_skill_directory_is_a_known_dimension() -> None:

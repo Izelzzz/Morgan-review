@@ -195,9 +195,9 @@ def test_finished_results_survive_a_restart_and_queued_ones_are_failed(tmp_path:
             )
             conn.execute(
                 "INSERT INTO findings (review_id, fingerprint, primary_dimension, severity,"
-                " file, line_start, line_end, title, body, evidence)"
-                " VALUES (?, 'f1', 'edge_cases', 'important', 'a.py', 3, 4, 't', 'b', 'e')",
-                (done,),
+                " file, line_start, line_end, title, body, basis)"
+                " VALUES (?, 'f1', 'edge_cases', 'important', 'a.py', 3, 4, 't', 'b', ?)",
+                (done, json.dumps([{"kind": "path", "explanation": "x"}])),
             )
 
     second = Client(tmp_path / "data")
@@ -207,6 +207,7 @@ def test_finished_results_survive_a_restart_and_queued_ones_are_failed(tmp_path:
 
     assert finished["status"] == "done"
     assert [f["title"] for f in finished["findings"]] == ["t"]
+    assert finished["findings"][0]["basis"] == [{"kind": "path", "explanation": "x"}]
     assert lost["status"] == "failed"
     assert "restart" in lost["error"]
 

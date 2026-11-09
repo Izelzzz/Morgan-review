@@ -98,8 +98,8 @@ def test_findings_reject_unknown_severity_and_orphans(tmp_path: Path) -> None:
         ).fetchone()["id"]
         insert = (
             "INSERT INTO findings (review_id, fingerprint, primary_dimension, severity, file,"
-            " line_start, line_end, title, body, evidence) VALUES (?, 'f', 'security', ?, 'a.py',"
-            " 1, 1, 't', 'b', 'e')"
+            " line_start, line_end, title, body) VALUES (?, 'f', 'security', ?, 'a.py',"
+            " 1, 1, 't', 'b')"
         )
         conn.execute(insert, (review_id, "blocking"))
         with pytest.raises(sqlite3.IntegrityError):

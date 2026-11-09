@@ -33,4 +33,4 @@ Input crafted by an attacker belongs to security. Missing tests belong to the fi
 
 ## Shared rules
 
-Follow `_shared.md` for severity, evidence and output.
+Follow `_shared.md` for severity, basis and output.

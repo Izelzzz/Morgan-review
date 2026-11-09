@@ -53,6 +53,7 @@ from review_agents.models import (
     summary_usage,
 )
 from review_agents.pipeline.agent import AgentRun, Finding, Severity, run_dimension
+from review_agents.pipeline.basis import supported
 from review_agents.pipeline.conversation import ConversationLimits
 from review_agents.pipeline.merge import Candidate, Merged, merge, model_judge, overlaps
 from review_agents.pipeline.schedule import DIMENSION_TURN, Slots, verify_priority
@@ -189,7 +190,7 @@ def _insert_finding(
     verdict = published.verdicts.get(lead.id)
     conn.execute(
         "INSERT INTO findings (review_id, fingerprint, primary_dimension, dimensions, severity,"
-        " preexisting, file, line_start, line_end, title, body, suggestion, evidence, votes,"
+        " preexisting, file, line_start, line_end, title, body, suggestion, basis, votes,"
         " locations, reported_severity, verdict)"
         " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (
@@ -205,7 +206,7 @@ def _insert_finding(
             finding.title,
             finding.why,
             finding.suggestion,
-            finding.evidence,
+            json.dumps([b.model_dump() for b in finding.basis]),
             merged.votes,
             json.dumps(merged.locations),
             published.reported.get(lead.id, finding.severity),
@@ -419,6 +420,7 @@ class _Work:
         self.events: queue.Queue[tuple[str, object, Future[Any] | None]] = queue.Queue()
         self.starts: dict[str, str] = {}
         self.candidates = 0  # ids given so far
+        self.dropped = 0  # Quick-mode findings left out for want of a basis
 
     def _limits(self, endpoint_tokens: int) -> ConversationLimits:
         return ConversationLimits(
@@ -525,6 +527,8 @@ class _Work:
                     runs[item] = run
                     for candidate in self._candidates(job, run):
                         finding = candidate.finding
+                        if not verifying and not self._publishable_unverified(candidate):
+                            continue
                         if not verifying or finding.severity == "nit":
                             published.reported[candidate.id] = finding.severity
                             accepted.append(candidate)
@@ -596,6 +600,26 @@ class _Work:
             self.conn, self.review_id, job.node, self.starts.get(job.node, _now(self.conn)), error
         )
         return run
+
+    def _publishable_unverified(self, candidate: Candidate) -> bool:
+        """Quick mode has no verifier: a 🔴 / 🟡 is published only on a basis that checked out.
+
+        Recorded in `steps` when it is not (decision D-036).
+        """
+        finding = candidate.finding
+        if finding.severity not in ("blocking", "important") or supported(finding.basis):
+            return True
+        problems = [b.check.problem for b in finding.basis if b.check and b.check.problem]
+        why = "; ".join(problems) or "no basis given"
+        self.dropped += 1
+        _step(
+            self.conn,
+            self.review_id,
+            f"basis.{self.dropped}",
+            _now(self.conn),
+            note=f"{finding.title}: not published, no basis checked out: {why}",
+        )
+        return False
 
     def _candidates(self, job: Job, run: AgentRun) -> list[Candidate]:
         made = []

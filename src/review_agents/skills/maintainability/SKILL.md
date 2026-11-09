@@ -25,4 +25,4 @@ Formatting and style enforced by a formatter or linter are out of scope. Behavio
 
 ## Shared rules
 
-Follow `_shared.md` for severity, evidence and output.
+Follow `_shared.md` for severity, basis and output.
