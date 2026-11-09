@@ -202,14 +202,14 @@ def test_quoting_the_code_under_review_is_not_a_rule() -> None:
 
 
 # Chinese punctuation on purpose: it is what real Chinese rules use.
-ZH = "# 规则\n\n本 PR 规定：所有请求必须带超时时间。重试最多三次。\n\nretry_limit_total = 3\n"  # noqa: RUF001
+ZH = "# 规则\n\n本 PR 规定：所有请求必须带超时时间。重试最多三次。\n\nretry_limit_total = 3\n"
 
 
 def zh_sources() -> Sources:
     files = {**FILES, "docs/zh.md": ZH}
     return sources(
         text=lambda path: files.get(path),
-        pr_text="本 PR 规定：所有请求必须带超时时间。",  # noqa: RUF001
+        pr_text="本 PR 规定：所有请求必须带超时时间。",
     )
 
 

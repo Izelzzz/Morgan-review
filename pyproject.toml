@@ -42,7 +42,9 @@ target-version = "py312"
 select = ["E", "F", "W", "I", "B", "UP", "S", "SIM", "RUF"]
 
 [tool.ruff.lint.per-file-ignores]
-"tests/**" = ["S101", "S105", "S106"]
+# Chinese text is full-width punctuation by design: the report's words and tests of them.
+"tests/**" = ["S101", "S105", "S106", "RUF001"]
+"src/review_agents/report.py" = ["RUF001"]
 
 [tool.mypy]
 strict = true

@@ -211,7 +211,8 @@ def create_app(
         with closing(connect(settings.db_path, create=False)) as conn:
             row = conn.execute(
                 "SELECT id, repo, pr, base_sha, head_sha, round, mode, status, error, limit_hit,"
-                " superseded_by, created_at, started_at, finished_at FROM reviews WHERE id = ?",
+                " superseded_by, created_at, started_at, finished_at, report FROM reviews"
+                " WHERE id = ?",
                 (review_id,),
             ).fetchone()
             if row is None:
@@ -223,6 +224,8 @@ def create_app(
                 (review_id,),
             ).fetchall()
         result = dict(row)
+        # The summary, inline comments and counts CI posts (report design §7).
+        result["report"] = json.loads(row["report"]) if row["report"] is not None else None
         if row["superseded_by"] is not None:
             result["status"] = "superseded"
         result["findings"] = [

@@ -53,12 +53,22 @@ from review_agents.models import (
     summary_usage,
 )
 from review_agents.pipeline.agent import AgentRun, Finding, Severity, run_dimension
-from review_agents.pipeline.basis import describe, supported
+from review_agents.pipeline.basis import Basis, describe, supported
 from review_agents.pipeline.conversation import ConversationLimits
 from review_agents.pipeline.merge import Candidate, Merged, merge, model_judge, overlaps
 from review_agents.pipeline.schedule import DIMENSION_TURN, Slots, verify_priority
 from review_agents.pipeline.verify import VERIFIER_TOOL_CALLS, VerificationRun, run_verifier
 from review_agents.repo_config import MAX_REVIEW_MINUTES, RepoConfig, read_repo_config
+from review_agents.report import (
+    Item,
+    MissedStep,
+    Scope,
+    Stats,
+    Unverified,
+    added_lines,
+    build_report,
+    is_binary,
+)
 from review_agents.tools import RepoTools
 
 # Builds a model for one call; its argument is the seconds left to that call's deadline.
@@ -180,6 +190,8 @@ class _Published:
 
     reported: dict[int, Severity] = field(default_factory=dict)
     verdicts: dict[int, dict[str, object]] = field(default_factory=dict)
+    # The verifier's bases of each verified candidate: what the report shows (D-036).
+    bases: dict[int, list[Basis]] = field(default_factory=dict)
 
 
 def _insert_finding(
@@ -214,6 +226,35 @@ def _insert_finding(
             json.dumps(verdict) if verdict is not None else None,
         ),
     )
+
+
+def _item(merged: Merged, published: _Published) -> Item:
+    """A merged finding as the report shows it: with the verifier's bases when it was
+    verified, the dimension agent's otherwise (decision D-036)."""
+    finding = merged.finding
+    lead = next(c for c in merged.sources if c.finding is finding)
+    return Item(
+        fingerprint=lead.fingerprint,
+        severity=finding.severity,
+        title=finding.title,
+        file=finding.file,
+        line_start=finding.line_start,
+        line_end=finding.line_end,
+        why=finding.why,
+        suggestion=finding.suggestion,
+        dimensions=merged.dimensions,
+        preexisting=finding.preexisting,
+        locations=merged.locations,
+        bases=published.bases.get(lead.id, finding.basis),
+    )
+
+
+def _tokens_used(conn: sqlite3.Connection, review_id: int) -> int:
+    row = conn.execute(
+        "SELECT coalesce(sum(input_tokens + output_tokens), 0) FROM usage WHERE review_id = ?",
+        (review_id,),
+    ).fetchone()
+    return int(row[0])
 
 
 def run_review(
@@ -374,6 +415,40 @@ def run_review(
     _step(conn, review_id, "merge", step, fallbacks[0] if fallbacks else None)
     hits = [r.limit_hit for r in runs] + [c.run.limit_hit for c in checks if c.run]
     limit_hit = next((lim for lim in _LIMIT_ORDER if lim in hits), None)
+    binary = sorted(path for path, patch in pr_layer.diffs.items() if is_binary(patch))
+    report = build_report(
+        [_item(m, published) for m in merged],
+        changed={path: added_lines(patch) for path, patch in pr_layer.diffs.items()},
+        missed=[
+            MissedStep(
+                job.dimension,
+                job.group if job.groups > 1 else None,
+                job.run if job.runs > 1 else None,
+                run.reason or "incomplete",
+            )
+            for job, run in zip(jobs, runs, strict=True)
+            if run.status != "done"
+        ],
+        unverified=[
+            Unverified(c.lead.finding.title, c.lead.finding.severity, c.run.reason or "incomplete")
+            for c in checks
+            if c.run is not None and c.run.verdict is None
+        ],
+        scope=Scope(
+            mode=config.mode,
+            dimensions=dimensions,
+            runs=repeats,
+            files=len(pr_layer.diffs) - len(binary),
+            groups=len(packs),
+            skipped=[f.path for f in pr_layer.files if f.skipped],
+            binary=binary,
+            finder_verifies=verifier_for is None,
+            withheld=work.dropped,
+        ),
+        stats=Stats(_tokens_used(conn, review_id), clock() - started_at, review_id),
+        language=config.language,
+        nits_per_report=limits.nits_per_report,
+    )
     # The findings and the review's end state commit together (reliability §5.3): never
     # half a review, and a review with stored findings is never claimed and run again.
     conn.execute("BEGIN IMMEDIATE")
@@ -381,9 +456,9 @@ def run_review(
         for item in merged:
             _insert_finding(conn, review_id, item, published)
         conn.execute(
-            "UPDATE reviews SET limit_hit = ?, status = 'done', error = NULL,"
+            "UPDATE reviews SET limit_hit = ?, status = 'done', error = NULL, report = ?,"
             " finished_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = ?",
-            (limit_hit, review_id),
+            (limit_hit, json.dumps(report.as_json()), review_id),
         )
         conn.execute("COMMIT")
     except BaseException:
@@ -654,6 +729,7 @@ class _Work:
             kept = Candidate(member.id, finding, member.run, member.fingerprint, member.agent)
             published.reported[member.id] = member.finding.severity
             published.verdicts[member.id] = record
+            published.bases[member.id] = verdict.basis
             accepted.append(kept)
 
     def _record(self, check: _Check) -> None:

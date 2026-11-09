@@ -86,6 +86,7 @@ def test_a_signed_review_is_queued_and_can_be_polled(client: Client) -> None:
     assert body["status"] == "queued"
     assert body["repo"] == "octo/shop" and body["pr"] == 7 and body["head_sha"] == HEAD
     assert body["findings"] == []
+    assert body["report"] is None  # only a finished review has one
 
 
 @pytest.mark.parametrize(
@@ -190,8 +191,10 @@ def test_finished_results_survive_a_restart_and_queued_ones_are_failed(tmp_path:
         done = first.request("POST", "/v1/reviews", REQUEST).json()["id"]
         queued = first.request("POST", "/v1/reviews", {**REQUEST, "pr": 8}).json()["id"]
         with closing(connect(first.db_path)) as conn:
+            report = {"summary": "s", "comments": [], "counts": {"complete": True}}
             conn.execute(
-                "UPDATE reviews SET status = 'done', finished_at = 'x' WHERE id = ?", (done,)
+                "UPDATE reviews SET status = 'done', finished_at = 'x', report = ? WHERE id = ?",
+                (json.dumps(report), done),
             )
             conn.execute(
                 "INSERT INTO findings (review_id, fingerprint, primary_dimension, severity,"
@@ -208,6 +211,7 @@ def test_finished_results_survive_a_restart_and_queued_ones_are_failed(tmp_path:
     assert finished["status"] == "done"
     assert [f["title"] for f in finished["findings"]] == ["t"]
     assert finished["findings"][0]["basis"] == [{"kind": "path", "explanation": "x"}]
+    assert finished["report"] == {"summary": "s", "comments": [], "counts": {"complete": True}}
     assert lost["status"] == "failed"
     assert "restart" in lost["error"]
 

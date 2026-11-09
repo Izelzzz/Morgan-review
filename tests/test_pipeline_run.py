@@ -373,6 +373,7 @@ def test_a_superseded_review_stops_and_writes_nothing(setup: Setup) -> None:
         setup.run(review_id, model)
 
     assert setup.findings(review_id) == []
+    assert setup.review(review_id)["report"] is None
     assert model.seen == []
 
 
@@ -962,3 +963,64 @@ def test_quick_mode_does_not_publish_an_important_finding_whose_basis_did_not_ch
     assert {"edge_cases: refunds can exceed the paid amount", "security: robust"} <= set(titles)
     notes = [n for n in setup.notes(review_id).values() if n]
     assert any("edge_cases: misquoted" in n and "the quote is not in" in n for n in notes)
+
+
+def report_of(setup: Setup, review_id: int) -> dict[str, Any] | None:
+    stored = setup.review(review_id)["report"]
+    return None if stored is None else dict(json.loads(stored))
+
+
+def test_the_report_is_written_with_the_findings(setup: Setup) -> None:
+    review_id = setup.queue()
+    model = ByDimension(scripts={"edge_cases": [submit(finding("edge_cases"))]})
+
+    setup.run(review_id, model)
+
+    report = report_of(setup, review_id)
+    assert report is not None
+    assert report["counts"] == {
+        "blocking": 0,
+        "important": 1,
+        "robustness": 0,
+        "nit": 0,
+        "complete": True,
+    }
+    # The finding spans lines 1-2; only line 2 changed.
+    [comment] = report["comments"]
+    assert (comment["path"], comment["start_line"], comment["line"]) == (
+        "payments/refund.py",
+        None,
+        2,
+    )
+    [written] = setup.findings(review_id)
+    assert f"<!-- review-agents:finding {written['fingerprint']} -->" in comment["body"]
+    # The verifier's basis, not the dimension agent's.
+    assert "The amount is returned as requested." in comment["body"]
+    assert "refund(order, 10_000) on an order paid 100" not in comment["body"]
+    summary = report["summary"]
+    assert summary.startswith("<!-- review-agents:summary -->")
+    assert "审了：" in summary and "1 个改动文件" in summary and f"审查 #{review_id}" in summary
+
+
+def test_a_dimension_that_failed_makes_the_report_incomplete(setup: Setup) -> None:
+    review_id = setup.queue()
+    model = ByDimension(scripts={"security": [RuntimeError("model service unavailable")]})
+
+    setup.run(review_id, model)
+
+    report = report_of(setup, review_id)
+    assert report is not None and report["counts"]["complete"] is False
+    unfinished = report["summary"].split("### 未完成的部分")[1]
+    assert "安全维度" in unfinished and "model service unavailable" in unfinished
+
+
+def test_a_quick_review_s_report_says_it_was_not_verified(setup: Setup) -> None:
+    review_id = setup.queue("mode: quick\nlanguage: en\n")
+    model = ByDimension(scripts={"edge_cases": [submit(finding("edge_cases"))]})
+
+    setup.run(review_id, model)
+
+    report = report_of(setup, review_id)
+    assert report is not None
+    assert "were not confirmed by a verifier" in report["summary"]
+    assert "Quick mode" in report["summary"]
