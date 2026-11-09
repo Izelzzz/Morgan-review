@@ -24,6 +24,7 @@ from review_agents.tools import RepoTools, ToolTimeoutError
 FILES: dict[str, str | bytes] = {
     "payments/refund.py": "def refund(order, cents):\n    total = cents\n    return total\n",
     "README.md": "# Shop\n",
+    "CONTRIBUTING.md": "# Contributing\n\nAmounts are integers in cents, never floats.\n",
 }
 
 
@@ -93,16 +94,27 @@ SHOWN = {
 }
 
 
+def path_basis(*places: dict[str, Any], **changes: Any) -> dict[str, Any]:
+    return {
+        "kind": "path",
+        "places": list(places),
+        "explanation": "The amount is returned unclamped.",
+        **changes,
+    }
+
+
 def verdict(
     holds: bool,
     severity: str | None = None,
     call_id: str = "v1",
-    evidence: list[dict[str, Any]] | None = None,
+    places: list[dict[str, Any]] | None = None,
 ) -> Any:
+    cited = [SHOWN] if places is None and holds else (places or [])
     args: dict[str, Any] = {
         "holds": holds,
         "reason": "Line 2 returns cents unclamped.",
-        "evidence": [SHOWN] if evidence is None and holds else (evidence or []),
+        # One basis per place, so that one place going wrong leaves the others.
+        "basis": [path_basis(place) for place in cited],
     }
     if severity is not None:
         args["severity"] = severity
@@ -144,27 +156,29 @@ def test_a_finding_that_holds_keeps_its_level_unless_the_verifier_changes_it(
     assert kept.verdict.holds and kept.verdict.severity == "blocking"
     assert lowered.verdict is not None and lowered.verdict.severity == "robustness"
     assert lowered.verdict.reason == "Line 2 returns cents unclamped."
-    [where] = kept.verdict.evidence
+    [based] = kept.verdict.basis
+    [where] = based.places
     assert (where.file, where.line_start, where.line_end) == ("payments/refund.py", 2, 2)
     assert where.shows.startswith("the refund is the requested amount")
+    assert based.check is not None and based.check.status == "ok"
 
 
-def test_a_finding_holds_only_with_evidence_of_where(repo_tools: RepoTools) -> None:
-    bare = verdict(True, evidence=[], call_id="v0")
+def test_a_finding_holds_only_with_a_basis_that_checks_out(repo_tools: RepoTools) -> None:
+    bare = verdict(True, places=[], call_id="v0")
     model = ScriptedModel(script=[bare, verdict(True)])
 
     result = verify(model, repo_tools)
 
     assert result.verdict is not None and result.verdict.holds
     told = str(model.sent[1][-1].content)
-    assert "evidence" in told and "not in the expected format" in told
+    assert "basis" in told and "not in the expected format" in told
 
 
-def test_evidence_must_point_at_code_that_exists(repo_tools: RepoTools) -> None:
+def test_a_basis_must_point_at_code_that_exists(repo_tools: RepoTools) -> None:
     nowhere = dict(SHOWN, file="payments/missing.py")
     too_far = dict(SHOWN, line_start=2, line_end=40)
     for wrong, problem in ((nowhere, "not in the reviewed commit"), (too_far, "has only 3")):
-        model = ScriptedModel(script=[verdict(True, evidence=[wrong], call_id="v0"), verdict(True)])
+        model = ScriptedModel(script=[verdict(True, places=[wrong], call_id="v0"), verdict(True)])
 
         result = verify(model, repo_tools)
 
@@ -177,10 +191,12 @@ def test_a_finding_that_does_not_hold_may_cite_the_code_against_it(
 ) -> None:
     against = dict(SHOWN, shows="the caller already caps the amount")
 
-    result = verify(ScriptedModel(script=[verdict(False, evidence=[against])]), repo_tools)
+    result = verify(ScriptedModel(script=[verdict(False, places=[against])]), repo_tools)
 
     assert result.verdict is not None and not result.verdict.holds
-    assert [e.shows for e in result.verdict.evidence] == ["the caller already caps the amount"]
+    assert [b.places[0].shows for b in result.verdict.basis] == [
+        "the caller already caps the amount"
+    ]
 
 
 def test_a_finding_that_does_not_hold_is_answered_as_such(repo_tools: RepoTools) -> None:
@@ -299,30 +315,30 @@ def test_a_finding_that_does_not_hold_keeps_its_verdict_when_a_place_is_wrong(
     repo_tools: RepoTools,
 ) -> None:
     wrong = dict(SHOWN, file="payments/missing.py", shows="the caller caps it")
-    model = ScriptedModel(script=[verdict(False, evidence=[wrong, SHOWN])])
+    model = ScriptedModel(script=[verdict(False, places=[wrong, SHOWN])])
 
     result = verify(model, repo_tools)
 
-    # Evidence is optional for a finding that does not hold: the wrong place is dropped,
+    # A basis is optional for a finding that does not hold: the wrong place is dropped,
     # the verdict stands and the verifier is not asked again.
     assert result.verdict is not None and not result.verdict.holds
-    assert [e.file for e in result.verdict.evidence] == ["payments/refund.py"]
+    assert [b.places[0].file for b in result.verdict.basis] == ["payments/refund.py"]
     assert len(model.sent) == 1
 
 
-def test_a_git_timeout_while_checking_evidence_is_checked_again(
+def test_a_git_timeout_while_checking_a_basis_is_checked_again(
     repo_tools: RepoTools, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    real = repo_tools.line_count
+    real = repo_tools.text
     calls: list[str] = []
 
-    def slow_once(path: str) -> int | None:
+    def slow_once(path: str) -> str | None:
         calls.append(path)
         if len(calls) == 1:
             raise ToolTimeoutError("git cat-file timed out after 30s")
         return real(path)
 
-    monkeypatch.setattr(repo_tools, "line_count", slow_once)
+    monkeypatch.setattr(repo_tools, "text", slow_once)
     model = ScriptedModel(script=[verdict(True, call_id="v0"), verdict(True)])
 
     result = verify(model, repo_tools)
@@ -352,3 +368,72 @@ def test_the_verifier_sees_each_basis_and_whether_it_checked_out(repo_tools: Rep
     assert "spec from docs/refunds.md:3" in text and "A refund is at most the paid amount." in text
     assert "payments/refund.py:2-2" in text
     assert "the program could not confirm it: docs/refunds.md is not in the reviewed commit" in text
+
+
+def test_a_verifier_may_ground_its_verdict_on_a_quoted_rule(repo_tools: RepoTools) -> None:
+    # The same four kinds of basis as the dimension agents (decision D-036).
+    rule = {
+        "kind": "spec",
+        "source": "pr",
+        "quote": "Never refund more than paid.",
+        "places": [SHOWN],
+        "explanation": "The refund is never compared with what was paid.",
+    }
+    held = call(VERIFY_TOOL, {"holds": True, "reason": "It breaks the PR's rule.", "basis": [rule]})
+
+    result = verify(ScriptedModel(script=[held]), repo_tools)
+
+    assert result.verdict is not None and result.verdict.holds
+    [based] = result.verdict.basis
+    assert based.kind == "spec" and based.check is not None and based.check.status == "ok"
+
+
+# Not in the PR description, which says "Never refund more than paid."
+MISQUOTED = {
+    "kind": "spec",
+    "source": "pr",
+    "quote": "Refunds are capped at the order total.",
+    "places": [SHOWN],
+    "explanation": "The refund is never capped.",
+}
+
+
+def test_a_verdict_that_holds_on_a_misquoted_rule_is_asked_again(repo_tools: RepoTools) -> None:
+    wrong = call(VERIFY_TOOL, {"holds": True, "reason": "r", "basis": [MISQUOTED]}, "v0")
+    model = ScriptedModel(script=[wrong, verdict(True)])
+
+    result = verify(model, repo_tools)
+
+    assert result.verdict is not None and result.verdict.holds
+    assert "the quote is not in the PR description" in str(model.sent[1][-1].content)
+
+
+@pytest.mark.parametrize(
+    ("kind", "source", "quote"),
+    [
+        ("convention", "CONTRIBUTING.md:3", "Amounts are integers in cents, never floats."),
+        ("contract", "issue#12", "Refunds must not exceed the amount paid."),
+    ],
+)
+def test_a_verifier_may_ground_its_verdict_on_a_convention_or_a_contract(
+    repo_tools: RepoTools, kind: str, source: str, quote: str
+) -> None:
+    rule = {"kind": kind, "source": source, "quote": quote, "places": [SHOWN], "explanation": "e"}
+    held = call(VERIFY_TOOL, {"holds": True, "reason": "r", "basis": [rule]})
+
+    result = verify(ScriptedModel(script=[held]), repo_tools)
+
+    assert result.verdict is not None and result.verdict.holds
+    [based] = result.verdict.basis
+    assert based.kind == kind and based.check is not None and based.check.status == "ok"
+
+
+def test_a_verdict_that_holds_without_a_basis_that_checks_out_twice_is_not_a_verdict(
+    repo_tools: RepoTools,
+) -> None:
+    wrong = call(VERIFY_TOOL, {"holds": True, "reason": "r", "basis": [MISQUOTED]}, "v0")
+
+    result = verify(ScriptedModel(script=[wrong, wrong]), repo_tools)
+
+    # One correction only (decision D-036): the finding is left unverified, not published.
+    assert result.status == "incomplete" and result.verdict is None

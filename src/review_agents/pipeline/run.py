@@ -647,7 +647,7 @@ class _Work:
         record: dict[str, object] = {
             "holds": True,
             "reason": verdict.reason,
-            "evidence": [e.model_dump() for e in verdict.evidence],
+            "basis": [b.model_dump() for b in verdict.basis],
         }
         for member in members:
             finding = member.finding.model_copy(update={"severity": verdict.severity})
