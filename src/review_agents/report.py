@@ -119,6 +119,7 @@ _TEXT: dict[Language, dict[str, str]] = {
         "incomplete": "审查结论：审查未完成，以下只是已完成部分的结果",
         "count": "（{n}）",
         "see_inline": "见行间评论",
+        "see_below": "见下方「不在本次改动行上的发现」",
         "found_by": "{names}都发现了",
         "join": "、",
         "sep": "；",
@@ -163,7 +164,7 @@ _TEXT: dict[Language, dict[str, str]] = {
         "stats": "{mode} 模式 · {tokens} token · {time} · 审查 #{id}",
         "minutes": "{m} 分 {s} 秒",
         "seconds": "{s} 秒",
-        "spec_drift": "规格偏离",
+        "spec_drift": "规格漂移",
         "edge_cases": "边界问题",
         "security": "安全",
         "maintainability": "可维护性",
@@ -182,6 +183,7 @@ _TEXT: dict[Language, dict[str, str]] = {
         "incomplete": "Review: incomplete; what follows covers only the parts that finished",
         "count": " ({n})",
         "see_inline": "see the inline comment",
+        "see_below": 'see "Not on the changed lines" below',
         "found_by": "found by {names}",
         "join": ", ",
         "sep": "; ",
@@ -284,7 +286,10 @@ def _line(text: str) -> str:
 
 
 def _code(text: str) -> str:
-    return "`" + text.replace("`", "'").replace("<!--", "<!​--") + "`"
+    """Text in a code span it cannot leave: one line, no backticks, no marker. A mention
+    in a code span does not notify anyone, so `@` stays as it is."""
+    text = " ".join(text.split()).replace("`", "'")
+    return "`" + text.replace("<!--", "<!​--").replace("-->", "--​>") + "`"
 
 
 def _where(file: str, start: int, end: int) -> str:
@@ -404,15 +409,16 @@ def build_report(
     lines = [SUMMARY_MARKER, f"## {conclusion}"]
 
     for level in LEVELS:
-        source = [i for i, _, _ in inline] if level in INLINE else shown
-        group = [i for i in source if i.severity == level]
+        group = [i for i in shown if i.severity == level]
         if not group:
             continue
         lines += ["", w.heading(level, len(group))]
         for item in group:
             entry = f"- {w.title(item)} — {_where(item.file, item.line_start, item.line_end)}"
             if level in INLINE:
-                lines.append(entry + w.aside(t["sep"].join([t["see_inline"], *w.notes(item)])))
+                # Its details are in its inline comment, or below when it has none.
+                see = t["see_below"] if any(item is o for o in off) else t["see_inline"]
+                lines.append(entry + w.aside(t["sep"].join([see, *w.notes(item)])))
             else:
                 lines += [entry, *w.details(item)]
 

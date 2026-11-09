@@ -150,6 +150,9 @@ def test_a_finding_off_the_changed_lines_goes_into_its_own_section_with_its_basi
     result = report([off])
 
     assert result.comments == []
+    # Its level still lists it, so the count matches the conclusion.
+    level = result.summary.split("### 🟡 重要（1）")[1].split("###")[0]
+    assert "`api/orders.py:88-95`" in level and "见下方「不在本次改动行上的发现」" in level
     section = result.summary.split("### 不在本次改动行上的发现")[1]
     assert "`api/orders.py:88-95`" in section
     assert "refund(order, 10_000) returns 10_000" in section
@@ -306,3 +309,17 @@ def test_the_report_as_json_is_what_the_api_returns() -> None:
         "body": "",
     }
     assert data["counts"]["complete"] is True
+
+
+def test_a_source_cannot_break_out_of_its_code_span() -> None:
+    basis = spec_basis().model_copy(update={"source": "docs/a.md\n\n## Fake heading"})
+
+    result = report([item(bases=[basis])])
+
+    assert "\n## Fake heading" not in result.comments[0].body
+
+
+def test_spec_drift_is_named_as_the_architecture_names_it() -> None:
+    scope = Scope("standard", ["spec_drift"], 1, 1, 1, [], [], finder_verifies=False)
+
+    assert "规格漂移" in report([], scope=scope).summary

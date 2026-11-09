@@ -40,7 +40,7 @@ from review_agents.context.cache import repo_layer_for_review
 from review_agents.context.git import Snapshot
 from review_agents.context.modules import Summarize, module_summaries, module_tokens
 from review_agents.context.pack import DIMENSIONS, ContextPack, build_packs
-from review_agents.context.pr_layer import PrRequest, build_pr_layer
+from review_agents.context.pr_layer import PrRequest, build_pr_layer, pr_patches
 from review_agents.context.summarizer import model_summarizer
 from review_agents.credentials import TokenVault
 from review_agents.db import connect
@@ -350,6 +350,9 @@ def run_review(
         conn, request, git_dir, config, token=token, surrounding_code=settings.surrounding_code
     )
     packs = build_packs(repo_layer, pr_layer, window, settings.output_reserve_tokens)
+    # For the report: the whole PR's lines, not only this round's, since GitHub takes
+    # inline comments on those. Read with the rest of the code, before any model call.
+    patches = pr_patches(git_dir, review["base_sha"], head, pr_layer.files)
     _step(conn, review_id, "context.pr_layer", step)
     if len(packs) > 1:
         _step(conn, review_id, f"context.groups.{len(packs)}", step)
@@ -415,10 +418,10 @@ def run_review(
     _step(conn, review_id, "merge", step, fallbacks[0] if fallbacks else None)
     hits = [r.limit_hit for r in runs] + [c.run.limit_hit for c in checks if c.run]
     limit_hit = next((lim for lim in _LIMIT_ORDER if lim in hits), None)
-    binary = sorted(path for path, patch in pr_layer.diffs.items() if is_binary(patch))
+    binary = sorted(path for path, patch in patches.items() if is_binary(patch))
     report = build_report(
         [_item(m, published) for m in merged],
-        changed={path: added_lines(patch) for path, patch in pr_layer.diffs.items()},
+        changed={path: added_lines(patch) for path, patch in patches.items()},
         missed=[
             MissedStep(
                 job.dimension,
@@ -438,7 +441,7 @@ def run_review(
             mode=config.mode,
             dimensions=dimensions,
             runs=repeats,
-            files=len(pr_layer.diffs) - len(binary),
+            files=len(patches) - len(binary),
             groups=len(packs),
             skipped=[f.path for f in pr_layer.files if f.skipped],
             binary=binary,
