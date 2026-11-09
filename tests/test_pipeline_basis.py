@@ -135,3 +135,17 @@ def test_a_finding_is_supported_when_one_basis_checks_out() -> None:
     assert supported([bad, good])
     assert not supported([bad])
     assert not supported([])
+
+
+def test_a_quote_that_appears_twice_keeps_the_lines_given_when_it_is_there() -> None:
+    twice = {**FILES, "docs/twice.md": "Amounts are in cents.\n\nAgain:\n\nAmounts are in cents.\n"}
+
+    def text(path: str) -> str | None:
+        return twice.get(path)
+
+    checked = check_basis(
+        basis(source="docs/twice.md:5", quote="Amounts are in cents."), sources(text=text)
+    )
+
+    assert checked.check is not None and checked.check.status == "ok"
+    assert checked.source == "docs/twice.md:5"

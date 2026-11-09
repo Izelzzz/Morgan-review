@@ -155,15 +155,16 @@ def _source_problem(basis: Basis, sources: Sources) -> tuple[str | None, str | N
     if content is None:
         return f"{path} is not in the reviewed commit", None
     lines = content.splitlines()
+    if lines_given:
+        given_start = int(lines_given.group(2))
+        given_end = int(lines_given.group(3) or given_start)
+        # Where it says first: a quote may also appear at other lines of the file.
+        if _find(basis.quote, lines[given_start - 1 : given_end]) is not None:
+            return None, None
     where = _find(basis.quote, lines)
     if where is None:
         return f"the quote is not in {path}", None
     start, end = where
-    if lines_given:
-        given_start = int(lines_given.group(2))
-        given_end = int(lines_given.group(3) or given_start)
-        if given_start <= start and end <= given_end:
-            return None, None
     # Exactly as written in the file, at other lines than given: the lines are wrong, not the quote.
     return None, f"{path}:{start}" if start == end else f"{path}:{start}-{end}"
 
