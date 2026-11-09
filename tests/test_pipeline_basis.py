@@ -199,3 +199,33 @@ def test_quoting_the_code_under_review_is_not_a_rule() -> None:
 
     assert checked.check is not None and checked.check.status == "failed"
     assert "the code under review" in (checked.check.problem or "")
+
+
+# Chinese punctuation on purpose: it is what real Chinese rules use.
+ZH = "# 规则\n\n本 PR 规定：所有请求必须带超时时间。重试最多三次。\n\nretry_limit_total = 3\n"  # noqa: RUF001
+
+
+def zh_sources() -> Sources:
+    files = {**FILES, "docs/zh.md": ZH}
+    return sources(
+        text=lambda path: files.get(path),
+        pr_text="本 PR 规定：所有请求必须带超时时间。",  # noqa: RUF001
+    )
+
+
+@pytest.mark.parametrize("source", ["docs/zh.md:3", "pr"])
+def test_half_a_chinese_sentence_is_a_quote_chinese_has_no_spaces_between_words(
+    source: str,
+) -> None:
+    checked = check_basis(basis(source=source, quote="请求必须带超时时间"), zh_sources())
+
+    assert checked.check is not None and checked.check.status == "ok"
+
+
+def test_part_of_an_identifier_is_not_a_quote_of_it() -> None:
+    # "retry_limit" is only there inside "retry_limit_total".
+    checked = check_basis(basis(source="docs/zh.md:5", quote="retry_limit"), zh_sources())
+    whole = check_basis(basis(source="docs/zh.md:5", quote="retry_limit_total = 3"), zh_sources())
+
+    assert checked.check is not None and checked.check.status == "failed"
+    assert whole.check is not None and whole.check.status == "ok"

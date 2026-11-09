@@ -105,11 +105,18 @@ def _squash(text: str) -> str:
     return " ".join(text.split())
 
 
+def _word(char: str) -> bool:
+    """A character of an English word or an identifier. Chinese is written without spaces
+    between words, so any part of a Chinese sentence may be quoted; the shortest quote
+    keeps that from matching anywhere."""
+    return char.isascii() and (char.isalnum() or char == "_")
+
+
 def _find(quote: str, lines: Sequence[str]) -> tuple[int, int] | None:
     """The 1-based lines a quote spans in `lines`; None if absent.
 
     Whitespace does not count, blank lines included, and the quote matches whole words:
-    it does not begin or end inside a word of the text.
+    it does not begin or end inside an English word or an identifier of the text.
     """
     starts: list[int] = []  # where each line begins in `text`; blank lines add nothing
     parts: list[str] = []
@@ -125,8 +132,8 @@ def _find(quote: str, lines: Sequence[str]) -> tuple[int, int] | None:
     at = text.find(wanted)
     while at >= 0:
         end = at + len(wanted)
-        inside_word = (wanted[0].isalnum() and at > 0 and text[at - 1].isalnum()) or (
-            wanted[-1].isalnum() and end < len(text) and text[end].isalnum()
+        inside_word = (_word(wanted[0]) and at > 0 and _word(text[at - 1])) or (
+            _word(wanted[-1]) and end < len(text) and _word(text[end])
         )
         if not inside_word:
             first = bisect.bisect_right(starts, at)
