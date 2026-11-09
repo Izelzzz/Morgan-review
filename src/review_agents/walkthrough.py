@@ -42,10 +42,13 @@ WALKTHROUGH_TASK = (
     f" and hand in with `{WALKTHROUGH_TOOL}`.\n\n{SKILL}"
 )
 WALKTHROUGH_NOW = f"Stop investigating. Call {WALKTHROUGH_TOOL} now with what you know."
-# A citation in code font: `path:line` or `path:start-end`. A path has a folder or a
-# file extension, so a host and port such as `localhost:8080` is not taken for one.
+# A citation in code font: `path:line` or `path:start-end`. Every one is checked, a
+# file in the root without an extension too; the skill asks for hosts and ports to be
+# written otherwise, and the two that are common anyway are let through.
 _REFERENCE = re.compile(r"`([^`\s]+?):(\d+)(?:-(\d+))?`")
-_PATH = re.compile(r"(?:.*/.*|.*\.[A-Za-z]\w*)")
+_HOST = re.compile(r"localhost|\d{1,3}(?:\.\d{1,3}){3}")
+# Git too slow to say whether a cited file is there gets one more try.
+CHECK_TRIES = 2
 
 
 class Card(BaseModel):
@@ -119,28 +122,47 @@ class WalkthroughRun:
 def reference_problems(
     walkthrough: Walkthrough, line_count: Callable[[str], int | None]
 ) -> list[str]:
-    """What is wrong with the places the walkthrough cites; git being slow is not wrong."""
+    """What is wrong with the places the walkthrough cites.
+
+    Raises ToolTimeoutError when git is still too slow on the last try: a place that
+    could not be checked is not taken for one that checked out.
+    """
     problems = []
     seen = set()
     for text in walkthrough.texts():
         for match in _REFERENCE.finditer(text):
             path, start = match.group(1), int(match.group(2))
             end = int(match.group(3) or start)
-            if "://" in path or not _PATH.fullmatch(path) or (path, start, end) in seen:
+            if "://" in path or _HOST.fullmatch(path) or (path, start, end) in seen:
                 continue
             seen.add((path, start, end))
+            cited = match.group(0).strip("`")
+            if start < 1:
+                problems.append(f"{cited} has no line 0")
+                continue
             if end < start:
-                problems.append(f"{path}:{start}-{end} ends before it starts")
+                problems.append(f"{cited} ends before it starts")
                 continue
-            try:
-                lines = line_count(path)
-            except ToolTimeoutError:
-                continue
+            lines = _counted(line_count, path)
             if lines is None:
                 problems.append(f"{path} is not in the reviewed commit")
             elif end > lines:
                 problems.append(f"{path} has only {lines} lines, not {end}")
     return problems
+
+
+class _Unchecked(RuntimeError):
+    """Git was too slow to check a cited place: not the agent's mistake to correct."""
+
+
+def _counted(line_count: Callable[[str], int | None], path: str) -> int | None:
+    for tries in range(1, CHECK_TRIES + 1):
+        try:
+            return line_count(path)
+        except ToolTimeoutError:
+            if tries == CHECK_TRIES:
+                raise
+    raise AssertionError("unreachable")  # pragma: no cover
 
 
 def _submit_tool() -> StructuredTool:
@@ -178,25 +200,31 @@ def run_walkthrough(
 
     def parse(args: dict[str, Any]) -> Walkthrough:
         walkthrough = Walkthrough.model_validate(args)
-        problems = reference_problems(walkthrough, line_count)
+        try:
+            problems = reference_problems(walkthrough, line_count)
+        except ToolTimeoutError as exc:  # a ValueError, which the loop takes for a mistake
+            raise _Unchecked(str(exc)) from exc
         if walkthrough.diagrams > MAX_DIAGRAMS:
             problems.append(f"{walkthrough.diagrams} Mermaid diagrams, more than {MAX_DIAGRAMS}")
         if problems:
             raise ValueError("; ".join(problems))
         return walkthrough
 
-    end = tool_loop(
-        model_for,
-        walkthrough_messages(pack),
-        tools,
-        Submit(_submit_tool(), parse, "walkthrough", WALKTHROUGH_NOW),
-        tool_calls=tool_calls,
-        callbacks=callbacks,
-        deadline=deadline,
-        clock=clock,
-        limits=limits,
-        slot=slot,
-    )
+    try:
+        end = tool_loop(
+            model_for,
+            walkthrough_messages(pack),
+            tools,
+            Submit(_submit_tool(), parse, "walkthrough", WALKTHROUGH_NOW),
+            tool_calls=tool_calls,
+            callbacks=callbacks,
+            deadline=deadline,
+            clock=clock,
+            limits=limits,
+            slot=slot,
+        )
+    except _Unchecked as exc:
+        return WalkthroughRun("incomplete", reason=f"its references could not be checked: {exc}")
     return WalkthroughRun(
         "done" if end.answer is not None else "incomplete",
         walkthrough=end.answer,

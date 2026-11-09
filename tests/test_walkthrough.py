@@ -10,7 +10,7 @@ from review_agents.context.pack import SHARED_RULES, ContextPack
 from review_agents.context.pr_layer import ChangedFile, PrLayer, PrRequest
 from review_agents.context.repo_layer import RepoLayer
 from review_agents.mirror import MirrorStore
-from review_agents.tools import RepoTools
+from review_agents.tools import RepoTools, ToolTimeoutError
 from review_agents.walkthrough import (
     MARKER,
     WALKTHROUGH_TOOL,
@@ -25,6 +25,8 @@ from review_agents.walkthrough import (
 FILES: dict[str, str | bytes] = {
     "payments/refund.py": "def refund(order, cents):\n    total = cents\n    return total\n",
     "README.md": "# Shop\n",
+    "Dockerfile": "FROM python:3.12\n",
+    "empty.txt": "",
 }
 
 
@@ -107,6 +109,12 @@ def test_the_walkthrough_follows_the_reviewers_opening_and_its_language(
     [
         ("`payments/missing.py:3`", "payments/missing.py is not in the reviewed commit"),
         ("`payments/refund.py:2-40`", "payments/refund.py has only 3 lines"),
+        # A file in the root without an extension is a file too.
+        ("`Dockerfile:999999`", "Dockerfile has only 1 lines"),
+        ("`Makefile:3`", "Makefile is not in the reviewed commit"),
+        ("`README.md:0`", "README.md:0 has no line 0"),
+        ("`README.md:0-1`", "README.md:0-1 has no line 0"),
+        ("`empty.txt:1`", "empty.txt has only 0 lines"),
     ],
 )
 def test_a_reference_that_is_not_there_is_asked_again_once(
@@ -239,3 +247,37 @@ def test_a_host_and_port_is_not_taken_for_a_file(repo_tools: RepoTools) -> None:
     model = ScriptedModel(script=[call(WALKTHROUGH_TOOL, hosts)])
 
     assert run(model, repo_tools).status == "done"
+
+
+def test_a_reference_git_was_too_slow_to_check_is_checked_again(
+    repo_tools: RepoTools, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    real = repo_tools.line_count
+    calls: list[str] = []
+
+    def slow_once(path: str) -> int | None:
+        calls.append(path)
+        if len(calls) == 1:
+            raise ToolTimeoutError("git cat-file timed out after 30s")
+        return real(path)
+
+    monkeypatch.setattr(repo_tools, "line_count", slow_once)
+    model = ScriptedModel(script=[call(WALKTHROUGH_TOOL, answer())])
+
+    assert run(model, repo_tools).status == "done"
+    assert len(calls) == 2
+
+
+def test_a_reference_that_cannot_be_checked_is_not_published(
+    repo_tools: RepoTools, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def slow(path: str) -> int | None:
+        raise ToolTimeoutError("git cat-file timed out after 30s")
+
+    monkeypatch.setattr(repo_tools, "line_count", slow)
+    model = ScriptedModel(script=[call(WALKTHROUGH_TOOL, answer())])
+
+    result = run(model, repo_tools)
+
+    assert result.status == "incomplete" and result.walkthrough is None
+    assert "timed out" in (result.reason or "")

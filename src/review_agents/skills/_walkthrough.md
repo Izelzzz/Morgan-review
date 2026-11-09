@@ -46,7 +46,7 @@ Include changes made because of review comments when they changed behaviour, and
 
 ## Rules
 
-- Every claim about the code cites where it is, in code font, as `path:line` or `path:start-end` (for example `src/app/run.py:40-52`). The program checks that each cited file is in the reviewed commit and each line range is inside it, and asks you once to correct the ones that are not; a walkthrough still wrong after that is not published.
+- Every claim about the code cites where it is, in code font, as `path:line` or `path:start-end` (for example `src/app/run.py:40-52`). The program checks that each cited file is in the reviewed commit and each line range is inside it, and asks you once to correct the ones that are not; a walkthrough still wrong after that is not published. Every `name:number` in code font is taken for a file and its line, so write a host and its port otherwise (`example.com` port 443).
 - Plain language. Define a term the first time you use it unless any developer would know it. Name settings, files and functions exactly as they are in the code.
 - Describe; do not review. No opinions on quality, no suggestions, no severity levels. If you notice a problem, leave it: the review reports problems with evidence.
 - Do not repeat yourself across sections. The cards say the most important things once; the later sections give the detail.
