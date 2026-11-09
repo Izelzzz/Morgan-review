@@ -1,0 +1,120 @@
+schema_version: 1
+case: review-lab-basis-checks
+origin:
+  kind: introduced_bug
+  url: https://github.com/Izelzzz/review-lab/commit/db3a1d064d5687ae293097773746cb98fa2536ec
+  note: >
+    Fixed by ebcc0c0 (twice-quoted), 93de81d (merge judge) and ac21753 (blank lines),
+    each found in review of this commit. 2aa9915 fixes a bug ac21753 brought in, so it
+    is not in this commit and not expected here.
+
+expected:
+  - id: quote-appears-twice
+    locations:
+      - file: src/review_agents/pipeline/basis.py
+        line_start: 157
+        line_end: 168
+    must_say: >
+      _source_problem 先在整个文件里找原文第一次出现的位置，再看它是否落在给定行内。
+      原文在文件里出现两次、给定的行本来正确时，第一次出现不在给定行内，
+      程序就把正确的行号「纠正」成第一次出现的位置。应先在给定的行里找。
+    severities: [important, robustness]
+    dimensions: [edge_cases, spec_drift]
+    proof:
+      kind: fail_to_pass
+      fix_commit: ebcc0c0a515d3df4b690520f886993a4f0d9e881
+      test_paths: [tests/test_pipeline_basis.py]
+      command:
+        - uv
+        - run
+        - --frozen
+        - pytest
+        - -q
+        - --no-cov
+        - tests/test_pipeline_basis.py::test_a_quote_that_appears_twice_keeps_the_lines_given_when_it_is_there
+
+  - id: quote-across-blank-line
+    locations:
+      - file: src/review_agents/pipeline/basis.py
+        line_start: 105
+        line_end: 120
+    must_say: >
+      _find 把每行压缩空白后用空格连接，空行也贡献一个空串，连接后多出一个空格；
+      压缩过空白的原文里只有一个空格，所以跨空行的原文（例如两段相邻的规则）永远找不到，
+      依据被判为核对不上。
+    severities: [important, robustness]
+    dimensions: [edge_cases]
+    proof:
+      kind: repro
+      # The fix's test file imports MIN_QUOTE_CHARS, which this commit does not have, so
+      # it cannot be collected here; this checks the same thing with what the commit has.
+      # Exit code 3: a Python error exits with 1 and would prove nothing.
+      head_exit_code: 3
+      command:
+        - uv
+        - run
+        - --frozen
+        - python
+        - -c
+        - |
+          from review_agents.pipeline.basis import Basis, Sources, check_basis
+          files = {
+              "docs/rules.md": "# Rules\n\nFailures are logged.\n\nRetries stop after three tries.\n",
+              "app.py": "def retry():\n    pass\n",
+          }
+          basis = Basis.model_validate({
+              "kind": "convention",
+              "source": "docs/rules.md:3-5",
+              "quote": "Failures are logged. Retries stop after three tries.",
+              "places": [{"file": "app.py", "line_start": 1, "line_end": 2, "shows": "no limit"}],
+              "explanation": "retry never stops",
+          })
+          checked = check_basis(basis, Sources(text=files.get, pr_text="", issues={}))
+          raise SystemExit(0 if checked.check.status == "ok" else 3)
+
+  - id: merge-judge-loses-evidence
+    locations:
+      - file: src/review_agents/pipeline/merge.py
+        line_start: 271
+        line_end: 276
+    must_say: >
+      合并裁判的 _describe 原来给出每个候选的 evidence；evidence 换成 basis 后，
+      这里只剩 why，没有补上 basis，裁判判断两条候选是不是同一个问题时看不到依据了。
+    severities: [important, robustness]
+    dimensions: [spec_drift, maintainability, edge_cases]
+    proof:
+      kind: fail_to_pass
+      fix_commit: 93de81df8906a1ad4f5f20590f7d69c46478c45c
+      test_paths: [tests/test_pipeline_merge.py]
+      command:
+        - uv
+        - run
+        - --frozen
+        - pytest
+        - -q
+        - --no-cov
+        - tests/test_pipeline_merge.py::test_the_model_judge_sees_each_candidate_s_basis
+
+acceptable:
+  - about: >
+      迁移直接 DROP COLUMN evidence：回滚到旧版本时旧代码读不到 evidence 列。
+    locations:
+      - file: src/review_agents/migrations/0008_basis.sql
+        line_start: 4
+        line_end: 4
+    max_severity: important
+  - about: >
+      原文没有最短长度、也不要求整词匹配，一个词或被审代码本身就能当作规则通过核对，
+      而 Quick 模式只凭核对通过的依据发布 🔴 / 🟡。
+    max_severity: important
+  - about: >
+      Quick 模式下 git 太慢没能核对的依据也算核对不上，docstring 没有说明这一点。
+    max_severity: robustness
+
+tags:
+  languages: [python]
+  context_hops: 1
+  labels: [large-pr, real-history]
+
+# A draft until a person checks it: severities and dimensions above are a first judgment.
+verified: null
