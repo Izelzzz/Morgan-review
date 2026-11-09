@@ -166,6 +166,25 @@ def file_diff(git: _Git, since: str, head: str, changed: ChangedFile, three_dot:
     return git("diff", "-W", "-M", "--no-color", "--no-ext-diff", span, "--", *paths).strip()
 
 
+def pr_patches(git_dir: Path, base: str, head: str, files: list[ChangedFile]) -> dict[str, str]:
+    """Each changed file's patch over the whole PR (`base...head`), without context lines.
+
+    These are the lines GitHub shows in the PR's diff and takes inline comments on, in
+    every round: what a round shows the agents may be only what changed since the last.
+    """
+    git = _Git(git_dir)
+    span = f"{base}...{head}"
+    patches = {}
+    for changed in files:
+        if changed.skipped:
+            continue
+        paths = [changed.path] if changed.old_path is None else [changed.old_path, changed.path]
+        patch = git("diff", "-U0", "-M", "--no-color", "--no-ext-diff", span, "--", *paths)
+        if patch.strip():
+            patches[changed.path] = patch.strip()
+    return patches
+
+
 def names_in_patch(patch: str) -> set[str]:
     """Functions and types a patch changes.
 

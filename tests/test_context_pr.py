@@ -14,6 +14,7 @@ from review_agents.context.pr_layer import (
     PrLayer,
     PrRequest,
     build_pr_layer,
+    pr_patches,
 )
 from review_agents.db import connect, migrate
 from review_agents.mirror import MirrorStore
@@ -287,3 +288,17 @@ def test_after_a_force_push_the_round_diffs_against_what_was_reviewed(fx: Fixtur
 
     # Against what was reviewed, not against the base: the abandoned version is what changed.
     assert "-    return Money(cents)" in layer.diffs["payments/refund.py"]
+
+
+def test_the_pr_s_own_patches_cover_the_whole_pr_whichever_round_this_is(fx: Fixture) -> None:
+    # A later round shows the agents only what changed since; GitHub takes inline comments
+    # on the whole PR's diff.
+    layer = fx.layer(previous_head=fx.first)
+
+    patches = pr_patches(fx.git_dir, fx.base, fx.head, layer.files)
+
+    refund = patches["payments/refund.py"]  # changed in the first round only
+    assert "+    total = Money(min(cents, order.paid))" in refund
+    assert "    return total" not in refund  # no context lines
+    assert "package-lock.json" not in patches  # matches a skip rule
+    assert "new_name.py" in patches and "docs/specs/refund.md" in patches
