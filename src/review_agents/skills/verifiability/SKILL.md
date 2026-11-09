@@ -24,4 +24,4 @@ Tests that pass without proving the requirement belong to spec drift.
 
 ## Shared rules
 
-Follow `_shared.md` for severity, evidence and output.
+Follow `_shared.md` for severity, basis and output.

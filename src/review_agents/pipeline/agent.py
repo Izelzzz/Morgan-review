@@ -28,6 +28,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_valida
 from review_agents.context.pack import ContextPack
 from review_agents.context.tokens import estimate_tokens
 from review_agents.models import BudgetExceededError
+from review_agents.pipeline.basis import Basis, Sources, check_basis
 from review_agents.pipeline.conversation import (
     Conversation,
     ConversationLimits,
@@ -73,7 +74,9 @@ class Finding(BaseModel):
     file: str = Field(min_length=1)
     line_start: int = Field(ge=1)
     line_end: int = Field(ge=1)
-    evidence: str = ""
+    # Why it holds, as the shared rules define; required for 🔴 / 🟡 (decision D-036). The
+    # program checks each one; one that does not check out still goes to the verifier.
+    basis: list[Basis] = Field(default_factory=list)
     why: str = ""
     suggestion: str = ""
     preexisting: bool = False
@@ -121,8 +124,6 @@ def check(finding: Finding, line_count: Callable[[str], int | None]) -> str | No
         return f"{finding.file} is not in the reviewed commit"
     if finding.line_end > lines:
         return f"{finding.file} has only {lines} lines"
-    if finding.severity in ("blocking", "important") and not finding.evidence.strip():
-        return "a blocking or important finding needs evidence"
     if not finding.why.strip():
         return "it does not say what goes wrong for users or maintainers (why)"
     if not finding.suggestion.strip():
@@ -282,6 +283,16 @@ def tool_loop[T](
     return end
 
 
+def pack_sources(pack: ContextPack, tools: RepoTools) -> Sources:
+    """What a basis may quote: the reviewed commit, the PR description, its linked issues."""
+    request = pack.pr.request
+    return Sources(
+        text=functools.cache(tools.text),  # a timeout raises, so it is never remembered
+        pr_text=f"{request.title}\n\n{request.body}",
+        issues=dict(pack.pr.issues),
+    )
+
+
 def run_dimension(
     model_for: Callable[[float], BaseChatModel],
     pack: ContextPack,
@@ -319,6 +330,7 @@ def run_dimension(
     if end.answer is None:
         return run
     line_count = functools.cache(tools.line_count)
+    sources = pack_sources(pack, tools)
     for item in end.answer.findings:
         item.dimension = dimension
         try:
@@ -328,6 +340,8 @@ def run_dimension(
         except ToolError as exc:
             run.dropped.append(f"{item.title}: {exc}")
             continue
+        # Checked, not judged: a basis that does not check out says why, for the verifier.
+        item.basis = [check_basis(b, sources) for b in item.basis]
         try:
             problem = check(item, line_count)
         except ToolTimeoutError:

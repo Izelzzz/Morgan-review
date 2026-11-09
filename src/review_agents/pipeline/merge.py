@@ -23,6 +23,7 @@ from pydantic import BaseModel, Field
 
 from review_agents.context.markup import untrusted
 from review_agents.pipeline.agent import Finding
+from review_agents.pipeline.basis import checked_out, describe
 
 log = logging.getLogger(__name__)
 
@@ -134,9 +135,11 @@ def _rank(finding: Finding) -> int:
 def _lead(members: Iterable[Merged | Candidate]) -> Finding:
     """The copy that speaks for a group: the most severe, then the best argued."""
 
-    def key(m: Merged | Candidate) -> tuple[int, int, str, str, int]:
+    def key(m: Merged | Candidate) -> tuple[int, int, int, str, str, int]:
         f = m.finding  # ties settle the same way whatever order the agents finished in
-        return (_rank(f), -len(f.evidence), f.dimension, f.file, f.line_start)
+        held = [b for b in f.basis if checked_out(b)]
+        argued = sum(len(b.explanation) for b in held)
+        return (_rank(f), -len(held), -argued, f.dimension, f.file, f.line_start)
 
     return min(members, key=key).finding
 
@@ -269,7 +272,8 @@ def _describe(candidate: Candidate) -> str:
     f = candidate.finding
     return (
         f"#{candidate.id} [{f.dimension}, {f.severity}] {f.file}:{f.line_start}-{f.line_end}"
-        f" {f.title}\n  evidence: {f.evidence}"
+        f" {f.title}\n  why: {f.why}"
+        + "".join("\n  basis: " + describe(b).replace("\n", "\n  ") for b in f.basis)
     )
 
 

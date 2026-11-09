@@ -219,7 +219,7 @@ def test_agents_only_get_read_only_tools(tools: RepoTools) -> None:
     # A new public method must be added here on purpose, after checking it cannot write.
     # issue_text is read_issue without the body cap, for the PR layer, not for agents.
     # line_count lets the pipeline check where a finding points; agents never get it.
-    assert public == {*given, "NAMES", "is_skipped", "issue_text", "line_count"}
+    assert public == {*given, "NAMES", "is_skipped", "issue_text", "line_count", "text"}
 
 
 def test_an_invalid_pattern_and_an_unreachable_api_come_back_as_errors(
@@ -287,3 +287,24 @@ def test_line_count_reports_a_timeout_instead_of_a_missing_file(
     # A slow git says nothing about whether the file exists.
     with pytest.raises(ToolTimeoutError, match="timed out"):
         tools.line_count("src/app.py")
+
+
+def test_text_reads_a_file_of_the_reviewed_commit(tools: RepoTools) -> None:
+    # Not an agent tool: the pipeline uses it to check what a finding quotes.
+    assert (
+        tools.text("src/app.py") == "def total(items):\n    return sum(items)\n\nTOKEN_NAME = 'x'\n"
+    )
+    assert tools.text("src/missing.py") is None
+    assert tools.text("../outside") is None
+
+
+def test_text_reports_a_timeout_instead_of_a_missing_file(
+    checkout: tuple[Path, str], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    git_dir, head = checkout
+    monkeypatch.setenv("PATH", os.environ["PATH"])  # restored after the test
+    install_fake_git(tmp_path / "fakebin", "exec sleep 30")
+    tools = RepoTools(git_dir, "octo/app", head, [], git_timeout=0.3)
+
+    with pytest.raises(ToolTimeoutError, match="timed out"):
+        tools.text("src/app.py")

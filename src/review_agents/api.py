@@ -218,7 +218,7 @@ def create_app(
                 raise HTTPException(status.HTTP_404_NOT_FOUND, "no such review")
             findings = conn.execute(
                 "SELECT fingerprint, primary_dimension, dimensions, severity, preexisting, file,"
-                " line_start, line_end, title, body, evidence, verdict, status"
+                " line_start, line_end, title, body, basis, verdict, status"
                 " FROM findings WHERE review_id = ? ORDER BY id",
                 (review_id,),
             ).fetchall()
@@ -229,6 +229,7 @@ def create_app(
             {
                 **dict(f),
                 "dimensions": json.loads(f["dimensions"]),
+                "basis": json.loads(f["basis"]),
                 "preexisting": bool(f["preexisting"]),
             }
             for f in findings

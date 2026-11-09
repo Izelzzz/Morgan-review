@@ -26,4 +26,4 @@ Crashes on ordinary unexpected input belong to edge cases, unless an attacker ca
 
 ## Shared rules
 
-Follow `_shared.md` for severity, evidence and output.
+Follow `_shared.md` for severity, basis and output.

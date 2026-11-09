@@ -35,7 +35,16 @@ Rules for choosing a level:
 
 ## Evidence
 
-Every 🔴 and 🟡 needs evidence: the file, the line range, and the concrete path from a real caller or input to the failure. Name the input, the code it passes through and what goes wrong. If you cannot show that path, do not report the finding at that level. A verifier re-reads your evidence and drops findings it cannot confirm.
+Every 🔴 and 🟡 needs at least one basis: the reason it holds, in a form a reader can check. Choose the kind that fits:
+
+- `spec`: the change does not do what the PR description, a linked issue or a spec says. Give the source, quote it exactly, and give the lines of code that do not match.
+- `contract`: a caller or an implementation breaks an interface: a signature, a type, a schema, an API document. Give where the contract is defined, quote it exactly, and give the lines that break it.
+- `convention`: the change breaks a rule written in the repository's conventions, such as CLAUDE.md, AGENTS.md or a lint configuration. Give the file, quote the rule exactly, and give the lines that break it.
+- `path`: the change fails, crashes or returns a wrong result without breaking a written rule. Give the steps in order, each with its lines: the caller or input it starts from, the code it passes through, and where it goes wrong.
+
+Each basis also says, in one or two sentences, why the code does not match or why it fails.
+
+A source is a file in the reviewed commit with its line range (`path:start-end`), the PR description (`pr`), or a linked issue (`issue#N`). A web page is not a source. Quote at most 300 characters, exactly as written: the program checks that every file and line range exists and that the quoted text is there. A basis that does not check out is passed to the verifier marked as such, and a finding the verifier cannot confirm does not hold. If you cannot give a basis, do not report the finding as 🔴 or 🟡.
 
 When the same kind of problem appears in several places, report it once and list every location.
 
@@ -47,7 +56,7 @@ Report each finding with these fields:
 - `severity`: `blocking`, `important`, `robustness` or `nit`.
 - `dimension`: the dimension that found it.
 - `file`, `line_start`, `line_end`: where it is.
-- `evidence`: the path from caller or input to the failure, as above.
+- `basis`: a list of bases, as above; required for 🔴 and 🟡, optional otherwise. Each has `kind`, `source` and `quote` (not for `path`), `places` (each a `file`, `line_start`, `line_end` and what those lines `shows`), and `explanation`.
 - `why`: the consequence for users or maintainers.
 - `suggestion`: the smallest fix that would resolve it.
 - `preexisting`: `true` or `false`.

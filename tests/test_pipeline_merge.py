@@ -19,6 +19,15 @@ from review_agents.pipeline.merge import (
 )
 
 
+def based(explanation: str, *, checked: bool = True) -> dict[str, Any]:
+    return {
+        "kind": "path",
+        "places": [{"file": "payments/refund.py", "line_start": 10, "line_end": 12, "shows": "s"}],
+        "explanation": explanation,
+        "check": {"status": "ok" if checked else "failed"},
+    }
+
+
 def candidate(cid: int, **changes: Any) -> Candidate:
     fields: dict[str, Any] = {
         "title": f"problem {cid}",
@@ -27,7 +36,7 @@ def candidate(cid: int, **changes: Any) -> Candidate:
         "file": "payments/refund.py",
         "line_start": 10,
         "line_end": 12,
-        "evidence": "e" * cid,
+        "basis": [based("e" * cid)],
         "why": "w",
         "suggestion": "s",
     }
@@ -53,14 +62,15 @@ def test_candidates_on_overlapping_lines_of_one_file_are_clustered() -> None:
 
 
 def test_the_judge_merges_one_problem_found_by_two_dimensions() -> None:
-    cands = [candidate(1), candidate(2, dimension="security", evidence="much more evidence")]
+    two = [based("one reason"), based("another reason")]
+    cands = [candidate(1), candidate(2, dimension="security", basis=two)]
 
     def judge(groups: list[list[Candidate]]) -> Decision:
         return Decision(same_problem=[[1, 2]], same_kind=[])
 
     [merged] = merge(cands, judge)
 
-    assert merged.finding.evidence == "much more evidence"  # the best-argued copy
+    assert len(merged.finding.basis) == 2  # the best-argued copy: more bases that check out
     assert merged.dimensions == ["edge_cases", "security"]
     assert merged.locations == []
 
@@ -327,8 +337,8 @@ def test_the_judge_cannot_merge_findings_that_share_no_code() -> None:
 
 
 def test_the_lead_of_equal_copies_is_chosen_the_same_way_every_time() -> None:
-    a = candidate(1, dimension="security", evidence="x")
-    b = candidate(2, dimension="edge_cases", evidence="y")
+    a = candidate(1, dimension="security", basis=[based("x")])
+    b = candidate(2, dimension="edge_cases", basis=[based("y")])
     decision = Decision(same_problem=[[1, 2]], same_kind=[])
 
     leads = {merge(order, lambda g: decision)[0].finding.dimension for order in ([a, b], [b, a])}
@@ -364,3 +374,33 @@ def test_lines_that_only_touch_in_a_chain_do_not_merge() -> None:
     ]
 
     assert len(merge(cands, None)) == 3
+
+
+def test_a_basis_that_did_not_check_out_does_not_make_a_copy_better_argued() -> None:
+    unchecked = [based("a long explanation " * 5, checked=False)] * 3
+    cands = [
+        candidate(1, basis=[based("short")]),
+        candidate(2, dimension="security", basis=unchecked),
+    ]
+
+    [merged] = merge(cands, lambda groups: Decision(same_problem=[[1, 2]], same_kind=[]))
+
+    assert merged.finding.dimension == "edge_cases"
+
+
+def test_the_model_judge_sees_each_candidate_s_basis() -> None:
+    reply = AIMessage(
+        content="",
+        tool_calls=[{"name": MERGE_TOOL, "args": {"same_problem": [], "same_kind": []}, "id": "m"}],
+    )
+    model = JudgeModel(reply=reply)
+    spec = dict(
+        based("the cap is missing"), kind="spec", source="docs/refunds.md:14", quote="At most paid."
+    )
+    cands = [candidate(1, basis=[spec]), candidate(2)]
+
+    model_judge(model, callbacks=[])(clusters(cands))
+
+    prompt = str(model.sent[0][-1].content)
+    assert 'spec from docs/refunds.md:14: "At most paid."' in prompt
+    assert "the cap is missing" in prompt
