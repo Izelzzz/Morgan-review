@@ -386,3 +386,21 @@ def test_a_basis_that_did_not_check_out_does_not_make_a_copy_better_argued() -> 
     [merged] = merge(cands, lambda groups: Decision(same_problem=[[1, 2]], same_kind=[]))
 
     assert merged.finding.dimension == "edge_cases"
+
+
+def test_the_model_judge_sees_each_candidate_s_basis() -> None:
+    reply = AIMessage(
+        content="",
+        tool_calls=[{"name": MERGE_TOOL, "args": {"same_problem": [], "same_kind": []}, "id": "m"}],
+    )
+    model = JudgeModel(reply=reply)
+    spec = dict(
+        based("the cap is missing"), kind="spec", source="docs/refunds.md:14", quote="At most paid."
+    )
+    cands = [candidate(1, basis=[spec]), candidate(2)]
+
+    model_judge(model, callbacks=[])(clusters(cands))
+
+    prompt = str(model.sent[0][-1].content)
+    assert 'spec from docs/refunds.md:14: "At most paid."' in prompt
+    assert "the cap is missing" in prompt

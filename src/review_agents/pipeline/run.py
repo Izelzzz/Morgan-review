@@ -604,7 +604,8 @@ class _Work:
     def _publishable_unverified(self, candidate: Candidate) -> bool:
         """Quick mode has no verifier: a 🔴 / 🟡 is published only on a basis that checked out.
 
-        Recorded in `steps` when it is not (decision D-036).
+        A basis git was too slow to check counts as not checked out: with no verifier to
+        look again, an unchecked quote is not trusted. Recorded in `steps` (decision D-036).
         """
         finding = candidate.finding
         if finding.severity not in ("blocking", "important") or supported(finding.basis):

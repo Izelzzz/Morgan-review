@@ -23,7 +23,7 @@ from pydantic import BaseModel, Field
 
 from review_agents.context.markup import untrusted
 from review_agents.pipeline.agent import Finding
-from review_agents.pipeline.basis import checked_out
+from review_agents.pipeline.basis import checked_out, describe
 
 log = logging.getLogger(__name__)
 
@@ -273,6 +273,7 @@ def _describe(candidate: Candidate) -> str:
     return (
         f"#{candidate.id} [{f.dimension}, {f.severity}] {f.file}:{f.line_start}-{f.line_end}"
         f" {f.title}\n  why: {f.why}"
+        + "".join("\n  basis: " + describe(b).replace("\n", "\n  ") for b in f.basis)
     )
 
 
