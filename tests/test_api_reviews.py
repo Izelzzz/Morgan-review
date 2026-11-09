@@ -195,8 +195,8 @@ def test_finished_results_survive_a_restart_and_queued_ones_are_failed(tmp_path:
             )
             conn.execute(
                 "INSERT INTO findings (review_id, fingerprint, primary_dimension, severity,"
-                " file, line_start, line_end, title, body, basis)"
-                " VALUES (?, 'f1', 'edge_cases', 'important', 'a.py', 3, 4, 't', 'b', ?)",
+                " file, line_start, line_end, title, body, evidence, basis)"
+                " VALUES (?, 'f1', 'edge_cases', 'important', 'a.py', 3, 4, 't', 'b', 'e', ?)",
                 (done, json.dumps([{"kind": "path", "explanation": "x"}])),
             )
 

@@ -98,11 +98,20 @@ def test_findings_reject_unknown_severity_and_orphans(tmp_path: Path) -> None:
         ).fetchone()["id"]
         insert = (
             "INSERT INTO findings (review_id, fingerprint, primary_dimension, severity, file,"
-            " line_start, line_end, title, body) VALUES (?, 'f', 'security', ?, 'a.py',"
-            " 1, 1, 't', 'b')"
+            " line_start, line_end, title, body, evidence) VALUES (?, 'f', 'security', ?, 'a.py',"
+            " 1, 1, 't', 'b', 'e')"
         )
         conn.execute(insert, (review_id, "blocking"))
         with pytest.raises(sqlite3.IntegrityError):
             conn.execute(insert, (review_id, "critical"))
         with pytest.raises(sqlite3.IntegrityError):
             conn.execute(insert, (review_id + 1, "blocking"))
+
+
+def test_findings_keep_the_old_evidence_column_beside_their_bases(tmp_path: Path) -> None:
+    # Only added, not dropped: an older version still reads its evidence column (D-036).
+    with closing(connect(tmp_path / "db.sqlite3")) as conn:
+        migrate(conn)
+        columns = {row["name"] for row in conn.execute("PRAGMA table_info(findings)")}
+
+    assert {"basis", "evidence"} <= columns

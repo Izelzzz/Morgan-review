@@ -53,7 +53,7 @@ from review_agents.models import (
     summary_usage,
 )
 from review_agents.pipeline.agent import AgentRun, Finding, Severity, run_dimension
-from review_agents.pipeline.basis import supported
+from review_agents.pipeline.basis import describe, supported
 from review_agents.pipeline.conversation import ConversationLimits
 from review_agents.pipeline.merge import Candidate, Merged, merge, model_judge, overlaps
 from review_agents.pipeline.schedule import DIMENSION_TURN, Slots, verify_priority
@@ -190,9 +190,9 @@ def _insert_finding(
     verdict = published.verdicts.get(lead.id)
     conn.execute(
         "INSERT INTO findings (review_id, fingerprint, primary_dimension, dimensions, severity,"
-        " preexisting, file, line_start, line_end, title, body, suggestion, basis, votes,"
-        " locations, reported_severity, verdict)"
-        " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        " preexisting, file, line_start, line_end, title, body, suggestion, basis, evidence,"
+        " votes, locations, reported_severity, verdict)"
+        " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (
             review_id,
             lead.fingerprint,
@@ -207,6 +207,7 @@ def _insert_finding(
             finding.why,
             finding.suggestion,
             json.dumps([b.model_dump() for b in finding.basis]),
+            "\n\n".join(describe(b) for b in finding.basis),  # for versions before bases
             merged.votes,
             json.dumps(merged.locations),
             published.reported.get(lead.id, finding.severity),

@@ -27,7 +27,7 @@ from review_agents.tools import RepoTools, ToolTimeoutError
 
 FILES: dict[str, str | bytes] = {
     "payments/refund.py": "def refund(order, cents):\n    total = cents\n    return total\n",
-    "README.md": "# Shop\n",
+    "README.md": "# Shop\n\nRefunds never exceed the amount paid.\n",
 }
 
 
@@ -685,7 +685,7 @@ def test_time_spent_waiting_for_a_slot_counts_against_the_deadline(
 
 
 def test_every_basis_is_checked_and_says_how_it_checked_out(repo_tools: RepoTools) -> None:
-    moved = dict(BASIS, source="README.md:9", quote="# Shop")
+    moved = dict(BASIS, source="README.md:9", quote="Refunds never exceed the amount paid.")
     wrong = dict(BASIS, source="docs/policy.md:3")
     model = ScriptedModel(script=[submit(finding(basis=[BASIS, moved, wrong]))])
 
@@ -694,7 +694,7 @@ def test_every_basis_is_checked_and_says_how_it_checked_out(repo_tools: RepoTool
     [kept] = result.findings
     statuses = [(b.check.status if b.check else None) for b in kept.basis]
     assert statuses == ["ok", "corrected", "failed"]
-    assert kept.basis[1].source == "README.md:1"  # the quote's real line
+    assert kept.basis[1].source == "README.md:3"  # the quote's real line
     problem = kept.basis[2].check.problem if kept.basis[2].check else ""
     assert "docs/policy.md is not in the reviewed commit" in (problem or "")
 

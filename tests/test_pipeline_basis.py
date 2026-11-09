@@ -5,6 +5,7 @@ from pydantic import ValidationError
 
 from review_agents.pipeline.basis import (
     MAX_QUOTE_CHARS,
+    MIN_QUOTE_CHARS,
     Basis,
     Sources,
     check_basis,
@@ -85,8 +86,14 @@ def test_a_source_file_given_without_lines_gets_them() -> None:
         ({"source": "docs/policy.md:3"}, "docs/policy.md is not in the reviewed commit"),
         ({"quote": "Refunds can never exceed the payment."}, "quote is not in docs/refunds.md"),
         ({"source": "issue#99", "quote": "anything"}, "issue #99 is not linked to this PR"),
-        ({"source": "issue#12", "quote": "not in it"}, "quote is not in issue #12"),
-        ({"source": "pr", "quote": "not in it"}, "quote is not in the PR description"),
+        (
+            {"source": "issue#12", "quote": "a sentence that is not in it"},
+            "quote is not in issue #12",
+        ),
+        (
+            {"source": "pr", "quote": "a sentence that is not in it"},
+            "quote is not in the PR description",
+        ),
         (
             {"places": [dict(PLACE, file="payments/missing.py")]},
             "payments/missing.py is not in the reviewed commit",
@@ -149,3 +156,46 @@ def test_a_quote_that_appears_twice_keeps_the_lines_given_when_it_is_there() -> 
 
     assert checked.check is not None and checked.check.status == "ok"
     assert checked.source == "docs/twice.md:5"
+
+
+RULES = "# Rules\n\nFailures are logged.\n\nRetries stop after three tries.\n"
+
+
+def rules_sources() -> Sources:
+    files = {**FILES, "docs/rules.md": RULES}
+    return sources(text=lambda path: files.get(path))
+
+
+@pytest.mark.parametrize(
+    "quote",
+    [
+        "Failures are logged.\n\nRetries stop after three tries.",  # copied as written
+        "Failures are logged. Retries stop after three tries.",  # joined into one line
+    ],
+)
+def test_a_quote_across_a_blank_line_checks_out(quote: str) -> None:
+    checked = check_basis(basis(source="docs/rules.md:3-5", quote=quote), rules_sources())
+
+    assert checked.check is not None and checked.check.status == "ok"
+
+
+def test_a_quote_too_short_to_be_a_rule_does_not_check_out() -> None:
+    assert MIN_QUOTE_CHARS == 8
+    checked = check_basis(basis(source="docs/refunds.md:5", quote="refund"), sources())
+
+    assert checked.check is not None and checked.check.status == "failed"
+    assert "too short" in (checked.check.problem or "")
+
+
+def test_a_quote_matches_whole_words_only() -> None:
+    # "is at most the paid" is there; "s at most the pai" is only inside other words.
+    checked = check_basis(basis(source="docs/refunds.md:5-6", quote="s at most the pai"), sources())
+
+    assert checked.check is not None and checked.check.status == "failed"
+
+
+def test_quoting_the_code_under_review_is_not_a_rule() -> None:
+    checked = check_basis(basis(source="payments/refund.py:2", quote="total = cents"), sources())
+
+    assert checked.check is not None and checked.check.status == "failed"
+    assert "the code under review" in (checked.check.problem or "")

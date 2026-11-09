@@ -19,8 +19,11 @@ from pydantic.json_schema import SkipJsonSchema
 
 from review_agents.tools import ToolError, ToolTimeoutError, clean_path
 
-# A quote is a sentence or a few lines, not a section copied in (decision D-036).
+# A quote is a sentence or a few lines, not a section copied in (decision D-036), and long
+# enough to be a rule: a word or two could be found almost anywhere. Eight characters,
+# spaces not counted, is about the shortest written rule in Chinese.
 MAX_QUOTE_CHARS = 300
+MIN_QUOTE_CHARS = 8
 Kind = Literal["spec", "contract", "convention", "path"]
 Status = Literal["ok", "corrected", "failed", "unchecked"]
 
@@ -103,21 +106,34 @@ def _squash(text: str) -> str:
 
 
 def _find(quote: str, lines: Sequence[str]) -> tuple[int, int] | None:
-    """The 1-based lines a quote spans in `lines`, whitespace not counted; None if absent."""
-    starts: list[int] = []
+    """The 1-based lines a quote spans in `lines`; None if absent.
+
+    Whitespace does not count, blank lines included, and the quote matches whole words:
+    it does not begin or end inside a word of the text.
+    """
+    starts: list[int] = []  # where each line begins in `text`; blank lines add nothing
     parts: list[str] = []
     length = 0
     for line in lines:
         starts.append(length)
         part = _squash(line)
-        parts.append(part)
-        length += len(part) + 1
-    at = " ".join(parts).find(_squash(quote))
-    if at < 0:
-        return None
-    first = bisect.bisect_right(starts, at)
-    last = bisect.bisect_right(starts, at + len(_squash(quote)) - 1)
-    return first, last
+        if part:
+            parts.append(part)
+            length += len(part) + 1
+    text = " ".join(parts)
+    wanted = _squash(quote)
+    at = text.find(wanted)
+    while at >= 0:
+        end = at + len(wanted)
+        inside_word = (wanted[0].isalnum() and at > 0 and text[at - 1].isalnum()) or (
+            wanted[-1].isalnum() and end < len(text) and text[end].isalnum()
+        )
+        if not inside_word:
+            first = bisect.bisect_right(starts, at)
+            last = bisect.bisect_right(starts, end - 1)
+            return first, last
+        at = text.find(wanted, at + 1)
+    return None
 
 
 def _place_problem(place: Place, text: Callable[[str], str | None]) -> str | None:
@@ -135,15 +151,17 @@ def _place_problem(place: Place, text: Callable[[str], str | None]) -> str | Non
 def _source_problem(basis: Basis, sources: Sources) -> tuple[str | None, str | None]:
     """A problem with the quoted source, and the source with its real lines if it moved."""
     assert basis.source is not None and basis.quote is not None  # noqa: S101 - validated
+    if len("".join(basis.quote.split())) < MIN_QUOTE_CHARS:
+        return f"the quote is too short to be a rule (under {MIN_QUOTE_CHARS} characters)", None
     source = basis.source.strip()
     if source.lower() in _PR:
-        found = _squash(basis.quote) in _squash(sources.pr_text)
+        found = _find(basis.quote, sources.pr_text.splitlines()) is not None
         return (None if found else "the quote is not in the PR description"), None
     if match := _ISSUE.match(source):
         number = int(match.group(1))
         if number not in sources.issues:
             return f"issue #{number} is not linked to this PR", None
-        found = _squash(basis.quote) in _squash(sources.issues[number])
+        found = _find(basis.quote, sources.issues[number].splitlines()) is not None
         return (None if found else f"the quote is not in issue #{number}"), None
     lines_given = _LINES.match(source)
     path = lines_given.group(1) if lines_given else source
@@ -155,16 +173,23 @@ def _source_problem(basis: Basis, sources: Sources) -> tuple[str | None, str | N
     if content is None:
         return f"{path} is not in the reviewed commit", None
     lines = content.splitlines()
+    where = None
     if lines_given:
         given_start = int(lines_given.group(2))
         given_end = int(lines_given.group(3) or given_start)
         # Where it says first: a quote may also appear at other lines of the file.
-        if _find(basis.quote, lines[given_start - 1 : given_end]) is not None:
-            return None, None
-    where = _find(basis.quote, lines)
+        inside = _find(basis.quote, lines[given_start - 1 : given_end])
+        if inside is not None:
+            where = (inside[0] + given_start - 1, inside[1] + given_start - 1)
+    moved = where is None
+    where = where or _find(basis.quote, lines)
     if where is None:
         return f"the quote is not in {path}", None
     start, end = where
+    if any(p.file == path and p.line_start <= end and start <= p.line_end for p in basis.places):
+        return f"the quote is the code under review at {path}:{start}-{end}, not a rule", None
+    if not moved:
+        return None, None
     # Exactly as written in the file, at other lines than given: the lines are wrong, not the quote.
     return None, f"{path}:{start}" if start == end else f"{path}:{start}-{end}"
 
