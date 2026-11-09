@@ -14,6 +14,8 @@ MAX_CONFIG_BYTES = 64 * 1024
 
 DIMENSIONS = ("spec_drift", "edge_cases", "security", "maintainability", "verifiability")
 Dimension = Literal["spec_drift", "edge_cases", "security", "maintainability", "verifiability"]
+# What the agents write in and what the report's own text is in (decision D-034).
+Language = Literal["zh", "en"]
 
 # Files the review never reads. A repository can add to this list but not remove from it.
 DEFAULT_SKIP_PATHS = (
@@ -94,7 +96,7 @@ def _inside_repository(path: str) -> str:
 
 
 class RepoConfig(_Strict):
-    language: Literal["zh", "en"] = "zh"
+    language: Language = "zh"
     mode: Literal["quick", "standard", "deep"] = "standard"
     dimensions: Dimensions = Field(default_factory=Dimensions)
     specs: list[Glob] = Field(default_factory=list)

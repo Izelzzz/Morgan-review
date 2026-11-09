@@ -14,6 +14,7 @@ from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import AIMessage, BaseMessage
 from langchain_core.outputs import ChatGeneration, ChatResult
 from pydantic import Field
+from scripted import ScriptedModel, call
 
 from review_agents.config import ModelEndpoint, Settings
 from review_agents.context.git import Snapshot
@@ -23,6 +24,7 @@ from review_agents.mirror import MirrorStore
 from review_agents.models import BudgetExceededError
 from review_agents.pipeline.agent import SUBMIT_TOOL
 from review_agents.pipeline.merge import MERGE_TOOL
+from review_agents.pipeline.nits import NIT_TOOL
 from review_agents.pipeline.run import ReviewSuperseded, run_review, wait_for_summaries
 from review_agents.pipeline.verify import VERIFY_TOOL
 from review_agents.repo_config import MAX_REVIEW_MINUTES
@@ -1024,3 +1026,60 @@ def test_a_quick_review_s_report_says_it_was_not_verified(setup: Setup) -> None:
     assert report is not None
     assert "were not confirmed by a verifier" in report["summary"]
     assert "Quick mode" in report["summary"]
+
+
+NIT_DIMENSIONS = ("edge_cases", "security", "maintainability", "verifiability")
+
+
+def eight_nits() -> dict[str, list[Any]]:
+    """Two nits a dimension, on lines 1 and 2: no two of them are merged as one problem."""
+    return {
+        d: [
+            submit(
+                *(
+                    finding(d, severity="nit", title=f"{d} nit {n}", line_start=n, line_end=n)
+                    for n in (1, 2)
+                )
+            )
+        ]
+        for d in NIT_DIMENSIONS
+    }
+
+
+def test_nits_past_the_limit_are_merged_by_the_strong_model(setup: Setup) -> None:
+    review_id = setup.queue()
+    model = ByDimension(scripts=eight_nits())
+    groups = [
+        {"ids": ids, "title": title, "why": "w", "suggestion": "s"}
+        for ids, title in (([1, 2, 3, 4], "a"), ([5, 6, 7, 8], "b"))
+    ]
+    strong = ScriptedModel(script=[call(NIT_TOOL, {"groups": groups})])
+
+    setup.run(review_id, model, verifier_for=lambda left: strong)
+
+    report = report_of(setup, review_id)
+    assert report is not None and report["counts"]["nit"] == 2
+    assert "Simplified Chinese" in str(strong.sent[0][0].content)
+    assert setup.steps(review_id)["report.nits"] == ("ok", None)
+    assert len(setup.findings(review_id)) == 8  # the findings themselves stay as found
+
+
+def test_a_failed_nit_merge_shows_the_first_nits_and_says_why(setup: Setup) -> None:
+    review_id = setup.queue()
+    model = ByDimension(scripts=eight_nits())
+
+    setup.run(review_id, model)  # the finder answers in prose instead of grouping
+
+    report = report_of(setup, review_id)
+    assert report is not None and report["counts"]["nit"] == 5
+    status, error = setup.steps(review_id)["report.nits"]
+    assert status == "error" and error is not None and NIT_TOOL in error
+
+
+def test_the_agents_are_told_the_repository_s_language(setup: Setup) -> None:
+    review_id = setup.queue("language: en\n")
+    model = ByDimension(scripts={})
+
+    setup.run(review_id, model)
+
+    assert all("in English" in str(sent[-1].content) for sent in model.sent)

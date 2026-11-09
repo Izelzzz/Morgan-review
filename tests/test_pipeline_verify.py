@@ -1,4 +1,5 @@
 from collections.abc import Callable
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -437,3 +438,20 @@ def test_a_verdict_that_holds_without_a_basis_that_checks_out_twice_is_not_a_ver
 
     # One correction only (decision D-036): the finding is left unverified, not published.
     assert result.status == "incomplete" and result.verdict is None
+
+
+def test_the_verifier_writes_its_reason_in_the_configured_language(repo_tools: RepoTools) -> None:
+    model = ScriptedModel(script=[verdict(True)])
+    english = replace(pack(), language="en")
+
+    run_verifier(
+        lambda left: model,
+        english,
+        finding(),
+        repo_tools,
+        callbacks=[],
+        clock=lambda: 0.0,
+    )
+
+    task = str(model.sent[0][2].content)
+    assert task.startswith("You are now a verifier") and "English" in task.rsplit("\n\n", 1)[-1]

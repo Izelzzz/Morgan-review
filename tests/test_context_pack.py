@@ -132,3 +132,20 @@ def test_a_pack_leaves_the_reply_its_reserve_even_in_a_small_window() -> None:
     # Seventy percent of the window normally; never so much that the reply has no room.
     assert pack_budget(128_000, output_reserve=4_000) == 89_600
     assert pack_budget(8_000, output_reserve=4_000) == 4_000
+
+
+def test_every_agent_is_told_the_configured_language_after_its_task() -> None:
+    layer = pr_layer({"a.py": patch("a.py", "+x = 1\n")})
+    [zh] = build_packs(repo_layer(), layer, 128_000)
+    [en] = build_packs(repo_layer(), layer, 128_000, language="en")
+
+    zh_task, en_task = (str(p.messages("security")[-1].content) for p in (zh, en))
+
+    assert "Simplified Chinese" in zh_task.rsplit("\n\n", 1)[-1]  # the configured default
+    assert "English" in en_task.rsplit("\n\n", 1)[-1]
+    # A quote is the rule as written in its source, whatever the language.
+    assert "quote" in zh_task.rsplit("\n\n", 1)[-1]
+    # The language comes after the shared opening, which stays the same.
+    assert [m.content for m in zh.messages("security")[:2]] == [
+        m.content for m in en.messages("security")[:2]
+    ]
