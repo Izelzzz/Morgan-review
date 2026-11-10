@@ -101,7 +101,6 @@ class RepoConfig(_Strict):
     dimensions: Dimensions = Field(default_factory=Dimensions)
     specs: list[Glob] = Field(default_factory=list)
     skip_paths: list[Glob] = Field(default_factory=list)
-    block_on_critical: bool = False
     limits: Limits = Field(default_factory=Limits)
     custom_rules: list[CustomRule] = Field(default_factory=list)
     skill_additions: dict[Dimension, str] = Field(default_factory=dict)
@@ -148,10 +147,17 @@ class LoadedConfig:
 
     config: RepoConfig = field(default_factory=RepoConfig)
     errors: list[str] = field(default_factory=list)
+    # Options that no longer do anything, found in the file and ignored (RETIRED_OPTIONS).
+    retired: list[str] = field(default_factory=list)
 
 
 def _rejected(*errors: str) -> LoadedConfig:
     return LoadedConfig(errors=[*errors, f"{CONFIG_PATH}: using the default configuration instead"])
+
+
+# Options a config may still have from before; ignored, so the rest of it still counts.
+# `block_on_critical`: whether a red result blocks merging is set in GitHub (D-037).
+RETIRED_OPTIONS = ("block_on_critical",)
 
 
 def parse_repo_config(text: str | None) -> LoadedConfig:
@@ -172,8 +178,10 @@ def parse_repo_config(text: str | None) -> LoadedConfig:
         return LoadedConfig()
     if not isinstance(data, dict):
         return _rejected(f"{CONFIG_PATH} must be a mapping of options")
+    retired = [name for name in RETIRED_OPTIONS if name in data]
+    data = {key: value for key, value in data.items() if key not in RETIRED_OPTIONS}
     try:
-        return LoadedConfig(config=RepoConfig.model_validate(data))
+        return LoadedConfig(config=RepoConfig.model_validate(data), retired=retired)
     except ValidationError as exc:
         return _rejected(*(_describe(error) for error in exc.errors()))
 
