@@ -301,7 +301,7 @@ def test_chinese_and_english_reports_have_the_same_structure() -> None:
 def test_the_report_as_json_is_what_the_api_returns() -> None:
     data = report([item()]).as_json()
 
-    assert set(data) == {"summary", "comments", "counts"}
+    assert set(data) == {"summary", "comments", "counts", "walkthrough"}
     assert data["comments"][0] | {"body": ""} == {
         "path": "payments/refund.py",
         "start_line": 11,
@@ -323,3 +323,9 @@ def test_spec_drift_is_named_as_the_architecture_names_it() -> None:
     scope = Scope("standard", ["spec_drift"], 1, 1, 1, [], [], finder_verifies=False)
 
     assert "规格漂移" in report([], scope=scope).summary
+
+
+def test_a_mermaid_arrow_in_model_text_is_kept() -> None:
+    result = report([item(severity="robustness", why="A --> B")])
+
+    assert "A --> B" in result.summary

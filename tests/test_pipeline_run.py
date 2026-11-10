@@ -28,6 +28,7 @@ from review_agents.pipeline.nits import NIT_TOOL
 from review_agents.pipeline.run import ReviewSuperseded, run_review, wait_for_summaries
 from review_agents.pipeline.verify import VERIFY_TOOL
 from review_agents.repo_config import MAX_REVIEW_MINUTES
+from review_agents.walkthrough import MARKER, WALKTHROUGH_TASK, WALKTHROUGH_TOOL
 from review_agents.worker import claim_next, recover_interrupted
 
 DIMENSION = re.compile(r"^name: (\w+)$", re.MULTILINE)
@@ -77,6 +78,8 @@ class ByDimension(BaseChatModel):
     # A verifier's answer by the finding's title: holds() unless given; an exception
     # is raised. Delays by title too.
     verdicts: dict[str, Any] = Field(default_factory=dict)
+    # The walkthrough agent's replies, one per model call; prose when there are none.
+    walkthrough: list[Any] = Field(default_factory=list)
     seen: list[str] = Field(default_factory=list)
     checked: list[str] = Field(default_factory=list)  # titles of the findings verified
     order: list[str] = Field(default_factory=list)  # every call: a dimension or "verify:<title>"
@@ -120,6 +123,13 @@ class ByDimension(BaseChatModel):
             if isinstance(answer, Exception):
                 raise answer
             return ChatResult(generations=[ChatGeneration(message=_verdict(answer, text))])
+        if any(WALKTHROUGH_TASK in str(m.content) for m in messages):
+            with self.lock:
+                self.order.append("walkthrough")
+                said = self.walkthrough.pop(0) if self.walkthrough else AIMessage("It clamps.")
+            if isinstance(said, Exception):
+                raise said
+            return ChatResult(generations=[ChatGeneration(message=said)])
         task = next((str(m.content) for m in messages if DIMENSION.search(str(m.content))), "")
         match = DIMENSION.search(task)
         if match is None:  # a module summary for the repository layer
@@ -1083,3 +1093,60 @@ def test_the_agents_are_told_the_repository_s_language(setup: Setup) -> None:
     setup.run(review_id, model)
 
     assert all("in English" in str(sent[-1].content) for sent in model.sent)
+
+
+def walkthrough_answer() -> AIMessage:
+    card = {"headline": "Refunds are clamped", "points": ["one", "two"]}
+    args = {
+        "summary": "Refunds never exceed what was paid.",
+        "why": card,
+        "what": card,
+        "impact": card,
+        "problems": [
+            {"title": "Over-refunds", "explanation": "More was refunded than paid."},
+            {"title": "No cap", "explanation": "Nothing compared it with the payment."},
+        ],
+        "changes": [{"title": "Clamp", "body": "`payments/refund.py:2` clamps the amount."}],
+    }
+    return AIMessage("", tool_calls=[{"name": WALKTHROUGH_TOOL, "args": args, "id": "w"}])
+
+
+def test_the_walkthrough_is_written_with_the_report(setup: Setup) -> None:
+    review_id = setup.queue()
+    model = ByDimension(scripts={}, walkthrough=[walkthrough_answer()])
+
+    setup.run(review_id, model)
+
+    report = report_of(setup, review_id)
+    assert report is not None
+    text = report["walkthrough"]
+    assert text.startswith(MARKER) and "Refunds never exceed what was paid." in text
+    assert "PR #7 · 1 个文件 · **+1 −1** · 1 次提交" in text
+    assert setup.steps(review_id)["walkthrough"] == ("ok", None)
+
+
+def test_the_walkthrough_is_published_when_a_dimension_fails(setup: Setup) -> None:
+    review_id = setup.queue()
+    model = ByDimension(
+        scripts={"security": [RuntimeError("model service unavailable")]},
+        walkthrough=[walkthrough_answer()],
+    )
+
+    setup.run(review_id, model)
+
+    report = report_of(setup, review_id)
+    assert report is not None and report["counts"]["complete"] is False
+    assert "Refunds never exceed what was paid." in report["walkthrough"]
+
+
+def test_a_walkthrough_not_handed_in_is_replaced_by_why(setup: Setup) -> None:
+    review_id = setup.queue()
+    model = ByDimension(scripts={})  # the walkthrough agent answers in prose, twice
+
+    setup.run(review_id, model)
+
+    report = report_of(setup, review_id)
+    assert report is not None and report["walkthrough"].startswith(MARKER)
+    assert "改动说明没能生成" in report["walkthrough"]
+    status, error = setup.steps(review_id)["walkthrough"]
+    assert status == "error" and error is not None

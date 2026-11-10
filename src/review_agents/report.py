@@ -98,12 +98,15 @@ class Report:
     summary: str
     comments: list[Comment] = field(default_factory=list)
     counts: dict[str, int | bool] = field(default_factory=dict)
+    # The first comment, the walkthrough (D-035); set once it is written.
+    walkthrough: str | None = None
 
     def as_json(self) -> dict[str, object]:
         return {
             "summary": self.summary,
             "comments": [asdict(c) for c in self.comments],
             "counts": self.counts,
+            "walkthrough": self.walkthrough,
         }
 
 
@@ -275,13 +278,14 @@ def is_binary(patch: str) -> bool:
     )
 
 
-def _defused(text: str) -> str:
-    """Model text cannot open a hidden marker or mention a GitHub user."""
-    return text.replace("<!--", "<!​--").replace("-->", "--​>").replace("@", "@​")
+def defused(text: str) -> str:
+    """Model text cannot open a hidden marker or mention a GitHub user. A `-->` alone
+    opens nothing, and Mermaid draws its arrows with it, so it stays."""
+    return text.replace("<!--", "<!​--").replace("@", "@​")
 
 
 def _line(text: str) -> str:
-    return _defused(" ".join(text.split()))
+    return defused(" ".join(text.split()))
 
 
 def _code(text: str) -> str:
@@ -462,12 +466,12 @@ def _anchor(item: Item, changed: dict[str, list[tuple[int, int]]]) -> tuple[int 
 
 def _comment(w: _Writer, item: Item) -> str:
     t = w.t
-    parts = [f"**{t[item.severity]} · {w.title(item)}**", _defused(item.why.strip())]
+    parts = [f"**{t[item.severity]} · {w.title(item)}**", defused(item.why.strip())]
     bases = w.bases(item, "")
     if bases:
         parts.append("\n".join(bases))
     if item.suggestion:
-        parts.append(f"**{t['suggestion']}**{_defused(item.suggestion.strip())}")
+        parts.append(f"**{t['suggestion']}**{defused(item.suggestion.strip())}")
     notes = w.notes(item)
     if notes:
         parts.append(t["sep"].join(notes))

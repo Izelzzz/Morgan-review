@@ -38,7 +38,7 @@ def frontmatter(text: str) -> dict[str, str]:
 
 
 def skill_files() -> list[Traversable]:
-    found = [SKILLS / "_shared.md"]
+    found = [SKILLS / "_shared.md", SKILLS / "_walkthrough.md"]
     found += [SKILLS / name / "SKILL.md" for name in DIMENSIONS]
     return found
 
@@ -83,3 +83,13 @@ def test_skills_do_not_name_evaluation_answers(skill: Traversable) -> None:
     ]
 
     assert leaked == []
+
+
+def test_the_walkthrough_skill_names_every_field_it_asks_for() -> None:
+    text = (SKILLS / "_walkthrough.md").read_text(encoding="utf-8")
+
+    for name in ("summary", "why", "what", "impact", "diagram", "problems", "changes"):
+        assert f"`{name}`" in text
+    for name in ("impacts", "deploy_notes", "tradeoffs", "submit_walkthrough"):
+        assert f"`{name}`" in text
+    assert "at most three" in text  # Mermaid diagrams in the whole walkthrough
