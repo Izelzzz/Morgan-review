@@ -1,0 +1,59 @@
+# review-agents: copy this file to .github/workflows/review-agents.yml in your repository.
+#
+# 1. Add two repository secrets: REVIEW_AGENTS_URL (your service) and REVIEW_AGENTS_SECRET
+#    (the service's shared secret).
+# 2. Replace <commit> below with a full commit SHA of Izelzzz/review-lab. Upgrading is
+#    changing that SHA.
+# 3. To block merging on a red result, make the "post" check required in Settings ->
+#    Branches (or Rules). Without that, a red result shows but does not block.
+#
+# pull_request_target gives pull requests from forks the secrets too. It runs with the
+# base branch's workflow, and nothing here checks out or runs the pull request's code:
+# only the service reads it.
+name: review-agents
+
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened]
+  issue_comment:
+    types: [created]
+
+permissions: {}
+
+jobs:
+  review:
+    # A comment starts a review only when it is `/review` on a pull request; who wrote it
+    # is checked by the action (collaborators only). A comment's run belongs to the default
+    # branch, so it updates the comments but not the PR's required check: the next push
+    # does that.
+    if: >-
+      github.event_name == 'pull_request_target' ||
+      (github.event.issue.pull_request && startsWith(github.event.comment.body, '/review'))
+    runs-on: ubuntu-latest
+    timeout-minutes: 50
+    # A newer push makes an older review pointless; the service supersedes it as well.
+    concurrency:
+      group: review-agents-${{ github.event.pull_request.number || github.event.issue.number }}
+      cancel-in-progress: true
+    # This token goes to the service: read only.
+    permissions:
+      contents: read
+      issues: read
+      pull-requests: read
+    steps:
+      - uses: Izelzzz/review-lab/ci/review@<commit>
+        with:
+          service-url: ${{ secrets.REVIEW_AGENTS_URL }}
+          secret: ${{ secrets.REVIEW_AGENTS_SECRET }}
+
+  post:
+    needs: review
+    # Runs when the review job failed too, so a broken review shows red, not skipped.
+    if: ${{ !cancelled() && needs.review.result != 'skipped' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # This token never leaves GitHub: it writes the comments.
+    permissions:
+      pull-requests: write
+    steps:
+      - uses: Izelzzz/review-lab/ci/post@<commit>

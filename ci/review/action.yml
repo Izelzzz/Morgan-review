@@ -1,0 +1,30 @@
+name: review-agents review
+description: >-
+  Submit the pull request to a review-agents service with this job's read-only token, wait
+  for the report and keep it as an artifact for the post job. Never checks out the PR.
+inputs:
+  service-url:
+    description: The review-agents service, e.g. https://review.example.com
+    required: true
+  secret:
+    description: The shared secret the service signs requests with
+    required: true
+  github-token:
+    description: This job's GITHUB_TOKEN; give the job read permissions only
+    default: ${{ github.token }}
+runs:
+  using: composite
+  steps:
+    - name: Submit and wait
+      shell: bash
+      env:
+        GITHUB_TOKEN: ${{ inputs.github-token }}
+        REVIEW_AGENTS_URL: ${{ inputs.service-url }}
+        REVIEW_AGENTS_SECRET: ${{ inputs.secret }}
+      run: python3 "$GITHUB_ACTION_PATH/../review_agents_ci.py" review --result "$RUNNER_TEMP/review-agents-result.json"
+    - name: Keep the report for the post job
+      uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+      with:
+        name: review-agents-result
+        path: ${{ runner.temp }}/review-agents-result.json
+        retention-days: 1
