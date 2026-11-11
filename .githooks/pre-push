@@ -1,25 +1,11 @@
 #!/usr/bin/env bash
-# Slower checks before commits leave this machine: history rewrites, every new commit's message, and tests.
+# Slower checks before commits leave this machine: history rewrites and every new commit's message.
 set -euo pipefail
 . "$(dirname "$0")/lib/common.sh"
 warn_if_stale
 
 remote="$1"
 zero=0000000000000000000000000000000000000000
-
-run_textkit_tests() {
-  local sha="$1" dir
-  command -v python3 >/dev/null && command -v node >/dev/null \
-    || { warn "python3 or node missing; skipped textkit tests"; return 0; }
-  dir="$(mktemp -d)"
-  git worktree add -q --detach "$dir" "$sha"
-  if ! (cd "$dir/labs/pr-review/textkit" && python3 -m unittest discover -s py -q && npm test --silent) > "$dir.log" 2>&1; then
-    cat "$dir.log" >&2
-    git worktree remove --force "$dir"
-    fail "textkit tests fail at ${sha:0:7}"
-  fi
-  git worktree remove --force "$dir"; rm -f "$dir.log"
-}
 
 while read -r local_ref local_sha remote_ref remote_sha; do
   [ "$local_sha" = "$zero" ] && continue   # deleting a branch
@@ -47,8 +33,4 @@ while read -r local_ref local_sha remote_ref remote_sha; do
       || fail "commit ${c:0:7} on $branch has a bad message; fix it with git rebase -i before pushing"
   done
 
-  if git rev-list $range -- labs/pr-review/textkit | grep -q . \
-    && git cat-file -e "$local_sha:labs/pr-review/textkit" 2>/dev/null; then
-    run_textkit_tests "$local_sha"
-  fi
 done

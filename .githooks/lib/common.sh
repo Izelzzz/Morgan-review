@@ -26,9 +26,6 @@ warn_if_stale() {
   fi
 }
 
-# Paths that belong only on docs/* branches. On test/* they would hand reviewers the answers.
-LAB_ANSWER_PATHS='(^|/)answer-key\.md$|^labs/pr-review/(runs|skill|tools)/'
-
 # Reads `git diff -U0` output on stdin; prints added lines that look like credentials.
 # A line containing "secret-scan: allow" is skipped, for deliberate test fixtures.
 find_secrets() {

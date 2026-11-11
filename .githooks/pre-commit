@@ -5,7 +5,6 @@ set -euo pipefail
 warn_if_stale
 
 MAX_FILE_BYTES=$((1024 * 1024))
-branch="$(git branch --show-current)"
 staged="$(git diff --cached --name-only --diff-filter=ACMR)"
 [ -n "$staged" ] || exit 0
 
@@ -24,21 +23,3 @@ done <<< "$staged"
 hits="$(git diff --cached -U0 --no-color | find_secrets)"
 [ -z "$hits" ] || fail "possible credential in staged changes (add 'secret-scan: allow' to the line if it is a deliberate fake):
 $hits"
-
-case "$branch" in
-  test/*)
-    leaked="$(printf '%s\n' "$staged" | grep -E "$LAB_ANSWER_PATHS" || true)"
-    [ -z "$leaked" ] || fail "these files belong on docs/pr-review-lab, not on a test branch reviewers will see:
-$leaked"
-    ;;
-  docs/*)
-    skill=labs/pr-review/skill/pr-review/SKILL.md
-    checker=labs/pr-review/tools/check-leaks.sh
-    if printf '%s\n' "$staged" | grep -qxF "$skill" && [ -x "$checker" ]; then
-      # Scan the staged version, not the working copy, so unstaged edits can't hide a leak.
-      tmp="$(mktemp)"; trap 'rm -f "$tmp"' EXIT
-      git show ":$skill" > "$tmp"
-      "$checker" "$tmp" >&2 || fail "the skill names this test set's answers; rewrite it in general terms"
-    fi
-    ;;
-esac

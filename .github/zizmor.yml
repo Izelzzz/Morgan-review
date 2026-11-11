@@ -1,0 +1,4 @@
+rules:
+  # actionlint 1.7.12 rejects the `$/...` self-repository syntax, so local actions stay `./...`.
+  self-repository:
+    disable: true
