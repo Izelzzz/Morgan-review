@@ -2,9 +2,9 @@ name: service-ci
 
 on:
   pull_request:
-    branches: [feat/multi-review-agents, main]
+    branches: [main]
   push:
-    branches: [feat/multi-review-agents, main]
+    branches: [main]
   schedule:
     - cron: "23 4 * * 1"
 

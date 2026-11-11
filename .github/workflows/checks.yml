@@ -1,8 +1,7 @@
 name: checks
 
-# GitHub runs a push-triggered workflow from the pushed branch's own copy of this file.
-# test/* and docs/* branches don't have it, so main checks every branch itself:
-# on pushes to main, on PRs, daily, and on demand.
+# Commit messages on every branch, and every commit for secrets. Local hooks can be
+# skipped or never installed; this cannot.
 on:
   push:
     branches: [main]
@@ -18,19 +17,12 @@ jobs:
   checks:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0   # every branch, full history
+          persist-credentials: false
 
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-
-      - uses: actions/setup-node@v4
-        with:
-          node-version: "22"   # textkit's TS tests use Node's built-in type stripping
-
-      - name: Check all branches
+      - name: Commit messages on all branches
         run: bash scripts/ci-checks.sh
 
       - name: Scan all history for secrets
