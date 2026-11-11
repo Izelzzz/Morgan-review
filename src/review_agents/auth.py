@@ -33,7 +33,9 @@ def verify(
 ) -> bool:
     if not timestamp or not signature or not timestamp.isdigit():
         return False
-    if abs(clock() - int(timestamp)) > MAX_SKEW_SECONDS:
+    # Only reject requests that are too old; a CI runner whose clock runs ahead
+    # should not be locked out.
+    if clock() - int(timestamp) > MAX_SKEW_SECONDS:
         return False
     expected = sign(secret, timestamp, method, path, body)
     return hmac.compare_digest(expected, signature)
