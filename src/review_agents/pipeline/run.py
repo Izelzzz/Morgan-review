@@ -21,6 +21,7 @@ import hashlib
 import json
 import logging
 import math
+import os
 import queue
 import sqlite3
 import threading
@@ -39,7 +40,7 @@ from review_agents.config import Settings
 from review_agents.context.cache import repo_layer_for_review
 from review_agents.context.git import Snapshot
 from review_agents.context.modules import Summarize, module_summaries, module_tokens
-from review_agents.context.pack import DIMENSIONS, ContextPack, build_packs
+from review_agents.context.pack import DIMENSIONS, GENERAL, ContextPack, build_packs
 from review_agents.context.pr_layer import PrRequest, build_pr_layer, pr_patches
 from review_agents.context.summarizer import model_summarizer
 from review_agents.credentials import TokenVault
@@ -123,6 +124,8 @@ DEEP_RUNS = 3
 def mode_plan(config: RepoConfig) -> tuple[list[str], int]:
     """The dimensions a review runs and how many times each, from the config's mode."""
     enabled = enabled_dimensions(config)
+    if os.environ.get("REVIEW_AGENTS_SINGLE_AGENT") == "1":  # experiment, not for main
+        return [GENERAL], 1
     if config.mode == "quick":
         # With neither of them enabled, the first enabled one still makes it a review.
         return [d for d in enabled if d in QUICK_DIMENSIONS] or enabled[:1], 1

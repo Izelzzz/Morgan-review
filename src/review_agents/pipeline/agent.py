@@ -25,7 +25,7 @@ from langchain_core.tools import StructuredTool
 from langchain_core.utils.function_calling import convert_to_openai_tool
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
-from review_agents.context.pack import ContextPack
+from review_agents.context.pack import DIMENSIONS, GENERAL, ContextPack
 from review_agents.context.tokens import estimate_tokens
 from review_agents.models import BudgetExceededError
 from review_agents.pipeline.basis import Basis, Sources, check_basis
@@ -332,7 +332,9 @@ def run_dimension(
     line_count = functools.cache(tools.line_count)
     sources = pack_sources(pack, tools)
     for item in end.answer.findings:
-        item.dimension = dimension
+        # The general agent tags its findings; anything else is taken as `general`.
+        if dimension != GENERAL or item.dimension not in DIMENSIONS:
+            item.dimension = dimension
         try:
             # The same file must be spelled the same in every finding, as git spells
             # it: merging compares paths, and GitHub rejects others in comments.

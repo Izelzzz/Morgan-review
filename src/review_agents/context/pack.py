@@ -23,6 +23,10 @@ DIMENSIONS = ("spec_drift", "edge_cases", "security", "maintainability", "verifi
 _SKILLS = files("review_agents") / "skills"
 SHARED_RULES = (_SKILLS / "_shared.md").read_text(encoding="utf-8")
 SKILLS = {d: (_SKILLS / d / "SKILL.md").read_text(encoding="utf-8") for d in DIMENSIONS}
+# Experiment (not for main): one general agent holds all five dimensions' rules and
+# tags each finding with the dimension it belongs to.
+GENERAL = "general"
+SKILLS[GENERAL] = "\n\n".join(f"# Dimension `{d}`\n\n{SKILLS[d]}" for d in DIMENSIONS)
 
 # The part of the window kept free for what an agent adds while it works: tool results,
 # its reasoning and its findings.
@@ -47,6 +51,15 @@ def language_note(language: Language) -> str:
 
 
 def task(dimension: str) -> str:
+    if dimension == GENERAL:
+        return (
+            f"{SKILLS[GENERAL]}\n\n"
+            "Review the pull request above for all five dimensions whose rules are given"
+            f" above: {', '.join(DIMENSIONS)}. Read more code with your tools wherever the"
+            " context is not enough. Report each problem once, and set its `dimension` field"
+            " to the one dimension it belongs to most. Report findings in the output format"
+            " of the shared rules."
+        )
     return (
         f"{SKILLS[dimension]}\n\n"
         f"Review the pull request above for the {dimension} dimension only. Read more code"
@@ -82,7 +95,7 @@ def fixed_tokens(base: ContextPack) -> int:
     `signature_tokens`; a pack that is not split has no other groups.
     """
     longest_note = max(estimate_tokens(language_note(lang)) for lang in LANGUAGE_NAMES)
-    longest_task = max(estimate_tokens(task(d)) for d in DIMENSIONS) + longest_note
+    longest_task = max(estimate_tokens(task(d)) for d in SKILLS) + longest_note
     return estimate_tokens(base.shared_rules) + estimate_tokens(base.prefix) + longest_task
 
 
