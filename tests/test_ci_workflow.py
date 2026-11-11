@@ -89,3 +89,20 @@ def test_a_broken_review_job_still_reports_red() -> None:
     # A skipped required check counts as passing; the post job must run and fail instead.
     assert post["needs"] == "review"
     assert "!cancelled()" in post["if"] and "needs.review.result != 'skipped'" in post["if"]
+
+
+def test_posts_for_one_pr_run_one_at_a_time() -> None:
+    # Not the review job's group: a queued post there would cancel the newer review.
+    concurrency = load(TEMPLATE)["jobs"]["post"]["concurrency"]
+
+    assert concurrency["group"] == (
+        "review-agents-post-${{ github.event.pull_request.number || github.event.issue.number }}"
+    )
+    assert concurrency["cancel-in-progress"] is False
+
+
+def test_the_result_is_kept_when_the_review_step_fails() -> None:
+    # A crash or missing secrets still writes a result; the post job says 审查失败 with it.
+    [_, upload] = steps(load(CI / "review" / "action.yml"))
+
+    assert upload["if"] == "always()"

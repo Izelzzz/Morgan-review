@@ -239,6 +239,8 @@ def done(counts: dict[str, Any] | None = None, comments: list[Any] | None = None
 
 
 def run_post(fake: Fake, result: dict[str, Any]) -> tuple[int, list[str]]:
+    if ("GET", PULL) not in fake.routes:
+        fake.on("GET", PULL, (200, pr()))  # the PR's head is still this result's
     said: list[str] = []
     code = ci.post(result, github(fake), write_summary=said.append)
     return code, said
@@ -369,6 +371,104 @@ def test_a_skipped_or_superseded_run_touches_no_comment(
 ) -> None:
     assert run_post(fake, result)[0] == code
     assert fake.calls == []
+
+
+@pytest.mark.parametrize("status", ["done", "failed"])
+def test_a_result_for_an_older_head_touches_no_comment(fake: Fake, status: str) -> None:
+    # D-021: an older run's post, late after a newer push's, must not put back its
+    # conclusion. Its check keeps its own colour on its own commit.
+    fake.on("GET", PULL, (200, pr(head="c" * 40)))
+    result = done(counts={"blocking": 1, "complete": True}) | {"status": status}
+
+    code, said = run_post(fake, result)
+
+    assert code == 1
+    assert [(m, p) for m, p, _, _ in fake.calls] == [("GET", PULL)]
+    assert "cccccccccccc" in said[-1]
+
+
+def test_a_result_with_no_commit_touches_no_comment(fake: Fake) -> None:
+    # A /review run that broke before it fetched the PR.
+    result = {"status": "error", "pr": 7, "head_sha": None, "reason": "the review step broke"}
+
+    code, said = run_post(fake, result)
+
+    assert code == 1 and "no commit known" in said[-1]
+    assert [(m, p) for m, p, _, _ in fake.calls] == [("GET", PULL)]
+
+
+def run_main(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, event: dict[str, Any], **env: str
+) -> tuple[int, dict[str, Any]]:
+    event_path = tmp_path / "event.json"
+    event_path.write_text(json.dumps(event))
+    values = {
+        "GITHUB_REPOSITORY": "octo/shop",
+        "GITHUB_TOKEN": "ghs_readonly",
+        "GITHUB_EVENT_NAME": "pull_request_target",
+        "GITHUB_EVENT_PATH": str(event_path),
+    } | env
+    for name in ("REVIEW_AGENTS_URL", "REVIEW_AGENTS_SECRET"):
+        monkeypatch.delenv(name, raising=False)
+    for name, value in values.items():
+        monkeypatch.setenv(name, value)
+    out = tmp_path / "result.json"
+    code = ci.main(["review", "--result", str(out)])
+    return code, json.loads(out.read_text())
+
+
+def test_missing_secrets_still_leave_a_result_for_the_post_job(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    code, result = run_main(tmp_path, monkeypatch, pr_event())
+
+    assert code == 2
+    assert (result["status"], result["pr"], result["head_sha"]) == ("error", 7, HEAD)
+    assert "REVIEW_AGENTS_URL" in result["reason"]
+
+
+def test_a_crash_still_leaves_a_result_for_the_post_job(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def broken(*args: Any, **kwargs: Any) -> int:
+        raise KeyError("head")
+
+    monkeypatch.setattr(ci, "review", broken)
+
+    with pytest.raises(KeyError):
+        run_main(
+            tmp_path,
+            monkeypatch,
+            pr_event(),
+            REVIEW_AGENTS_URL=SERVICE,
+            REVIEW_AGENTS_SECRET=SECRET,
+        )
+
+    result = json.loads((tmp_path / "result.json").read_text())
+    assert (result["status"], result["pr"], result["head_sha"]) == ("error", 7, HEAD)
+
+
+@pytest.mark.parametrize(
+    "target",
+    ["https://elsewhere.test/v1/reviews", "http://review.example.test/v1/reviews"],
+)
+def test_a_redirect_off_the_host_or_off_https_is_refused(target: str) -> None:
+    # The body carries the read-only token; it is not sent anywhere the secret did not name.
+    request = ci.urllib.request.Request(f"{SERVICE}/v1/reviews", data=b"{}", method="POST")
+    handler = ci.SameHostRedirect()
+
+    with pytest.raises(ci.Failure, match="redirect"):
+        handler.redirect_request(request, None, 302, "Found", {}, target)
+
+
+def test_a_redirect_on_the_same_host_is_followed() -> None:
+    request = ci.urllib.request.Request(f"{SERVICE}/v1/reviews/1", method="GET")
+
+    followed = ci.SameHostRedirect().redirect_request(
+        request, None, 302, "Found", {}, f"{SERVICE}/v2/reviews/1"
+    )
+
+    assert followed is not None and followed.full_url == f"{SERVICE}/v2/reviews/1"
 
 
 def test_only_https_is_opened() -> None:

@@ -22,6 +22,7 @@ import re
 import sys
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -44,11 +45,32 @@ class Failure(Exception):
     """A request that did not work; the message says what, never a token or a secret."""
 
 
+class SameHostRedirect(urllib.request.HTTPRedirectHandler):
+    """Follows a redirect only to the same host over HTTPS.
+
+    A request carries a token or a signature; a URL secret pointing at an address that
+    redirects elsewhere must not hand them on.
+    """
+
+    def redirect_request(
+        self, req: urllib.request.Request, fp: Any, code: int, msg: str, headers: Any, newurl: str
+    ) -> urllib.request.Request | None:
+        old, new = urllib.parse.urlsplit(req.full_url), urllib.parse.urlsplit(newurl)
+        if new.scheme != "https" or new.netloc != old.netloc:
+            raise Failure(
+                f"{req.get_method()} {old.netloc}{old.path}: a redirect to "
+                f"{new.scheme}://{new.netloc} is not followed"
+            )
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
 @dataclass
 class Http:
     """JSON over HTTPS, with the headers each side needs."""
 
-    opener: Callable[..., Any] = urllib.request.urlopen
+    opener: Callable[..., Any] = field(
+        default_factory=lambda: urllib.request.build_opener(SameHostRedirect()).open
+    )
 
     def call(
         self, method: str, url: str, headers: dict[str, str], body: bytes | None = None
@@ -293,6 +315,14 @@ def post(result: dict[str, Any], github: GitHub, *, write_summary: Callable[[str
     if status in ("skipped", "superseded") or number is None:
         write_summary(outcome.message)  # a newer run updates the comments
         return 0 if outcome.passed else 1
+    # D-021: an older run's post can run after a newer one's. Its colour stays on its own
+    # commit, but the comments belong to the PR's head now.
+    # A run that broke before it knew its commit has no head_sha: it leaves them alone too.
+    current = (github.ok("GET", f"/pulls/{number}").get("head") or {}).get("sha")
+    if current != result.get("head_sha"):
+        why = f"the PR's head is now {current}" if result.get("head_sha") else "no commit known"
+        write_summary(f"{outcome.message} Comments not updated: {why}.")
+        return 0 if outcome.passed else 1
     issue_comments = github.pages(f"/issues/{number}/comments")
     report = (result.get("review") or {}).get("report")
     if status != "done" or not isinstance(report, dict):
@@ -363,14 +393,27 @@ def main(argv: list[str] | None = None) -> int:
                 out.write(f"review-agents: {text}\n")
 
     if args.command == "review":
+        event = json.loads(Path(env["GITHUB_EVENT_PATH"]).read_text(encoding="utf-8"))
+        # What the post job needs to say 审查失败 if this run breaks before a result.
+        pr = event.get("pull_request") or {}
+        base = {
+            "pr": pr.get("number") or (event.get("issue") or {}).get("number"),
+            "head_sha": (pr.get("head") or {}).get("sha"),
+        }
         url, secret = env.get("REVIEW_AGENTS_URL", ""), env.get("REVIEW_AGENTS_SECRET", "")
         if not url or not secret:
-            print(
-                "REVIEW_AGENTS_URL and REVIEW_AGENTS_SECRET must be set as secrets", file=sys.stderr
-            )
+            reason = "REVIEW_AGENTS_URL and REVIEW_AGENTS_SECRET must be set as secrets"
+            print(reason, file=sys.stderr)
+            _write(args.result, base | {"status": "error", "reason": reason})
             return 2
-        event = json.loads(Path(env["GITHUB_EVENT_PATH"]).read_text(encoding="utf-8"))
-        return review(env["GITHUB_EVENT_NAME"], event, github, Service(url, secret), args.result)
+        try:
+            return review(
+                env["GITHUB_EVENT_NAME"], event, github, Service(url, secret), args.result
+            )
+        except Exception as exc:
+            reason = f"the review step broke: {type(exc).__name__}"
+            _write(args.result, base | {"status": "error", "reason": reason})
+            raise
     result = json.loads(args.result.read_text(encoding="utf-8"))
     return post(result, github, write_summary=write_summary)
 

@@ -40,9 +40,8 @@ curl http://127.0.0.1:8080/healthz
 | `REVIEW_AGENTS_SHARED_SECRET` | 和 CI 共用的签名密钥，至少 32 个字符 |
 | `REVIEW_AGENTS_FINDER_MODEL__BASE_URL` | 找问题用的模型服务，任何 OpenAI 兼容接口 |
 | `REVIEW_AGENTS_FINDER_MODEL__MODEL` | 模型名 |
-| `REVIEW_AGENTS_FINDER_MODEL__API_KEY` | 模型服务的 key |
 
-可选：`REVIEW_AGENTS_VERIFIER_MODEL__*` 配一个更强的验证模型（不配时由找问题模型验证）；`REVIEW_AGENTS_TOKENS_PER_REVIEW` 每次审查的 token 上限（默认 1,500,000）；`REVIEW_AGENTS_OBSERVABILITY__*` 接入 OpenTelemetry。全部设置见 `src/review_agents/config.py`。
+可选：`REVIEW_AGENTS_FINDER_MODEL__API_KEY` 模型服务的 key（本地模型不需要时可不设）；`REVIEW_AGENTS_VERIFIER_MODEL__*` 配一个更强的验证模型（不配时由找问题模型验证）；`REVIEW_AGENTS_TOKENS_PER_REVIEW` 每次审查的 token 上限（默认 1,500,000）；`REVIEW_AGENTS_OBSERVABILITY__*` 接入 OpenTelemetry。全部设置见 `src/review_agents/config.py`。
 
 服务要能被 GitHub Actions 访问到：公网地址加 HTTPS。
 

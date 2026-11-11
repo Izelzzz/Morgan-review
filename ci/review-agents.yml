@@ -52,6 +52,11 @@ jobs:
     if: ${{ !cancelled() && needs.review.result != 'skipped' }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    # One post per PR at a time. Its own group: in the review job's, a queued post would
+    # cancel a newer push's review. A post for an older head leaves the comments alone.
+    concurrency:
+      group: review-agents-post-${{ github.event.pull_request.number || github.event.issue.number }}
+      cancel-in-progress: false
     # This token never leaves GitHub: it writes the comments.
     permissions:
       pull-requests: write
