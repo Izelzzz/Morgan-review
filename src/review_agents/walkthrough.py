@@ -19,7 +19,7 @@ from typing import Any, Literal
 
 from langchain_core.callbacks import BaseCallbackHandler
 from langchain_core.language_models import BaseChatModel
-from langchain_core.messages import BaseMessage, HumanMessage
+from langchain_core.messages import BaseMessage, HumanMessage, ToolMessage
 from langchain_core.tools import StructuredTool
 from pydantic import BaseModel, Field
 
@@ -120,6 +120,9 @@ class WalkthroughRun:
     walkthrough: Walkthrough | None = None
     reason: str | None = None
     limit_hit: Literal["time", "tokens", "tool_calls"] | None = None
+    # Experiment: the conversation once the walkthrough is in, for the general agent to
+    # carry on from.
+    transcript: list[BaseMessage] | None = None
     tool_calls: int = 0
 
 
@@ -221,10 +224,11 @@ def run_walkthrough(
             raise ValueError("; ".join(problems))
         return walkthrough
 
+    messages = walkthrough_messages(pack)
     try:
         end = tool_loop(
             model_for,
-            walkthrough_messages(pack),
+            messages,
             tools,
             Submit(_submit_tool(), parse, "walkthrough", WALKTHROUGH_NOW),
             tool_calls=tool_calls,
@@ -236,12 +240,18 @@ def run_walkthrough(
         )
     except _Unchecked as exc:
         return WalkthroughRun("incomplete", reason=f"its references could not be checked: {exc}")
+    received = (
+        [*messages, ToolMessage("received", tool_call_id=end.submit_id)]
+        if end.answer is not None and end.submit_id is not None
+        else None
+    )
     return WalkthroughRun(
         "done" if end.answer is not None else "incomplete",
         walkthrough=end.answer,
         reason=end.reason,
         limit_hit=end.limit_hit,
         tool_calls=end.tool_calls,
+        transcript=received,
     )
 
 

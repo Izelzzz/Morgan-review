@@ -576,6 +576,19 @@ class _Work:
         verifier_limits = self._limits(verifier.context_tokens)
 
         def find(job: Job) -> AgentRun:
+            opening = None
+            if job.dimension == GENERAL:
+                # Experiment: the general agent writes the walkthrough first, then finds
+                # problems in the same conversation, the walkthrough and the code it read
+                # already in front of it.
+                try:
+                    written = write()
+                except Exception as exc:  # the findings go ahead without it
+                    written = WalkthroughRun("incomplete", reason=f"{type(exc).__name__}: {exc}")
+                finished: Future[Any] = Future()
+                finished.set_result(written)
+                self.events.put(("written", None, finished))
+                opening = written.transcript
             self.starts[job.node] = _utc_now()  # when the job runs, not when it was queued
             meter = UsageMeter(
                 self.budget, review_usage(settings.db_path, self.review_id, job.dimension)
@@ -591,6 +604,7 @@ class _Work:
                 clock=self.clock,
                 limits=finder_limits,
                 slot=lambda: self.slots.held(DIMENSION_TURN),
+                opening=opening,
             )
 
         def write() -> WalkthroughRun:
@@ -651,7 +665,9 @@ class _Work:
 
         try:
             # Queued first, so it is not left waiting for a thread behind the dimensions.
-            finders.submit(write).add_done_callback(done("written", None))
+            # Experiment: the general agent writes it as its first step instead.
+            if [job.dimension for job in jobs] != [GENERAL]:
+                finders.submit(write).add_done_callback(done("written", None))
             for index, job in enumerate(jobs):
                 finders.submit(find, job).add_done_callback(done("found", index))
             while True:

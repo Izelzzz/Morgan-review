@@ -153,6 +153,8 @@ class LoopEnd[T]:
     reason: str | None = None
     limit_hit: Literal["time", "tokens", "tool_calls"] | None = None
     tool_calls: int = 0
+    # The submit call the answer came in, for a conversation that goes on after it.
+    submit_id: str | None = None
 
 
 def tool_loop[T](
@@ -268,6 +270,7 @@ def tool_loop[T](
                 )
             )
             continue
+        end.submit_id = submitted["id"]
         # A forced answer is complete but cut short; the report says by what.
         if budget.used >= tool_calls:
             end.limit_hit = "tool_calls"
@@ -305,12 +308,20 @@ def run_dimension(
     clock: Callable[[], float],
     limits: ConversationLimits = ConversationLimits(),  # noqa: B008 - frozen, shared safely
     slot: Slot = nullcontext,
+    opening: list[BaseMessage] | None = None,
 ) -> AgentRun:
-    """Run one dimension agent to its findings, or to a recorded reason it stopped."""
+    """Run one dimension agent to its findings, or to a recorded reason it stopped.
+
+    Experiment: given an `opening` (the walkthrough's conversation, once it is written),
+    the agent carries on from it with its own task, so it reads nothing twice.
+    """
     submit = Submit(_submit_tool(), Submission.model_validate, "findings list", SUBMIT_NOW)
+    messages = list(pack.messages(dimension))
+    if opening is not None:
+        messages = [*opening, messages[-1]]
     end = tool_loop(
         model_for,
-        list(pack.messages(dimension)),
+        messages,
         tools,
         submit,
         tool_calls=tool_calls,
