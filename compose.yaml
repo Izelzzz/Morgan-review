@@ -3,6 +3,11 @@ services:
     build: .
     image: review-agents:local
     restart: unless-stopped
+    # The service's settings, REVIEW_AGENTS_* (decision D-002). Optional so the image
+    # still starts, and reports what is missing, without one.
+    env_file:
+      - path: .env
+        required: false
     ports:
       - "127.0.0.1:8080:8080"
     volumes:
