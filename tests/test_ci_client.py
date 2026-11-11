@@ -448,6 +448,48 @@ def test_a_crash_still_leaves_a_result_for_the_post_job(
     assert (result["status"], result["pr"], result["head_sha"]) == ("error", 7, HEAD)
 
 
+@pytest.mark.parametrize(("answer", "head"), [((200, pr()), HEAD), ((502, None), None)])
+def test_a_review_command_that_breaks_early_still_names_the_head(
+    fake: Fake,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    answer: tuple[int, Any],
+    head: str | None,
+) -> None:
+    # A comment event carries no PR head; it is looked up so post can say 审查失败.
+    # When even that fails, the result still names no commit and post leaves comments.
+    fake.on("GET", PULL, answer)
+    monkeypatch.setattr(ci.Http, "call", lambda self, *args: fake.call(*args))
+
+    code, result = run_main(
+        tmp_path, monkeypatch, comment_event("/review", "OWNER"), GITHUB_EVENT_NAME="issue_comment"
+    )
+
+    assert code == 2
+    assert (result["status"], result["pr"], result["head_sha"]) == ("error", 7, head)
+
+
+def test_a_crash_after_the_result_is_written_keeps_that_result(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def broken(name: str, event: Any, gh: Any, svc: Any, out: Path, **kwargs: Any) -> int:
+        out.write_text(json.dumps({"status": "done", "pr": 7, "head_sha": HEAD}))
+        raise KeyError("late")
+
+    monkeypatch.setattr(ci, "review", broken)
+
+    with pytest.raises(KeyError):
+        run_main(
+            tmp_path,
+            monkeypatch,
+            pr_event(),
+            REVIEW_AGENTS_URL=SERVICE,
+            REVIEW_AGENTS_SECRET=SECRET,
+        )
+
+    assert json.loads((tmp_path / "result.json").read_text())["status"] == "done"
+
+
 @pytest.mark.parametrize(
     "target",
     ["https://elsewhere.test/v1/reviews", "http://review.example.test/v1/reviews"],

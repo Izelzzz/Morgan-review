@@ -14,6 +14,7 @@ code is never checked out or run here; only the service reads it.
 """
 
 import argparse
+import contextlib
 import hashlib
 import hmac
 import json
@@ -394,25 +395,34 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "review":
         event = json.loads(Path(env["GITHUB_EVENT_PATH"]).read_text(encoding="utf-8"))
-        # What the post job needs to say 审查失败 if this run breaks before a result.
-        pr = event.get("pull_request") or {}
-        base = {
-            "pr": pr.get("number") or (event.get("issue") or {}).get("number"),
-            "head_sha": (pr.get("head") or {}).get("sha"),
-        }
+
+        def broke(reason: str) -> None:
+            # The post job says 审查失败 with this. A result review() already wrote stays.
+            if args.result.exists():
+                return
+            pr = event.get("pull_request") or {}
+            number = pr.get("number") or (event.get("issue") or {}).get("number")
+            head = (pr.get("head") or {}).get("sha")
+            if head is None and number is not None:  # a /review comment carries no head
+                # If that fails too, no commit is known and post leaves the comments alone.
+                with contextlib.suppress(Failure, KeyError, TypeError):
+                    head = github.ok("GET", f"/pulls/{number}")["head"]["sha"]
+            _write(
+                args.result, {"status": "error", "reason": reason, "pr": number, "head_sha": head}
+            )
+
         url, secret = env.get("REVIEW_AGENTS_URL", ""), env.get("REVIEW_AGENTS_SECRET", "")
         if not url or not secret:
             reason = "REVIEW_AGENTS_URL and REVIEW_AGENTS_SECRET must be set as secrets"
             print(reason, file=sys.stderr)
-            _write(args.result, base | {"status": "error", "reason": reason})
+            broke(reason)
             return 2
         try:
             return review(
                 env["GITHUB_EVENT_NAME"], event, github, Service(url, secret), args.result
             )
         except Exception as exc:
-            reason = f"the review step broke: {type(exc).__name__}"
-            _write(args.result, base | {"status": "error", "reason": reason})
+            broke(f"the review step broke: {type(exc).__name__}")
             raise
     result = json.loads(args.result.read_text(encoding="utf-8"))
     return post(result, github, write_summary=write_summary)
