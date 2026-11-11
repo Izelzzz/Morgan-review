@@ -22,19 +22,22 @@ permissions: {}
 
 jobs:
   review:
-    # A comment starts a review only when it is `/review` on a pull request; who wrote it
-    # is checked by the action (collaborators only). A comment's run belongs to the default
-    # branch, so it updates the comments but not the PR's required check: the next push
-    # does that.
+    # A comment starts a review only when it is `/review` on a pull request from a
+    # collaborator. Who wrote it is checked here, before the job joins the concurrency group
+    # below, and again by the action. A comment's run belongs to the default branch, so it
+    # updates the comments but not the PR's required check: the next push does that.
     if: >-
       github.event_name == 'pull_request_target' ||
-      (github.event.issue.pull_request && startsWith(github.event.comment.body, '/review'))
+      (github.event.issue.pull_request && startsWith(github.event.comment.body, '/review') &&
+       contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.comment.author_association))
     runs-on: ubuntu-latest
     timeout-minutes: 50
-    # A newer push makes an older review pointless; the service supersedes it as well.
+    # A newer push makes an older review pointless (the service supersedes it as well), so a
+    # push cancels the review in progress. A /review comment waits for it instead: cancelling
+    # a push's review would leave that push with no conclusion.
     concurrency:
       group: review-agents-${{ github.event.pull_request.number || github.event.issue.number }}
-      cancel-in-progress: true
+      cancel-in-progress: ${{ github.event_name == 'pull_request_target' }}
     # This token goes to the service: read only.
     permissions:
       contents: read

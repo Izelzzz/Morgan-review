@@ -106,3 +106,23 @@ def test_the_result_is_kept_when_the_review_step_fails() -> None:
     [_, upload] = steps(load(CI / "review" / "action.yml"))
 
     assert upload["if"] == "always()"
+
+
+def test_only_a_collaborator_s_comment_reaches_the_review_job() -> None:
+    # Concurrency applies when the job is queued, before the script can check who wrote
+    # the comment; so who wrote it is checked here too.
+    condition = " ".join(load(TEMPLATE)["jobs"]["review"]["if"].split())
+
+    assert (
+        'contains(fromJSON(\'["OWNER","MEMBER","COLLABORATOR"]\'), '
+        "github.event.comment.author_association)"
+    ) in condition
+
+
+def test_a_review_command_does_not_cancel_a_push_s_review() -> None:
+    # A newer push still cancels an older review; a /review comment waits its turn.
+    concurrency = load(TEMPLATE)["jobs"]["review"]["concurrency"]
+
+    assert concurrency["cancel-in-progress"] == (
+        "${{ github.event_name == 'pull_request_target' }}"
+    )
