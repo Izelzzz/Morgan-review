@@ -51,13 +51,30 @@ def check_commit_sha(sha: str) -> str:
     return sha
 
 
+# Passed through from the service's environment, so a service that reaches the network
+# through a proxy, or trusts its own CAs, can fetch (issue #80).
+NETWORK_VARIABLES = (
+    "HTTPS_PROXY",
+    "https_proxy",
+    "HTTP_PROXY",
+    "http_proxy",
+    "NO_PROXY",
+    "no_proxy",
+    "GIT_SSL_CAINFO",
+    "SSL_CERT_FILE",
+    "SSL_CERT_DIR",
+)
+
+
 def git_env(token: str | None = None, remote_prefix: str = "") -> dict[str, str]:
     """Environment for every git call: no user or system config, no prompts.
 
     The token goes into an HTTP header through `GIT_CONFIG_*` variables, so it is
-    never written to the mirror's config, a remote URL or the process arguments.
+    never written to the mirror's config, a remote URL or the process arguments. Of the
+    service's own environment only `PATH` and the proxy and CA variables are kept.
     """
-    env = {
+    env = {name: os.environ[name] for name in NETWORK_VARIABLES if name in os.environ}
+    env |= {
         "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
         "GIT_CONFIG_NOSYSTEM": "1",
         "GIT_CONFIG_GLOBAL": os.devnull,
