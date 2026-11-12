@@ -7,6 +7,7 @@ from review_agents.context.modules import ModuleSummary
 from review_agents.context.pack import (
     AGENT_SHARE,
     DIMENSIONS,
+    GENERAL,
     SHARED_RULES,
     ContextPack,
     build_packs,
@@ -149,3 +150,15 @@ def test_every_agent_is_told_the_configured_language_after_its_task() -> None:
     assert [m.content for m in zh.messages("security")[:2]] == [
         m.content for m in en.messages("security")[:2]
     ]
+
+
+def test_the_room_kept_for_the_task_follows_the_agents_that_run() -> None:
+    # Issue #83: the default strategy keeps the room it kept before; a general agent's
+    # longer task is counted only when one runs.
+    base = ContextPack(SHARED_RULES, repo_layer(), pr_layer({}))
+    single = fixed_tokens(base)
+    general = fixed_tokens(base, [(GENERAL, DIMENSIONS)])
+
+    assert single == fixed_tokens(base, [(d, (d,)) for d in DIMENSIONS])
+    assert general > single
+    assert general == fixed_tokens(base, [(GENERAL, DIMENSIONS), ("security", ("security",))])
