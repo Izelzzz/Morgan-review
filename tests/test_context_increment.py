@@ -141,3 +141,23 @@ def test_a_path_in_chinese_is_named_as_written(repo: Repo) -> None:
     found = increment(repo.sync(), repo.base, first, repo.base, second)
 
     assert found is not None and found.lines == {"文档/说明.py": [(9, 9)]}
+
+
+@pytest.mark.parametrize("kind", ["binary", "mode"])
+def test_a_change_with_no_lines_is_still_a_change_to_review(repo: Repo, kind: str) -> None:
+    # A binary file or a file mode has no lines to point at, but it is the PR's change.
+    repo.up.commit({"logo.png": b"\x89PNG\x00one"}, "add", branch="pr")
+    first = repo.edit("a.py", {3: "changed 3\n"})
+    if kind == "binary":
+        second = repo.up.commit({"logo.png": b"\x89PNG\x00two"}, "redraw", branch="pr")
+    else:
+        git(repo.up.work, "update-index", "--chmod=+x", "a.py")
+        git(repo.up.work, "commit", "-q", "-m", "make it executable")
+        git(repo.up.work, "push", "-q", "origin", "HEAD:refs/heads/pr")
+        second = repo.head()
+    path = "logo.png" if kind == "binary" else "a.py"
+
+    found = increment(repo.sync(), repo.base, first, repo.base, second)
+
+    assert found is not None and not found.empty
+    assert found.lines == {} and found.files == [path]

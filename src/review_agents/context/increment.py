@@ -26,10 +26,12 @@ class Increment:
     previous_head: str
     # Head-side lines to review, by path; a place taken back is one line, where it was.
     lines: dict[str, Ranges] = field(default_factory=dict)
+    # The PR's files changed with no lines to point at: a binary file, a file mode.
+    files: list[str] = field(default_factory=list)
 
     @property
     def empty(self) -> bool:
-        return not self.lines
+        return not self.lines and not self.files
 
 
 @dataclass
@@ -99,6 +101,12 @@ def increment(
     for sha in (previous_base, previous_head, base, head):
         check_commit_sha(sha)
 
+    def _names(span: str) -> list[str]:
+        # NUL-separated, so a path is never quoted; a rename gives its new name last.
+        args = ("diff", "--name-only", "-z", "-M", "--no-ext-diff", span)
+        output = run_git(git_dir, *args, timeout=GIT_TIMEOUT_SECONDS).decode("utf-8", "replace")
+        return [p for p in output.split("\0") if p]
+
     def diff(span: str) -> str:
         # Paths as written: git quotes non-ASCII ones in octal unless told not to.
         args = (
@@ -120,6 +128,8 @@ def increment(
         now = _added(diff(f"{base}...{head}"))
         before = _added(diff(f"{previous_base}...{previous_head}"))
         between = _hunks(diff(f"{previous_head}..{head}"))
+        own_files = set(_names(f"{base}...{head}"))
+        changed_files = _names(f"{previous_head}..{head}")
     except GitError:
         return None
     lines: dict[str, Ranges] = {}
@@ -131,4 +141,8 @@ def increment(
         elif hunk.removed is not None and _overlap(hunk.removed, before.get(hunk.old_path, [])):
             # The author took back what the PR had added: review where it was.
             lines.setdefault(hunk.new_path, []).append((hunk.at, hunk.at))
-    return Increment(previous_head, {path: _merged(r) for path, r in sorted(lines.items())})
+    # A file changed with no text hunk at all is the PR's change too, if the PR changes it.
+    texts = {hunk.new_path for hunk in between}
+    lineless = sorted(p for p in changed_files if p in own_files and p not in texts)
+    merged = {path: _merged(r) for path, r in sorted(lines.items())}
+    return Increment(previous_head, merged, lineless)
