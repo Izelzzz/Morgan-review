@@ -1150,3 +1150,32 @@ def test_a_walkthrough_not_handed_in_is_replaced_by_why(setup: Setup) -> None:
     assert "改动说明没能生成" in report["walkthrough"]
     status, error = setup.steps(review_id)["walkthrough"]
     assert status == "error" and error is not None
+
+
+# --- secrets (issue #15) ---------------------------------------------------------
+
+LEAKED = "ghp_" + "Z9y8X7w6V5u4T3s2R1q0P9o8N7m6L5k4J3i2"
+
+
+def test_an_error_carrying_a_secret_is_stored_masked(setup: Setup) -> None:
+    review_id = setup.queue()
+    model = ByDimension(scripts={"security": [RuntimeError(f"401 for token {LEAKED}")]})
+
+    setup.run(review_id, model)
+
+    status, error = setup.steps(review_id)["dimension.security"]
+    assert status == "error" and error is not None
+    assert LEAKED not in error and "***" in error
+
+
+def test_a_secret_quoted_in_a_finding_is_masked_in_the_report(setup: Setup) -> None:
+    review_id = setup.queue()
+    leak = finding("security", why=f"The token {LEAKED} is committed.")
+    model = ByDimension(scripts={"security": [submit(leak)]})
+
+    setup.run(review_id, model)
+
+    report = report_of(setup, review_id)
+    assert report is not None
+    text = json.dumps(report, ensure_ascii=False)
+    assert LEAKED not in text and "***" in text
