@@ -23,6 +23,10 @@ DIMENSIONS = ("spec_drift", "edge_cases", "security", "maintainability", "verifi
 _SKILLS = files("review_agents") / "skills"
 SHARED_RULES = (_SKILLS / "_shared.md").read_text(encoding="utf-8")
 SKILLS = {d: (_SKILLS / d / "SKILL.md").read_text(encoding="utf-8") for d in DIMENSIONS}
+# One agent holding several dimensions' rules (strategies `general` and
+# `walkthrough_first`, D-038) tags each finding with the dimension it belongs to.
+GENERAL = "general"
+GENERAL_TASK = "Review the pull request above for each of these dimensions"
 
 # The part of the window kept free for what an agent adds while it works: tool results,
 # its reasoning and its findings.
@@ -46,7 +50,19 @@ def language_note(language: Language) -> str:
     )
 
 
-def task(dimension: str) -> str:
+def task(dimension: str, dimensions: tuple[str, ...] | None = None) -> str:
+    """The agent's own task: one dimension's rules, or several for a general agent."""
+    held = dimensions or (dimension,)
+    if len(held) > 1:
+        rules = "\n\n".join(f"# Dimension `{d}`\n\n{SKILLS[d]}" for d in held)
+        return (
+            f"{rules}\n\n"
+            f"{GENERAL_TASK}, whose rules are given above: {', '.join(held)}. Read more"
+            " code with your tools wherever the context is not enough. Report each problem"
+            " once, and set its `dimension` field to the one dimension above it belongs to"
+            " most. Report findings in the output format of the shared rules."
+        )
+    dimension = held[0]
     return (
         f"{SKILLS[dimension]}\n\n"
         f"Review the pull request above for the {dimension} dimension only. Read more code"
@@ -67,11 +83,13 @@ class ContextPack:
         """Everything before the dimension's own message, identical for every dimension."""
         return f"{self.repo.render()}\n\n{self.pr.render()}"
 
-    def messages(self, dimension: str) -> list[BaseMessage]:
+    def messages(
+        self, dimension: str, dimensions: tuple[str, ...] | None = None
+    ) -> list[BaseMessage]:
         return [
             SystemMessage(self.shared_rules),
             HumanMessage(self.prefix),
-            HumanMessage(f"{task(dimension)}\n\n{language_note(self.language)}"),
+            HumanMessage(f"{task(dimension, dimensions)}\n\n{language_note(self.language)}"),
         ]
 
 
@@ -82,7 +100,8 @@ def fixed_tokens(base: ContextPack) -> int:
     `signature_tokens`; a pack that is not split has no other groups.
     """
     longest_note = max(estimate_tokens(language_note(lang)) for lang in LANGUAGE_NAMES)
-    longest_task = max(estimate_tokens(task(d)) for d in DIMENSIONS) + longest_note
+    tasks = [task(d) for d in DIMENSIONS] + [task(GENERAL, DIMENSIONS)]
+    longest_task = max(estimate_tokens(t) for t in tasks) + longest_note
     return estimate_tokens(base.shared_rules) + estimate_tokens(base.prefix) + longest_task
 
 

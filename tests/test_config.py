@@ -112,3 +112,12 @@ def test_a_verifier_model_with_a_smaller_window_is_refused() -> None:
         verifier_model=endpoint(128_000, "verifier"),  # type: ignore[arg-type]
     )
     assert same.verifier_model is not None
+
+
+def test_the_review_strategy_defaults_to_dimension_agents(monkeypatch: pytest.MonkeyPatch) -> None:
+    assert Settings().strategy == "dimensions"
+    monkeypatch.setenv("REVIEW_AGENTS_STRATEGY", "walkthrough_first")
+    assert Settings().strategy == "walkthrough_first"
+    monkeypatch.setenv("REVIEW_AGENTS_STRATEGY", "five_more")
+    with pytest.raises(ValidationError):
+        Settings()
