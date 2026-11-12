@@ -2,7 +2,7 @@
 #
 # 1. Add two repository secrets: REVIEW_AGENTS_URL (your service) and REVIEW_AGENTS_SECRET
 #    (the service's shared secret).
-# 2. Replace <commit> below with a full commit SHA of Izelzzz/review-lab. Upgrading is
+# 2. Replace <commit> below with a full commit SHA of Izelzzz/Morgan-review. Upgrading is
 #    changing that SHA.
 # 3. To block merging on a red result, make the "post" check required in Settings ->
 #    Branches (or Rules). Without that, a red result shows but does not block.
@@ -44,7 +44,7 @@ jobs:
       issues: read
       pull-requests: read
     steps:
-      - uses: Izelzzz/review-lab/ci/review@<commit>
+      - uses: Izelzzz/Morgan-review/ci/review@<commit>
         with:
           service-url: ${{ secrets.REVIEW_AGENTS_URL }}
           secret: ${{ secrets.REVIEW_AGENTS_SECRET }}
@@ -64,4 +64,4 @@ jobs:
     permissions:
       pull-requests: write
     steps:
-      - uses: Izelzzz/review-lab/ci/post@<commit>
+      - uses: Izelzzz/Morgan-review/ci/post@<commit>

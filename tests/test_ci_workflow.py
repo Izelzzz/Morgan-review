@@ -69,7 +69,7 @@ def test_every_action_is_pinned_to_a_commit(path: Path) -> None:
         if uses is None:
             continue
         ref = uses.rsplit("@", 1)[1]
-        if uses.startswith("Izelzzz/review-lab/"):
+        if uses.startswith("Izelzzz/Morgan-review/"):
             assert ref == "<commit>"  # the user puts the commit they chose
         else:
             assert re.fullmatch(r"[0-9a-f]{40}", ref), uses
@@ -126,3 +126,9 @@ def test_a_review_command_does_not_cancel_a_push_s_review() -> None:
     assert concurrency["cancel-in-progress"] == (
         "${{ github.event_name == 'pull_request_target' }}"
     )
+
+
+def test_the_template_names_this_repository_as_it_is_called_now() -> None:
+    # The repository was renamed from review-lab. GitHub redirects the old name, but a new
+    # repository taking that name would then serve its own code to every user.
+    assert "review-lab" not in TEMPLATE.read_text(encoding="utf-8")
