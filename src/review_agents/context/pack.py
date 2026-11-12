@@ -6,7 +6,7 @@ differs, so a model service with prompt caching reuses the prefix across the fiv
 agents and across each agent's turns (context design §5).
 """
 
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, replace
 from importlib.resources import files
 from pathlib import PurePosixPath
@@ -93,14 +93,21 @@ class ContextPack:
         ]
 
 
-def fixed_tokens(base: ContextPack) -> int:
+# The agents a pack is read by: their names and the dimensions whose rules they hold.
+Readers = Sequence[tuple[str, tuple[str, ...]]]
+ONE_PER_DIMENSION: Readers = tuple((d, (d,)) for d in DIMENSIONS)
+
+
+def fixed_tokens(base: ContextPack, readers: Readers = ONE_PER_DIMENSION) -> int:
     """What the one pack carries whatever its changes: rules, repository, intent, task.
 
     Split packs carry the definitions other groups change on top of this, at most
     `signature_tokens`; a pack that is not split has no other groups.
     """
     longest_note = max(estimate_tokens(language_note(lang)) for lang in LANGUAGE_NAMES)
-    tasks = [task(d) for d in DIMENSIONS] + [task(GENERAL, DIMENSIONS)]
+    # The longest task of the agents that run: a general agent's carries every rule it
+    # holds, and is counted only when one runs (issue #83).
+    tasks = [task(name, held) for name, held in readers] or [task(d) for d in DIMENSIONS]
     longest_task = max(estimate_tokens(t) for t in tasks) + longest_note
     return estimate_tokens(base.shared_rules) + estimate_tokens(base.prefix) + longest_task
 
@@ -128,12 +135,13 @@ def build_packs(
     window_tokens: int,
     output_reserve: int = 0,
     language: Language = "zh",
+    readers: Readers = ONE_PER_DIMENSION,
 ) -> list[ContextPack]:
     """One pack per group of changes; a single pack when the whole PR fits (decision D-008)."""
     base = ContextPack(
         SHARED_RULES, repo, replace(layer, diffs={}, excerpts=[], notes=[]), language
     )
-    budget = pack_budget(window_tokens, output_reserve) - fixed_tokens(base)
+    budget = pack_budget(window_tokens, output_reserve) - fixed_tokens(base, readers)
     module_of = module_finder(repo)
     # Only a PR that does not fit is split (D-008), so the room for other groups'
     # signatures is kept back only once splitting is certain.

@@ -365,8 +365,15 @@ def run_review(
     pr_layer = build_pr_layer(
         conn, request, git_dir, config, token=token, surrounding_code=settings.surrounding_code
     )
+    planned = plan(settings.strategy, config)
     packs = build_packs(
-        repo_layer, pr_layer, window, settings.output_reserve_tokens, config.language
+        repo_layer,
+        pr_layer,
+        window,
+        settings.output_reserve_tokens,
+        config.language,
+        # The room kept for the agents' task follows the agents that run (issue #83).
+        [(a.name, a.dimensions) for a in planned.authors],
     )
     # For the report: the whole PR's lines, not only this round's, since GitHub takes
     # inline comments on those. Read with the rest of the code, before any model call.
@@ -377,7 +384,6 @@ def run_review(
         _step(conn, review_id, f"context.groups.{len(packs)}", step)
 
     _check_not_superseded(conn, review_id)
-    planned = plan(settings.strategy, config)
     dimensions, repeats = planned.dimensions, planned.runs
     jobs = plan_jobs(planned, packs)
     # Quick mode publishes what it finds unverified (pipeline design §5).
