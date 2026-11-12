@@ -18,6 +18,7 @@ from scripted import ScriptedModel, call
 
 from review_agents.config import ModelEndpoint, Settings
 from review_agents.context.git import Snapshot
+from review_agents.context.pack import GENERAL, GENERAL_TASK
 from review_agents.credentials import TokenVault
 from review_agents.db import connect, migrate
 from review_agents.mirror import MirrorStore
@@ -123,18 +124,26 @@ class ByDimension(BaseChatModel):
             if isinstance(answer, Exception):
                 raise answer
             return ChatResult(generations=[ChatGeneration(message=_verdict(answer, text))])
-        if any(WALKTHROUGH_TASK in str(m.content) for m in messages):
+
+        # The latest task in the conversation says who is asked: an agent may carry on
+        # from the walkthrough's conversation (strategy walkthrough_first).
+        def last(found: Any) -> int:
+            return max((i for i, m in enumerate(messages) if found(str(m.content))), default=-1)
+
+        wrote = last(lambda text: WALKTHROUGH_TASK in text)
+        asked = last(lambda text: bool(DIMENSION.search(text)) or GENERAL_TASK in text)
+        if wrote > asked:
             with self.lock:
                 self.order.append("walkthrough")
                 said = self.walkthrough.pop(0) if self.walkthrough else AIMessage("It clamps.")
             if isinstance(said, Exception):
                 raise said
             return ChatResult(generations=[ChatGeneration(message=said)])
-        task = next((str(m.content) for m in messages if DIMENSION.search(str(m.content))), "")
+        task = str(messages[asked].content) if asked >= 0 else ""
         match = DIMENSION.search(task)
         if match is None:  # a module summary for the repository layer
             return ChatResult(generations=[ChatGeneration(message=AIMessage("A module."))])
-        dimension = match.group(1)
+        dimension = GENERAL if GENERAL_TASK in task else match.group(1)
         time.sleep(self.delay.get(dimension, 0.0))
         with self.lock:
             self.seen.append(dimension)
@@ -1148,5 +1157,67 @@ def test_a_walkthrough_not_handed_in_is_replaced_by_why(setup: Setup) -> None:
     report = report_of(setup, review_id)
     assert report is not None and report["walkthrough"].startswith(MARKER)
     assert "改动说明没能生成" in report["walkthrough"]
+    status, error = setup.steps(review_id)["walkthrough"]
+    assert status == "error" and error is not None
+
+
+# --- strategies (issue #83, D-038) ---------------------------------------------
+
+
+def with_strategy(setup: Setup, strategy: str) -> None:
+    setup.settings = setup.settings.model_copy(update={"strategy": strategy})
+
+
+def test_the_general_strategy_runs_one_agent_for_every_dimension(setup: Setup) -> None:
+    with_strategy(setup, "general")
+    review_id = setup.queue()
+    model = ByDimension(
+        scripts={GENERAL: [submit(finding("edge_cases"))]}, walkthrough=[walkthrough_answer()]
+    )
+
+    setup.run(review_id, model)
+
+    assert model.seen == [GENERAL]
+    [written] = setup.findings(review_id)
+    assert written["primary_dimension"] == "edge_cases"  # the dimension it tagged
+    steps = setup.steps(review_id)
+    assert steps["dimension.general"] == ("ok", None)
+    assert steps["walkthrough"][0] == "ok"  # written alongside, as before
+    report = json.loads(setup.review(review_id)["report"])
+    assert "规格漂移" in report["summary"] and "可验证性" in report["summary"]  # all reviewed
+
+
+def test_walkthrough_first_finds_problems_after_the_walkthrough(setup: Setup) -> None:
+    with_strategy(setup, "walkthrough_first")
+    review_id = setup.queue()
+    model = ByDimension(
+        scripts={GENERAL: [submit(finding("security"))]},
+        walkthrough=[walkthrough_answer()],
+    )
+
+    setup.run(review_id, model)
+
+    assert model.order[:2] == ["walkthrough", GENERAL]
+    [sent] = model.sent  # the agent's one turn: the walkthrough's conversation, then its task
+    assert WALKTHROUGH_TASK in str(sent[2].content) and GENERAL_TASK in str(sent[-1].content)
+    [written] = setup.findings(review_id)
+    assert written["primary_dimension"] == "security"
+    report = json.loads(setup.review(review_id)["report"])
+    assert report["walkthrough"].startswith(MARKER)
+
+
+def test_walkthrough_first_still_finds_problems_when_the_walkthrough_fails(setup: Setup) -> None:
+    with_strategy(setup, "walkthrough_first")
+    review_id = setup.queue()
+    model = ByDimension(
+        scripts={GENERAL: [submit(finding("security"))]},
+        walkthrough=[RuntimeError("model service down")],
+    )
+
+    setup.run(review_id, model)
+
+    assert len(setup.findings(review_id)) == 1
+    [sent] = model.sent
+    assert not any(WALKTHROUGH_TASK in str(m.content) for m in sent)  # a fresh opening
     status, error = setup.steps(review_id)["walkthrough"]
     assert status == "error" and error is not None

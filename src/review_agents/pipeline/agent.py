@@ -153,6 +153,8 @@ class LoopEnd[T]:
     reason: str | None = None
     limit_hit: Literal["time", "tokens", "tool_calls"] | None = None
     tool_calls: int = 0
+    # The submit call the answer came in, for a conversation that carries on after it.
+    submit_id: str | None = None
 
 
 def tool_loop[T](
@@ -268,6 +270,7 @@ def tool_loop[T](
                 )
             )
             continue
+        end.submit_id = submitted["id"]
         # A forced answer is complete but cut short; the report says by what.
         if budget.used >= tool_calls:
             end.limit_hit = "tool_calls"
@@ -305,12 +308,24 @@ def run_dimension(
     clock: Callable[[], float],
     limits: ConversationLimits = ConversationLimits(),  # noqa: B008 - frozen, shared safely
     slot: Slot = nullcontext,
+    dimensions: tuple[str, ...] | None = None,
+    opening: Sequence[BaseMessage] | None = None,
 ) -> AgentRun:
-    """Run one dimension agent to its findings, or to a recorded reason it stopped."""
+    """Run one agent to its findings, or to a recorded reason it stopped.
+
+    `dimensions` are the rules it holds: its own dimension unless given (a general agent
+    holds several, D-038). Given an `opening`, the walkthrough's conversation once it is
+    written, the agent carries on from it with its own task, so the code it read and
+    what it wrote are already in front of it.
+    """
+    held = dimensions or (dimension,)
+    messages = list(pack.messages(dimension, held))
+    if opening is not None:
+        messages = [*opening, messages[-1]]
     submit = Submit(_submit_tool(), Submission.model_validate, "findings list", SUBMIT_NOW)
     end = tool_loop(
         model_for,
-        list(pack.messages(dimension)),
+        messages,
         tools,
         submit,
         tool_calls=tool_calls,
@@ -332,7 +347,9 @@ def run_dimension(
     line_count = functools.cache(tools.line_count)
     sources = pack_sources(pack, tools)
     for item in end.answer.findings:
-        item.dimension = dimension
+        # A general agent tags each finding; a tag outside what it holds is not trusted.
+        if len(held) == 1 or item.dimension not in held:
+            item.dimension = dimension
         try:
             # The same file must be spelled the same in every finding, as git spells
             # it: merging compares paths, and GitHub rejects others in comments.
