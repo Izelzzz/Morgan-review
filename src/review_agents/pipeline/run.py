@@ -26,7 +26,7 @@ import sqlite3
 import threading
 import time
 from collections.abc import Callable
-from concurrent.futures import Future, ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor, wait
 from contextlib import closing
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
@@ -39,7 +39,7 @@ from review_agents.config import Settings
 from review_agents.context.cache import repo_layer_for_review
 from review_agents.context.git import Snapshot
 from review_agents.context.modules import Summarize, module_summaries, module_tokens
-from review_agents.context.pack import DIMENSIONS, ContextPack, build_packs
+from review_agents.context.pack import ContextPack, build_packs
 from review_agents.context.pr_layer import PrRequest, build_pr_layer, pr_patches
 from review_agents.context.summarizer import model_summarizer
 from review_agents.credentials import TokenVault
@@ -58,8 +58,9 @@ from review_agents.pipeline.conversation import ConversationLimits
 from review_agents.pipeline.merge import Candidate, Merged, merge, model_judge, overlaps
 from review_agents.pipeline.nits import NIT_MERGE_SECONDS, merge_nits
 from review_agents.pipeline.schedule import DIMENSION_TURN, Slots, verify_priority
+from review_agents.pipeline.strategy import Plan, plan
 from review_agents.pipeline.verify import VERIFIER_TOOL_CALLS, VerificationRun, run_verifier
-from review_agents.repo_config import MAX_REVIEW_MINUTES, RepoConfig, read_repo_config
+from review_agents.repo_config import MAX_REVIEW_MINUTES, read_repo_config
 from review_agents.report import (
     Item,
     MissedStep,
@@ -98,10 +99,14 @@ class ReviewSuperseded(RuntimeError):
 class Job:
     group: int
     groups: int
-    dimension: str
+    dimension: str  # the agent's name: a dimension, or GENERAL
     pack: ContextPack
     run: int = 1
     runs: int = 1
+    # The dimensions whose rules the agent holds; its own dimension unless given.
+    dimensions: tuple[str, ...] = ()
+    # It carries on from the walkthrough's conversation (strategy walkthrough_first).
+    after_walkthrough: bool = False
 
     @property
     def node(self) -> str:
@@ -110,23 +115,25 @@ class Job:
         return f"dimension.{self.dimension}{suffix}"
 
 
-def enabled_dimensions(config: RepoConfig) -> list[str]:
-    return [d for d in DIMENSIONS if getattr(config.dimensions, d)]
-
-
-# Quick mode looks at edge cases and security only (architecture §4.3); Deep mode runs
-# each dimension three times and keeps what any run reports (D-022).
-QUICK_DIMENSIONS = ("edge_cases", "security")
-DEEP_RUNS = 3
-
-
-def mode_plan(config: RepoConfig) -> tuple[list[str], int]:
-    """The dimensions a review runs and how many times each, from the config's mode."""
-    enabled = enabled_dimensions(config)
-    if config.mode == "quick":
-        # With neither of them enabled, the first enabled one still makes it a review.
-        return [d for d in enabled if d in QUICK_DIMENSIONS] or enabled[:1], 1
-    return enabled, DEEP_RUNS if config.mode == "deep" else 1
+def plan_jobs(planned: Plan, packs: list[ContextPack]) -> list[Job]:
+    """Every agent of the review, for every group of changes, every first run first."""
+    return [
+        Job(
+            index,
+            len(packs),
+            author.name,
+            pack,
+            run,
+            planned.runs,
+            author.dimensions,
+            # The walkthrough reads the first group; another group's agent opening from
+            # its conversation would see the first group's changes instead of its own.
+            planned.walkthrough_first and index == 1,
+        )
+        for run in range(1, planned.runs + 1)
+        for index, pack in enumerate(packs, start=1)
+        for author in planned.authors
+    ]
 
 
 def _utc_now() -> str:
@@ -358,8 +365,15 @@ def run_review(
     pr_layer = build_pr_layer(
         conn, request, git_dir, config, token=token, surrounding_code=settings.surrounding_code
     )
+    planned = plan(settings.strategy, config)
     packs = build_packs(
-        repo_layer, pr_layer, window, settings.output_reserve_tokens, config.language
+        repo_layer,
+        pr_layer,
+        window,
+        settings.output_reserve_tokens,
+        config.language,
+        # The room kept for the agents' task follows the agents that run (issue #83).
+        [(a.name, a.dimensions) for a in planned.authors],
     )
     # For the report: the whole PR's lines, not only this round's, since GitHub takes
     # inline comments on those. Read with the rest of the code, before any model call.
@@ -370,13 +384,8 @@ def run_review(
         _step(conn, review_id, f"context.groups.{len(packs)}", step)
 
     _check_not_superseded(conn, review_id)
-    dimensions, repeats = mode_plan(config)
-    jobs = [
-        Job(index, len(packs), dimension, pack, run, repeats)
-        for run in range(1, repeats + 1)  # every first run is queued before any second one
-        for index, pack in enumerate(packs, start=1)
-        for dimension in dimensions
-    ]
+    dimensions, repeats = planned.dimensions, planned.runs
+    jobs = plan_jobs(planned, packs)
     # Quick mode publishes what it finds unverified (pipeline design §5).
     verifying = config.mode != "quick"
     if verifying and verifier_for is None:
@@ -573,6 +582,13 @@ class _Work:
         verifier_limits = self._limits(verifier.context_tokens)
 
         def find(job: Job) -> AgentRun:
+            opening = None
+            if job.after_walkthrough:
+                # Waits for the walkthrough, queued first, at most until the latest submit
+                # time; without it the agent opens its own conversation.
+                wait([written], timeout=max(0.0, submit_by - self.clock()))
+                if written.done() and not written.cancelled() and written.exception() is None:
+                    opening = written.result().transcript
             self.starts[job.node] = _utc_now()  # when the job runs, not when it was queued
             meter = UsageMeter(
                 self.budget, review_usage(settings.db_path, self.review_id, job.dimension)
@@ -588,6 +604,8 @@ class _Work:
                 clock=self.clock,
                 limits=finder_limits,
                 slot=lambda: self.slots.held(DIMENSION_TURN),
+                dimensions=job.dimensions or None,
+                opening=opening,
             )
 
         def write() -> WalkthroughRun:
@@ -647,8 +665,10 @@ class _Work:
             return lambda future: self.events.put((kind, item, future))
 
         try:
-            # Queued first, so it is not left waiting for a thread behind the dimensions.
-            finders.submit(write).add_done_callback(done("written", None))
+            # Queued first, so it is not left waiting for a thread behind the dimensions,
+            # and so an agent that carries on from it never waits for a thread it holds.
+            written = finders.submit(write)
+            written.add_done_callback(done("written", None))
             for index, job in enumerate(jobs):
                 finders.submit(find, job).add_done_callback(done("found", index))
             while True:

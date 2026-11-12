@@ -65,6 +65,11 @@ class Settings(BaseSettings):
 
     observability: Observability = Field(default_factory=Observability)
 
+    # Who writes the findings and the walkthrough (D-038): an agent per dimension, one
+    # general agent, or one general agent that writes the walkthrough first and carries
+    # on from it. Verification, merging and the report are the same for all three.
+    strategy: Literal["dimensions", "general", "walkthrough_first"] = "dimensions"
+
     # Safety nets against runaway cost, not design limits (decisions D-009, D-016); to be
     # tuned from measurements on repositories of different sizes (#17). A review's
     # budget counts cached input at a tenth; a repository can only lower it.

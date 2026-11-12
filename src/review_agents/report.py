@@ -171,6 +171,7 @@ _TEXT: dict[Language, dict[str, str]] = {
         "security": "安全",
         "maintainability": "可维护性",
         "verifiability": "可验证性",
+        "general": "通用审查员",
         "did not hand in its findings by the latest submit time": "没在最晚交卷时间前交卷",
         "not started before the latest submit time": "到最晚交卷时间还没开始",
         "the review's deadline passed before it was verified": "到审查截止仍未验完",
@@ -237,6 +238,7 @@ _TEXT: dict[Language, dict[str, str]] = {
         "security": "security",
         "maintainability": "maintainability",
         "verifiability": "verifiability",
+        "general": "general reviewer",
         "did not hand in its findings by the latest submit time": "did not hand in by the"
         " latest submit time",
         "not started before the latest submit time": "had not started by the latest submit time",
