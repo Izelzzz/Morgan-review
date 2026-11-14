@@ -1,0 +1,67 @@
+# review-agents: copy this file to .github/workflows/review-agents.yml in your repository.
+#
+# 1. Add two repository secrets: REVIEW_AGENTS_URL (your service) and REVIEW_AGENTS_SECRET
+#    (the service's shared secret).
+# 2. Replace <commit> below with a full commit SHA of Izelzzz/Morgan-review. Upgrading is
+#    changing that SHA.
+# 3. To block merging on a red result, make the "post" check required in Settings ->
+#    Branches (or Rules). Without that, a red result shows but does not block.
+#
+# pull_request_target gives pull requests from forks the secrets too. It runs with the
+# base branch's workflow, and nothing here checks out or runs the pull request's code:
+# only the service reads it.
+name: review-agents
+
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened]
+  issue_comment:
+    types: [created]
+
+permissions: {}
+
+jobs:
+  review:
+    # A comment starts a review only when it is `/review` on a pull request from a
+    # collaborator. Who wrote it is checked here, before the job joins the concurrency group
+    # below, and again by the action. A comment's run belongs to the default branch, so it
+    # updates the comments but not the PR's required check: the next push does that.
+    if: >-
+      github.event_name == 'pull_request_target' ||
+      (github.event.issue.pull_request && startsWith(github.event.comment.body, '/review') &&
+       contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.comment.author_association))
+    runs-on: ubuntu-latest
+    timeout-minutes: 50
+    # A newer push makes an older review pointless (the service supersedes it as well), so a
+    # push cancels the review in progress. A /review comment waits for it instead: cancelling
+    # a push's review would leave that push with no conclusion.
+    concurrency:
+      group: review-agents-${{ github.event.pull_request.number || github.event.issue.number }}
+      cancel-in-progress: ${{ github.event_name == 'pull_request_target' }}
+    # This token goes to the service: read only.
+    permissions:
+      contents: read
+      issues: read
+      pull-requests: read
+    steps:
+      - uses: Izelzzz/Morgan-review/ci/review@<commit>
+        with:
+          service-url: ${{ secrets.REVIEW_AGENTS_URL }}
+          secret: ${{ secrets.REVIEW_AGENTS_SECRET }}
+
+  post:
+    needs: review
+    # Runs when the review job failed too, so a broken review shows red, not skipped.
+    if: ${{ !cancelled() && needs.review.result != 'skipped' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # One post per PR at a time. Its own group: in the review job's, a queued post would
+    # cancel a newer push's review. A post for an older head leaves the comments alone.
+    concurrency:
+      group: review-agents-post-${{ github.event.pull_request.number || github.event.issue.number }}
+      cancel-in-progress: false
+    # This token never leaves GitHub: it writes the comments.
+    permissions:
+      pull-requests: write
+    steps:
+      - uses: Izelzzz/Morgan-review/ci/post@<commit>

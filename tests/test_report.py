@@ -329,3 +329,13 @@ def test_a_mermaid_arrow_in_model_text_is_kept() -> None:
     result = report([item(severity="robustness", why="A --> B")])
 
     assert "A --> B" in result.summary
+
+
+def test_a_retired_config_option_is_named_with_where_to_set_it_now() -> None:
+    scope = Scope("standard", ["edge_cases"], 1, 1, 1, [], [], False, retired=["block_on_critical"])
+
+    zh = report([], scope=scope).summary.split("### 本次审查的范围")[1]
+    en = report([], "en", scope=scope).summary
+
+    assert "`block_on_critical`" in zh and "分支保护" in zh
+    assert "branch protection" in en

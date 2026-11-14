@@ -76,6 +76,8 @@ class Scope:
     finder_verifies: bool  # no verifier model is configured
     # Quick mode's 🔴 / 🟡 not published because no basis checked out (D-036).
     withheld: int = 0
+    # Options in the repository's config that no longer do anything (D-037).
+    retired: list[str] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -162,6 +164,8 @@ _TEXT: dict[Language, dict[str, str]] = {
         "cannot": "不能证明：没有运行代码和测试；没有发现问题不代表没有问题；规格只来自 PR "
         "描述、关联的 issue 和配置的规格文档；没验完的发现没有发布，不代表它们不成立。",
         "finder_verifies": "验证用的是找问题模型（没有配置验证模型）。",
+        "retired": "仓库配置里的 {names} 已不再使用：是否拦合入，请在 GitHub 的分支保护里把这个检查"
+        "设成必须通过。",
         "this_review": "本次审查",
         "stats": "{mode} 模式 · {tokens} token · {time} · 审查 #{id}",
         "minutes": "{m} 分 {s} 秒",
@@ -229,6 +233,8 @@ _TEXT: dict[Language, dict[str, str]] = {
         " configured spec documents; findings not verified in time were not published, which"
         " does not mean they are wrong.",
         "finder_verifies": "The finder model verified (no verifier model is configured).",
+        "retired": "{names} in the repository's config is no longer used: to block merging,"
+        " make this check required in GitHub's branch protection.",
         "this_review": "This review",
         "stats": "{mode} mode · {tokens} tokens · {time} · review #{id}",
         "minutes": "{m} min {s} s",
@@ -512,6 +518,9 @@ def _scope(
     ]
     if scope.finder_verifies and scope.mode != "quick":
         lines.append(f"- {t['finder_verifies']}")
+    if scope.retired:
+        names = t["join"].join(_code(name) for name in scope.retired)
+        lines.append(f"- {t['retired'].format(names=names)}")
     return lines
 
 

@@ -485,6 +485,7 @@ def run_review(
             binary=binary,
             finder_verifies=verifier_for is None,
             withheld=work.dropped,
+            retired=loaded.retired,
         ),
         stats=Stats(_tokens_used(conn, review_id), clock() - started_at, review_id),
         language=config.language,
