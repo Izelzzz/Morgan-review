@@ -117,6 +117,40 @@ def test_the_token_travels_only_in_the_environment_and_never_reaches_the_mirror(
             assert token.encode() not in path.read_bytes()
 
 
+NETWORK = {
+    "HTTPS_PROXY": "http://proxy.internal:3128",
+    "https_proxy": "http://proxy.internal:3128",
+    "HTTP_PROXY": "http://proxy.internal:3128",
+    "http_proxy": "http://proxy.internal:3128",
+    "NO_PROXY": "localhost",
+    "no_proxy": "localhost",
+    "GIT_SSL_CAINFO": "/etc/ssl/corp.pem",
+    "SSL_CERT_FILE": "/etc/ssl/corp.pem",
+    "SSL_CERT_DIR": "/etc/ssl/certs",
+}
+
+
+def test_git_reaches_the_network_through_the_service_s_proxy_and_cas(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A service behind a proxy could fetch nothing (issue #80).
+    for name, value in NETWORK.items():
+        monkeypatch.setenv(name, value)
+    monkeypatch.setenv("HOME", "/home/someone")  # anything else stays out
+
+    env = git_env("fake-token-value-123")  # secret-scan: allow
+
+    assert {name: env[name] for name in NETWORK} == NETWORK
+    assert "HOME" not in env and env["GIT_CONFIG_GLOBAL"] == os.devnull
+
+
+def test_without_a_proxy_git_gets_no_network_variables(monkeypatch: pytest.MonkeyPatch) -> None:
+    for name in NETWORK:
+        monkeypatch.delenv(name, raising=False)
+
+    assert not set(NETWORK) & set(git_env())
+
+
 def test_git_errors_never_show_the_token(store: MirrorStore, upstream: Upstream) -> None:
     upstream.commit({"a.py": "x = 1\n"}, "init")
     git_dir = store.sync("octo/app", MAIN, [], token=None)
