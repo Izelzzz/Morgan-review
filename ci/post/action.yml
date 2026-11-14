@@ -1,0 +1,21 @@
+name: review-agents post
+description: >-
+  Post the walkthrough, the summary and the new inline comments of a review-agents report,
+  and fail unless the review finished with no 🔴.
+inputs:
+  github-token:
+    description: This job's GITHUB_TOKEN; it needs pull-requests write and nothing more
+    default: ${{ github.token }}
+runs:
+  using: composite
+  steps:
+    - name: Fetch the report
+      uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+      with:
+        name: review-agents-result
+        path: ${{ runner.temp }}/review-agents
+    - name: Post the comments and set the result
+      shell: bash
+      env:
+        GITHUB_TOKEN: ${{ inputs.github-token }}
+      run: python3 "$GITHUB_ACTION_PATH/../review_agents_ci.py" post --result "$RUNNER_TEMP/review-agents/review-agents-result.json"

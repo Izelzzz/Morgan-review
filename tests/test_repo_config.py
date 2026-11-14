@@ -39,7 +39,7 @@ def test_defaults_enable_the_five_dimensions_in_standard_mode() -> None:
         "maintainability",
         "verifiability",
     ]
-    assert (config.mode, config.language, config.block_on_critical) == ("standard", "zh", False)
+    assert (config.mode, config.language) == ("standard", "zh")
 
 
 def test_a_full_valid_config_is_read() -> None:
@@ -140,7 +140,6 @@ def test_skill_additions_only_name_known_dimensions() -> None:
     [
         ("mode: fast\n", "mode"),
         ("language: fr\n", "language"),
-        ("block_on_critical: maybe\n", "block_on_critical"),
         ("dimensons: {security: false}\n", "dimensons"),
         ("limits: {tokens: 10}\n", "limits.tokens"),
         ("custom_rules: [{name: x}]\n", "custom_rules.0.rule"),
@@ -249,3 +248,13 @@ def test_a_tag_named_like_the_branch_is_not_read(repo: Path) -> None:
 def test_a_pr_is_reviewed_ten_rounds_at_most_by_default() -> None:
     # D-039: a PR is often pushed many times; past the limit pushes are not reviewed.
     assert RepoConfig().limits.full_review_rounds == 10
+
+
+@pytest.mark.parametrize("value", ["true", "false", "maybe"])
+def test_a_retired_option_is_ignored_not_an_error(value: str) -> None:
+    # D-037: whether a red result blocks merging is set in GitHub's branch protection.
+    # A config that still has the option keeps the rest of what it says.
+    loaded = parse_repo_config(f"mode: deep\nblock_on_critical: {value}\n")
+
+    assert loaded.errors == [] and loaded.config.mode == "deep"
+    assert loaded.retired == ["block_on_critical"]
