@@ -248,20 +248,26 @@ def tool_loop[T](
         # to the service with the reply: one left unanswered makes it refuse the next
         # request (issue #96). An unreadable submission is a malformed one.
         unreadable: str | None = None
+        answered_bad = False
         for bad in reply.invalid_tool_calls:
             call_id = bad.get("id")
             if call_id is None:  # nothing to answer it by; services always give one
                 continue
             if bad.get("name") == submit.name and submitted is None and unreadable is None:
                 unreadable = call_id
+                answered_bad = True
                 continue
+            answer = NOT_JSON
             if bad.get("name") != submit.name:
                 end.tool_calls += 1
-                if budget.used < budget.limit:
+                if final:  # as for a readable call: retrying the tool would not run it
+                    answer = f"Not run: only {submit.name} is available now."
+                elif budget.used < budget.limit:
                     budget.used += 1  # counted like a call with wrong arguments
-            messages.append(ToolMessage(NOT_JSON, tool_call_id=call_id))
+            messages.append(ToolMessage(answer, tool_call_id=call_id))
+            answered_bad = True
 
-        if submitted is None and unreadable is None and not reply.tool_calls:
+        if not reply.tool_calls and not answered_bad:  # no call that got an answer
             if text_retry_used:
                 end.reason = f"the model answered in text twice instead of calling {submit.name}"
                 return end

@@ -5,7 +5,7 @@ from typing import Any
 
 import pytest
 from gitrepo import Upstream
-from langchain_core.messages import AIMessage, BaseMessage, ToolMessage
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, ToolMessage
 from scripted import ScriptedModel, call
 
 from review_agents.context.pack import SHARED_RULES, ContextPack
@@ -374,6 +374,42 @@ def test_a_call_whose_arguments_are_not_json_gets_an_answer(repo_tools: RepoTool
     assert set(answered) == {"c1", "c2"}
     assert "not valid JSON" in str(answered["c2"].content)
     assert result.tool_calls == 2  # counted like a call with wrong arguments
+
+
+def test_a_turn_of_only_unparsable_calls_is_not_a_text_answer(repo_tools: RepoTools) -> None:
+    model = ScriptedModel(
+        script=[unparsable("read_file"), unparsable("read_file", "bad2"), submit()]
+    )
+
+    result = run(model, repo_tools)
+
+    # Each call was answered, so the model is asked nothing more (review nit on PR #97).
+    assert result.status == "done"
+    asked = [sum(isinstance(m, HumanMessage) for m in sent) for sent in model.sent]
+    assert asked[0] == asked[2]
+    assert result.tool_calls == 2
+
+
+def test_an_unparsable_call_in_a_final_turn_is_not_run(repo_tools: RepoTools) -> None:
+    model = ScriptedModel(script=[unparsable("read_file"), submit()])
+
+    run(model, repo_tools, limit=0)
+
+    answer = model.sent[1][-1]
+    assert isinstance(answer, ToolMessage) and answer.tool_call_id == "bad1"
+    assert f"only {SUBMIT_TOOL} is available" in str(answer.content)
+
+
+def test_an_unparsable_call_without_an_id_counts_as_a_text_answer(repo_tools: RepoTools) -> None:
+    no_id = AIMessage(
+        content="",
+        invalid_tool_calls=[{"name": "read_file", "args": "{", "id": None, "error": None}],
+    )
+    model = ScriptedModel(script=[no_id, submit()])
+
+    run(model, repo_tools)
+
+    assert f"by calling {SUBMIT_TOOL}" in str(model.sent[1][-1].content)
 
 
 def test_an_unparsable_submission_is_answered_and_retried(repo_tools: RepoTools) -> None:
