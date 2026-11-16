@@ -1,0 +1,55 @@
+{
+ "case": "py-mr-increment-001",
+ "run": 3,
+ "model": "deepseek-flash",
+ "seconds": 276.8,
+ "usage": {
+  "prompt_tokens": 3838,
+  "completion_tokens": 51913,
+  "total_tokens": 55751,
+  "prompt_tokens_details": {
+   "cached_tokens": 3584
+  },
+  "completion_tokens_details": {
+   "reasoning_tokens": 51230
+  },
+  "prompt_cache_hit_tokens": 3584,
+  "prompt_cache_miss_tokens": 254
+ },
+ "findings": [
+  {
+   "file": "src/review_agents/context/increment.py",
+   "line_start": 120,
+   "line_end": 133,
+   "severity": "blocking",
+   "title": "Pure deletions of default-branch lines are never reported",
+   "why": "`now` and `before` are built by `_added`, which records only added head-side ranges. A new commit that simply deletes a line from the default branch has no `hunk.added`; the `elif` only fires when the removed lines overlap `before` (lines the PR had previously added). The increment therefore comes back empty even though the author changed the PR by deleting a line. The symmetric case, re-adding a line the PR had previously deleted, is also missed because that line is not an addition against the default branch."
+  },
+  {
+   "file": "src/review_agents/context/increment.py",
+   "line_start": 20,
+   "line_end": 20,
+   "severity": "important",
+   "title": "Diff path parsing breaks on quoted paths and configurable prefixes",
+   "why": "`_FILE` assumes an unquoted `diff --git a/PATH b/PATH` header and splits it with greedy groups. Git still C-quotes paths containing tabs, quotes, backslashes, etc., even with `core.quotePath=false`, and `diff.noprefix`/`diff.mnemonicPrefix` can change the `a/`/`b/` prefixes. When the header does not match, lines 48-49 leave `old_path`/`new_path` at the previous file, so subsequent `@@` hunks are attributed to the wrong file. Paths containing ` b/` can also be split at the wrong delimiter. This silently drops or misattributes review lines."
+  },
+  {
+   "file": "src/review_agents/context/increment.py",
+   "line_start": 131,
+   "line_end": 133,
+   "severity": "robustness",
+   "title": "Removal fallback can return a line that is not in the head tree",
+   "why": "`at` is `max(new_start, 1)`. If a removal hunk empties a file or deletes it entirely, `new_start` is 0 and the code records `(1, 1)` for a path that has no line 1, or no file at all, at `head`. `Increment.lines` is documented as head-side lines, so downstream code that anchors comments to `head` can fail or target the wrong location."
+  },
+  {
+   "file": "src/review_agents/context/increment.py",
+   "line_start": 104,
+   "line_end": 113,
+   "severity": "robustness",
+   "title": "Diff does not disable textconv filters",
+   "why": "`git diff` enables textconv by default; `--no-ext-diff` only disables external diff drivers. A PR's `.gitattributes` can still select a configured textconv driver, causing a helper to run on untrusted repository content and making hunk line numbers refer to converted text rather than the real head file. The resulting ranges can then be wrong. Add `--no-textconv`."
+  }
+ ],
+ "content": null,
+ "error": null
+}

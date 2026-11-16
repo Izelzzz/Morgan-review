@@ -1,0 +1,46 @@
+{
+ "case": "py-mr-basis-001",
+ "run": 3,
+ "model": "deepseek-flash",
+ "seconds": 229.8,
+ "usage": {
+  "prompt_tokens": 14991,
+  "completion_tokens": 42384,
+  "total_tokens": 57375,
+  "prompt_tokens_details": {
+   "cached_tokens": 14848
+  },
+  "completion_tokens_details": {
+   "reasoning_tokens": 41763
+  },
+  "prompt_cache_hit_tokens": 14848,
+  "prompt_cache_miss_tokens": 143
+ },
+ "findings": [
+  {
+   "file": "src/review_agents/pipeline/basis.py",
+   "line_start": 110,
+   "line_end": 115,
+   "severity": "important",
+   "title": "A quote spanning a blank line is never found in its file",
+   "why": "`_squash` turns a blank or whitespace-only line into \"\", but the squashed parts are joined with a single space (`\" \".join(parts)`), so every blank line leaves a run of two or more spaces in the searched text, while `_squash(quote)` can never contain a double space. A quote that is verbatim in the file but crosses a paragraph break therefore fails `.find`, the basis is marked \"failed\" with \"the quote is not in <path>\", the verifier is told the program could not confirm it, and quick mode drops the 🔴/🟡 finding entirely. The docstring's promise (\"whitespace not counted\") is not met; the PR/issue branches squash the whole text, so the same quote checks out there and fails here."
+  },
+  {
+   "file": "src/review_agents/pipeline/basis.py",
+   "line_start": 158,
+   "line_end": 168,
+   "severity": "important",
+   "title": "A quote occurring twice is 'corrected' to its first occurrence, discarding correct lines",
+   "why": "`_find` returns the first match in the file, and when the model's cited range does not contain that first match the code assumes the lines are wrong and rewrites `source` to the first occurrence. If the rule is restated in the file (common in conventions/spec files), a model that cited the second, correct occurrence has its source replaced by an unrelated place; the basis is stored as \"corrected\", which `checked_out`/`supported` treat as confirmed, and `describe` tells the verifier \"the files, lines and quote are there\". The finding is then judged against code it does not describe, and in quick mode it is published on a fabricated location."
+  },
+  {
+   "file": "src/review_agents/migrations/0008_basis.sql",
+   "line_start": 3,
+   "line_end": 4,
+   "severity": "robustness",
+   "title": "Dropping `evidence` destroys the justification of every already-published finding",
+   "why": "The new column is added with `DEFAULT '[]'` and `evidence` is then dropped with no backfill, so every finding stored by an earlier run loses its reason permanently and comes back from the API as `basis: []`. Reviews already in the database (shown through the findings API and carried into later rounds) become unexplained, and the loss is irreversible. Also, `DROP COLUMN` aborts the migration (and hence startup) if anything in the existing schema - an index, view or trigger - still references `evidence`."
+  }
+ ],
+ "content": null
+}

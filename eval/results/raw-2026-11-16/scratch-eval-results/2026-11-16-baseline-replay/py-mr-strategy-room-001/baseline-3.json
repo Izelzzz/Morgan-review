@@ -1,0 +1,63 @@
+{
+ "case": "py-mr-strategy-room-001",
+ "run": 3,
+ "model": "deepseek-flash",
+ "seconds": 263.5,
+ "usage": {
+  "prompt_tokens": 9605,
+  "completion_tokens": 52932,
+  "total_tokens": 62537,
+  "prompt_tokens_details": {
+   "cached_tokens": 9471
+  },
+  "completion_tokens_details": {
+   "reasoning_tokens": 51717
+  },
+  "prompt_cache_hit_tokens": 9471,
+  "prompt_cache_miss_tokens": 134
+ },
+ "findings": [
+  {
+   "file": "src/review_agents/pipeline/strategy.py",
+   "line_start": 55,
+   "line_end": 58,
+   "severity": "important",
+   "title": "plan() builds a general author holding no dimensions when none are enabled, which crashes the run",
+   "why": "mode_plan() returns an empty list when a repo config enables no dimension (previously that produced zero agents, since run.py's mode_plan just returned []). plan() only special-cases len(dimensions) == 1, so the empty list falls into the else branch and yields Author(GENERAL, ()), an author whose rules are nothing. plan_jobs turns that into a Job with dimension='general' and dimensions=(), find passes `job.dimensions or None` (empty tuple is falsy), so run_dimension recomputes `held = (dimension,) = ('general',)` and reaches pack.messages('general', ...) -> task('general', ('general',)) -> SKILLS['general'], a KeyError raised inside the finder thread. The review dies instead of running (or reporting that nothing was reviewed)."
+  },
+  {
+   "file": "src/review_agents/pipeline/agent.py",
+   "line_start": 350,
+   "line_end": 352,
+   "severity": "robustness",
+   "title": "An untrusted tag is replaced by the pseudo-dimension 'general', which is not one of DIMENSIONS",
+   "why": "For a general agent (`held` has several dimensions) a tag the agent does not hold, or a misspelt one, is overwritten with the agent's name, i.e. the literal 'general'. That value is not in DIMENSIONS, is never produced by Plan.dimensions, and has no entry in contexts keyed by dimension (SKILLS, per-dimension ranking/summary buckets, anything that maps a finding's dimension back to the review's dimensions). Findings tagged by the model but outside `held` therefore leave the invariant that a finding's dimension is one the review ran: at best they are missing from the per-dimension summary/counts, at worst a dimension-keyed lookup raises. The fallback should clamp to one of `held` (or drop the finding), not invent a name that exists only in the report's translation table."
+  },
+  {
+   "file": "src/review_agents/pipeline/agent.py",
+   "line_start": 320,
+   "line_end": 323,
+   "severity": "important",
+   "title": "The carried-over walkthrough conversation is not counted against the context window or the run limits",
+   "why": "Every conversation is sized from fixed_tokens, which assumes the fixed part is shared rules + prefix + one task. With `opening` the finder instead starts with the walkthrough's whole conversation: the complete pack (possibly several groups' worth of diff and module summaries) plus every tool result the walkthrough read, which can already be close to a full window on its own, and then the general task with all dimensions' rules is appended on top. Nothing adds those tokens to the accounting: fixed_tokens ignores the opening and the UsageMeter is seeded only from already-recorded usage. So the first call of a walkthrough_first agent can already exceed the model's context window (provider error -> the agent ends 'incomplete') or the per-run limit (the loop stops immediately), and the strategy silently produces no findings on exactly the large PRs it is meant for."
+  },
+  {
+   "file": "src/review_agents/context/pack.py",
+   "line_start": 103,
+   "line_end": 104,
+   "severity": "robustness",
+   "title": "fixed_tokens now reserves the general agent's (all-dimensions) task for every strategy, including the default",
+   "why": "Taking the max over `task(GENERAL, DIMENSIONS)` charges every review the tokens of all five dimensions' skills concatenated, even under the default `dimensions` strategy where no agent ever holds more than one dimension's rules. fixed_tokens is the fixed part used to size what a conversation can hold, so the default (unchanged) path now keeps thousands more tokens free per conversation than it used: less PR content per group / more groups and more calls, a silent cost and latency regression for the strategy that does not need it. The reservation should depend on the strategy (or at least on the dimensions the planned authors actually hold)."
+  },
+  {
+   "file": "src/review_agents/pipeline/run.py",
+   "line_start": 579,
+   "line_end": 585,
+   "severity": "robustness",
+   "title": "The wait for the walkthrough is bounded only by the finding deadline, so a slow walkthrough silently wastes the whole window",
+   "why": "`wait([written], timeout=max(0.0, submit_by - self.clock()))` parks the finder until the latest submit time. If the walkthrough is slow (or hangs on a slot/model call) the first-group agents are only released at the deadline, start with no time left and are cut off; the report then shows 'did not hand in by the latest submit time' for the only finding agent, i.e. under walkthrough_first a slow walkthrough turns into a review with no findings at all instead of falling back to a fresh conversation earlier. There is no separate, shorter bound on how long the agents may wait for the walkthrough, and the waiting job also occupies a finders worker for that whole period."
+  }
+ ],
+ "content": null,
+ "error": null
+}

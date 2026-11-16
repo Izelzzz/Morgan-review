@@ -1,0 +1,78 @@
+{
+ "case": "py-mr-pipeline-run-001",
+ "run": 1,
+ "model": "deepseek-flash",
+ "seconds": 165.1,
+ "usage": {
+  "prompt_tokens": 10699,
+  "completion_tokens": 32599,
+  "total_tokens": 43298,
+  "prompt_tokens_details": {
+   "cached_tokens": 0
+  },
+  "completion_tokens_details": {
+   "reasoning_tokens": 31256
+  },
+  "prompt_cache_hit_tokens": 0,
+  "prompt_cache_miss_tokens": 10699
+ },
+ "findings": [
+  {
+   "file": "src/review_agents/pipeline/run.py",
+   "line_start": 245,
+   "line_end": 255,
+   "severity": "important",
+   "title": "The superseded check is outside the write transaction, so a superseded review can still publish",
+   "why": "The last `_check_not_superseded` runs before `BEGIN IMMEDIATE`, and the transaction itself does git I/O per finding (`fingerprint` -> `snapshot.read_text`), so the window between the check and `COMMIT` is not microseconds but the whole insert loop. A newer push that sets `superseded_by` in that window still gets the old review's findings and `limit_hit` written, which is exactly what D-010 forbids. The check has to be the first statement inside the `BEGIN IMMEDIATE` transaction (or the update must be guarded on `superseded_by IS NULL`)."
+  },
+  {
+   "file": "src/review_agents/worker.py",
+   "line_start": 32,
+   "line_end": 36,
+   "severity": "important",
+   "title": "A re-queued review re-runs the pipeline without clearing what the earlier attempt wrote",
+   "why": "D-021 makes a running review claimable again, but a review can be `running` because the process died after `run_review` committed its findings and before the worker marked it done. The second attempt appends the same findings and the same `steps` nodes (`mirror.sync`, `dimension.security`, ...) again: the review ends up with duplicated findings, and if `findings`/`steps` carry a uniqueness constraint the retried review dies on the first insert instead. The write transaction needs `DELETE FROM findings WHERE review_id = ?` (and steps) or the inserts need to be idempotent."
+  },
+  {
+   "file": "src/review_agents/pipeline/run.py",
+   "line_start": 341,
+   "line_end": 355,
+   "severity": "important",
+   "title": "Background summary build takes no repository lock and no mirror lock",
+   "why": "`build()` calls `module_summaries` on its own connection while `repo_layer_for_review` builds and prunes the same repository under `_locks[repo]`; the guard here is only a per-repo 'is a thread alive' check, so a build started for review N can overlap the foreground build of review N+1 for the same repo. That means two writers on `context_cache` for one repo (lost/duplicated summary rows, `database is locked` swallowed by the `except Exception`), plus a `prune` in the foreground build that can delete the rows the background build just wrote. The thread also resolves `Snapshot.at_branch(git_dir, ...)` and reads git objects with no coordination with `MirrorStore.sync`, so it can read a mirror another review is fetching/checking out."
+  },
+  {
+   "file": "src/review_agents/pipeline/run.py",
+   "line_start": 302,
+   "line_end": 307,
+   "severity": "robustness",
+   "title": "Dimensions left behind at the deadline keep running after the review is written",
+   "why": "`shutdown(wait=False, cancel_futures=True)` only cancels jobs that never started; a running job's thread keeps going for as long as its current model call allows, still writing usage rows via `review_usage(settings.db_path, ...)` and reading the mirror after `run_review` has committed (or rolled back) and the worker has settled the review. Those late writes contend with the `BEGIN IMMEDIATE` write lock and can make the final commit fail with 'database is locked' after all the work, and they attribute usage to a review whose step already says it never finished. The pool's threads are also non-daemon, so a stuck call delays interpreter shutdown."
+  },
+  {
+   "file": "src/review_agents/pipeline/run.py",
+   "line_start": 107,
+   "line_end": 109,
+   "severity": "robustness",
+   "title": "Fingerprint of an unreadable file ignores the finding and collides",
+   "why": "When `read_text` returns None the fingerprint is `file + 'lines start-end'` only, so two different problems reported in the same binary or oversized file over the same line range get the same fingerprint, and so do findings whose line range is empty (e.g. `line_start` past the end of the file, where the slice yields no lines). They are then indistinguishable for dedupe, and if the findings table enforces fingerprint uniqueness the second insert aborts the whole transaction. The title/why or the dimension at least has to take part when there is no code to hash."
+  },
+  {
+   "file": "src/review_agents/pipeline/run.py",
+   "line_start": 256,
+   "line_end": 258,
+   "severity": "robustness",
+   "title": "A failing ROLLBACK replaces the real error",
+   "why": "`except BaseException: conn.execute('ROLLBACK'); raise` assumes the transaction is still open. When the failure was the `COMMIT` itself (disk full) or the connection is broken, SQLite may already have rolled back, and `ROLLBACK` then raises 'cannot rollback - no transaction is active', masking the original exception the worker records in the review's error. The rollback has to be wrapped so the original exception propagates."
+  },
+  {
+   "file": "src/review_agents/pipeline/run.py",
+   "line_start": 249,
+   "line_end": 253,
+   "severity": "robustness",
+   "title": "Git file reads run inside the SQLite write transaction",
+   "why": "`fingerprint` calls `snapshot.read_text` (a git subprocess per finding) inside the `BEGIN IMMEDIATE` block, so the database write lock is held across all of the review's file reads while every other writer - the background summary thread and the usage meters of dimensions still running - waits on it. With a review of any size those writers hit the busy timeout and their writes are lost (summaries, usage), and other reviews' writes are blocked for the same time. Fingerprints should be computed before the transaction is opened."
+  }
+ ],
+ "content": null
+}

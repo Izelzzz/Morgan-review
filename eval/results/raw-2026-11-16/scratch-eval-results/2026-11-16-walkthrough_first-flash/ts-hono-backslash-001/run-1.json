@@ -1,0 +1,159 @@
+{
+ "id": 7,
+ "repo": "izelcompany/morgan-eval",
+ "pr": 3,
+ "base_sha": "783ce98b9c3743779f5b2ed6b607cff51c0eea5a",
+ "head_sha": "060e6b95790949333840c52031ada9b44e74d262",
+ "round": 1,
+ "mode": "standard",
+ "status": "done",
+ "error": null,
+ "limit_hit": null,
+ "superseded_by": null,
+ "created_at": "2026-11-16T07:03:14.550Z",
+ "started_at": "2026-11-16T07:03:15.542Z",
+ "finished_at": "2026-11-16T07:06:14.769Z",
+ "report": {
+  "summary": "<!-- review-agents:summary -->\n## 审查结论：未发现阻断问题\n\n### 🟡 重要（1）\n- 反斜杠归一化只替换第一个，Windows 多级路径仍带反斜杠 — `src/utils/filepath.ts:25-26`（见行间评论；边界问题、规格漂移都发现了；同类问题还在：`src/utils/filepath.ts:14-19`）\n\n### 🔵 健壮性建议（1）\n- POSIX 上文件名里合法的反斜杠被当成分隔符，兼容性变化未声明 — `src/utils/filepath.ts:23-26`\n  原因：仓库同时支持 macOS、Linux 和 Bun/Deno 的本地静态服务，反斜杠在这些平台上属于合法的文件名字符。PR 描述只说明「支持 Windows」，没有说明这会改变 POSIX 上已有文件的可达性，但改动后这些文件无法再通过 serveStatic 访问。\n  - 依据 · 路径\n    1. `src/adapter/deno/serve-static.ts:27-32`：请求路径经 decodeURI 解码后作为 filename 传给 getFilePath，因此 URL 中的 %5C 变成真实的反斜杠。\n    2. `src/utils/filepath.ts:23-26`：先剥掉开头的 / 或 .\\，再把第一个反斜杠无条件替换成 /，把 Windows 分隔符语义套用到所有平台。\n    3. `src/adapter/deno/serve-static.ts:36-41`：用 `./` 加返回的 path 去 open 文件，所以 path 里分隔符的改变直接决定最终能否命中文件。\n    为什么：改动前 `/a%5Cb.txt` 解码后为 `/a\\b.txt`，去掉开头斜杠后原样返回 `a\\b.txt`，open(`./a\\b.txt`) 在 Linux/macOS 上可以打开这个合法文件名的文件；改动后结果为 `a/b.txt`，open 的是另一个路径，原本可访问的文件变成 404，同时 filepath.ts:9 的新正则还会把包含 `\\..\\` 的这类合法文件名直接判为穿越。\n  建议：若确认要按 Windows 语义处理反斜杠，请在 PR 描述或注释中写明这是有意的行为变化；否则只在检测到 Windows 风格分隔符（例如同时出现 `\\` 且不含 `/`，或运行在 win32）时才做归一化和穿越判断。\n\n### 本次审查的范围\n- 审了：规格漂移、边界问题、安全、可维护性、可验证性（各 1 次）· 3 个改动文件\n- 没审：改动文件都看了，各维度都交了卷\n- 能证明：发布的每条 🔴 / 🟡 都有程序核对过的依据，并经验证审查员重新读代码确认；引用的规则原文确实在所写的位置。\n- 不能证明：没有运行代码和测试；没有发现问题不代表没有问题；规格只来自 PR 描述、关联的 issue 和配置的规格文档；没验完的发现没有发布，不代表它们不成立。\n\n### 本次审查\nStandard 模式 · 517,483 token · 2 分 59 秒 · 审查 #7\n\n<!-- review-agents:counts {\"blocking\": 0, \"important\": 1, \"robustness\": 1, \"nit\": 0, \"complete\": true} -->\n",
+  "comments": [
+   {
+    "path": "src/utils/filepath.ts",
+    "start_line": 25,
+    "line": 26,
+    "body": "**🟡 重要 · 反斜杠归一化只替换第一个，Windows 多级路径仍带反斜杠**\n\nPR 的核心目的就是让 Windows 风格路径可用，但现在只处理了第一个分隔符：多级 Windows 路径（`a\\b\\c.png`）输出仍是 `a/b\\c.png`，在 Cloudflare Workers 的 manifest/KV 查找中失配并静默返回 404，用户看到的是「文件明明存在却 404」。新增测试也覆盖不到，因为 `src/utils/filepath.test.ts:29-36` 的输入在剥离开头后最多只剩一个反斜杠。\n\n- 依据 · 规格 PR 描述\n  > This PR makes `filepath` util supports Windows and prevents the path traversal on Windows.\n  - `src/utils/filepath.ts:25-26`：注释声明 `foo\\bar.txt` 会变成 `foo/bar.txt`，但 `replace(/\\\\/, '/')` 缺少 `g` 标志，只改写第一处反斜杠。\n  - `src/utils/filepath.test.ts:29-41`：新增用例的输入经 `slashToBackslash` 换行后，剥离开头分隔符后最多只剩一个反斜杠，因此覆盖不到多级 Windows 路径。\n  为什么：PR 的目标是让 Windows 风格路径被统一归一化为 `/`，但代码只归一化第一个反斜杠，`assets\\img\\logo.png` 会得到 `assets/img\\logo.png`，仍残留反斜杠，与该目标不符，且测试无法发现。\n- 依据 · 路径\n  1. `src/adapter/cloudflare-workers/serve-static.ts:28-33`：filename 来自 `options.path` 或 `rewriteRequestPath` 的返回值，原样传给 getFilePath。\n  2. `src/utils/filepath.ts:26`：只把第一处反斜杠替换为 `/`，其余反斜杠保留在 path 中。\n  3. `src/utils/cloudflare.ts:38-43`：把 path 直接作为 manifest key 查询，再用它做 KV get。\n  4. `src/adapter/cloudflare-workers/serve-static.test.ts:86-88`：manifest 的 key 全部以 `/` 分隔，例如 `'assets/static/options/foo.txt'`。\n  为什么：含残留反斜杠的 path 无法命中以 `/` 分隔的 manifest key，KV 取不到内容，请求被当作静态文件不存在继续 next()；该缺陷只在按字符串匹配资源键这类路径上暴露，因此不是必现，但属于该改动未完成归一化造成的真实错误结果。\n\n**建议：**把替换改为全局匹配 `filename.replace(/\\\\/g, '/')`，并补一条含多个反斜杠的用例（如 `assets\\\\img\\\\logo.png` 期望 `assets/img/logo.png`）。\n\n边界问题、规格漂移都发现了；同类问题还在：`src/utils/filepath.ts:14-19`\n\n<!-- review-agents:finding 87116861782191af58f993ee2e0fdf1008c2ee2d1627bf4df253a10ee400ac2f -->\n"
+   }
+  ],
+  "counts": {
+   "blocking": 0,
+   "important": 1,
+   "robustness": 1,
+   "nit": 0,
+   "complete": true
+  },
+  "walkthrough": "<!-- review-agents:walkthrough -->\n## 📖 改动说明\n\nPR #3 · 3 个文件 · **+23 −4** · 1 次提交\n\n**一句话：** `getFilePath` 现在把反斜杠当作路径分隔符：拦截 Windows 风格的 `..\\` 目录穿越，并把文件名里的反斜杠改写成 `/`，同时补上反斜杠测试并同步 `deno_dist`。\n\n#### 为什么改 — 共用的静态文件路径解析在 Windows 风格路径下既不认分隔符，也挡不住 `..\\` 穿越\n- `getFilePath` 是三个 `serveStatic` 适配器的公共入口：Bun、Deno 和 Cloudflare Workers（`src/adapter/bun/serve-static.ts:29-34`、`src/adapter/deno/serve-static.ts:27-32`、`src/adapter/cloudflare-workers/serve-static.ts:28-33`）\n- 改动前只有 `^` 或 `/` 之后的 `..` 才被当作穿越，`..\\..\\secret.txt` 这类写法能通过检查\n- 改动前不会把 `\\` 归一化成 `/`，Windows 风格路径拼出来的路径或 KV key 与磁盘、资源清单中的不一致\n- PR 描述只说明「支持 Windows 并阻止 Windows 上的路径穿越」，仓库中没有对应的 issue 或 spec 可对照\n\n#### 改了什么 — 改了三个正则、加了一条反斜杠替换，并补上反斜杠用例\n- `src/utils/filepath.ts:9` 的穿越检查把反斜杠加进两侧字符类，`\\..\\`、`.\\..\\` 也会返回 `undefined`\n- `src/utils/filepath.ts:23` 的开头剥离从 `^\\.?\\/` 放宽为 `^\\.?[\\/\\\\]`，单个开头的 `\\` 也会被去掉\n- `src/utils/filepath.ts:26` 是新增语句，把文件名里的反斜杠替换成 `/`，但正则没有 `g` 标志，只替换第一个\n- `src/utils/filepath.test.ts:29-36` 用 `slashToBackslash` 把已有用例改成反斜杠版本；`deno_dist/utils/filepath.ts` 与 `src` 逐行一致\n\n#### 有什么影响 — 穿越检查在 Windows 风格输入下生效，归一化只覆盖一部分情况\n- 安全：以反斜杠分隔的 `..` 现在被拦下，中间件静默 `next()`，不再去读资源目录之上的文件\n- 兼容：请求路径来自 `new URL(c.req.url).pathname`，总是 `/`；反斜杠只可能来自 `options.path` 或 `rewriteRequestPath` 的返回值（`src/adapter/deno/serve-static.ts:27-32`）\n- 结果：`filename.endsWith('/')` 的目录判断（`src/utils/filepath.ts:14`）和 `root` 的尾斜杠剥离（`src/utils/filepath.ts:29`）仍只认 `/`，以反斜杠结尾的目录路径会得到 `foo//index.html` 这样的结果\n- 结果：只有第一个反斜杠会被改写，`static\\foo\\bar.txt` 会变成 `static/foo\\bar.txt`；新增测试里每个路径剥离开头后最多只剩一个反斜杠\n\n```mermaid\nflowchart TD\n  A[\"filename = options.path 或 decodeURI(url.pathname)\"] --> B{\"含 .. 段？\"}\n  B -- \"是\" --> C[\"返回 undefined，中间件 next()\"]\n  B -- \"否\" --> D{\"以 / 结尾或无扩展名\"}\n  D -- \"是\" --> E[\"拼接 defaultDocument\"]\n  D -- \"否\" --> F[\"保持原样\"]\n  E --> G[\"去掉开头 ./ 或 / 或反斜杠\"]\n  F --> G\n  G --> H[\"把第一个反斜杠改成 /\"]\n  H --> I[\"root + / + filename\"]\n  I --> J[\"再去掉开头 ./ 或 /\"]\n```\n\n<details>\n<summary><b>01　为什么要改</b>（3 个问题）</summary>\n\n1. **反斜杠分隔的 `..` 绕过目录穿越检查** — 改动前 `/(?:^|\\/)\\.\\.(?:$|\\/)/` 只把 `/` 视为分隔符，`..\\..\\etc\\passwd` 不会被判定为穿越，`getFilePath` 会返回一条指向上层目录的路径，`serveStatic` 随即按它去读文件或 KV key。\n2. **Windows 风格路径没有归一化成 `/`** — 磁盘路径和资源清单里的 key 都以 `/` 分隔，而改动前 `\\` 原样留在结果里，`getMimeType` 与 KV 查询都拿到一个带反斜杠的键，静态文件因此找不到或被当作另一个文件。\n3. **测试只覆盖 `/` 分隔符** — 原有 `src/utils/filepath.test.ts:19-27` 的用例全是正斜杠，无法回归验证 Windows 风格输入，穿越修复和归一化都没有断言保护。\n\n</details>\n\n<details>\n<summary><b>02　怎么改的</b>（3 处改动）</summary>\n\n**1. 入口处的穿越检查：`src/utils/filepath.ts:9`**\n\n请求一进入函数就先做这道检查，命中即返回 `undefined`，调用方看到空值后直接 `next()`。\n\n| | 正则 | 会拦下的输入 |\n|---|---|---|\n| 改动前 | `/(?:^|\\/)\\.\\.(?:$|\\/)/` | `/../foo`、`../foo`、`./../foo` |\n| 改动后 | `/(?:^|[\\/\\\\])\\.\\.(?:$|[\\/\\\\])/` | 以上全部，外加 `\\..\\foo`、`.\\..\\foo`、`foo\\..` |\n\n`foo..bar.txt`、`..foo/bar.txt` 这类只是包含两个点、并非完整 `..` 段的路径仍会放行。\n\n**2. 默认文档与分隔符归一化：`src/utils/filepath.ts:14-26`**\n\n顺序仍是「先决定是否补默认文档，再剥离开头，最后拼 `root`」，新增的只有反斜杠处理：\n\n1. `src/utils/filepath.ts:14` 判断 `filename.endsWith('/')`，以 `/` 结尾的目录路径直接接上默认文档；以反斜杠结尾的不在这一支里，会走下面「无扩展名」分支，得到 `foo\\` 加 `/index.html` 的结果。\n2. `src/utils/filepath.ts:17-20` 无扩展名时补 `'/' + defaultDocument`。\n3. `src/utils/filepath.ts:23` 去掉开头的 `./`、`/`、`.\\`、`\\`。\n4. `src/utils/filepath.ts:26` 是新增语句，把第一个 `\\` 换成 `/`，注释举例 `foo\\bar.txt => foo/bar.txt`；正则没有 `g`，所以后面再出现反斜杠会保留。\n\n后续 `src/utils/filepath.ts:29` 的 `root` 尾斜杠剥离和 `src/utils/filepath.ts:33` 的最终 `^\\.?\\/` 剥离没有改动，仍只认 `/`。\n\n**3. 测试与 `deno_dist` 同步：`src/utils/filepath.test.ts:29-36`**\n\n新增 8 条断言复用原有输入，通过 `src/utils/filepath.test.ts:40-42` 的 `slashToBackslash` 把 `/` 换成 `\\`：\n\n| 输入（反斜杠化后） | 期望 |\n|---|---|\n| `\\..\\foo`、`.\\..\\foo` | `undefined` |\n| `\\foo..bar.txt`、`.\\foo..bar.txt`、`foo..bar.txt` | `foo..bar.txt` |\n| `.\\..foo\\bar.txt`、`.\\foo..\\bar.txt`、`.\\..foo..\\bar.txt` | 开头 `./` 去掉、反斜杠变 `/` 后的相同路径 |\n\n`deno_dist/utils/filepath.ts:9-26` 是同一份代码的 Deno 版本，与本改动一致，符合 PR 勾选的 `yarn denoify`。\n\n</details>\n\n#### 有什么影响\n\n| 方面 | 影响 |\n| --- | --- |\n| security | 改用反斜杠分隔的 `..` 不再能穿过资源目录；这道检查是 `serveStatic` 读文件或 KV 资源前唯一的路径过滤。 |\n| results users see | `rewriteRequestPath` 返回 Windows 风格路径的应用，现在拿到的是用 `/` 拼接的路径；只含一个反斜杠的路径被完整归一化，多个反斜杠时结果会是混合分隔符。 |\n| failure behaviour | 检查命中时 `getFilePath` 返回 `undefined`，三个适配器都只是 `next()`（如 `src/adapter/deno/serve-static.ts:34`），不会抛错，也不会向客户端暴露路径信息。 |\n| compatibility | URL 自带的 pathname 只用 `/`，行为不变；只有显式传入 `options.path` 或 `rewriteRequestPath` 用到反斜杠时结果才不同，影响面限于这两个选项的既有使用者。 |\n\n> [!WARNING]\n> **部署时注意**\n> - 无需迁移或改配置；若应用在 Windows 上通过 `rewriteRequestPath` 或 `path` 传入反斜杠路径，升级后这些路径会被剥离开头并被改写成 `/`，或以 `undefined` 结束请求处理。\n\n<details>\n<summary><b>取舍</b>（1 条）</summary>\n\n| 情况 | 这次的做法 | 理由 |\n| --- | --- | --- |\n| 同一个文件名里可能同时出现 `/` 和多个 `\\` | 用不带 `g` 的 `replace(/\\\\/, '/')` 只转换第一个反斜杠（`src/utils/filepath.ts:26`），而不是全部转换 | PR 描述只说明支持 Windows 与阻止穿越，没有说明为何只做单次替换；新增测试的输入在剥离开头后也都只含一个反斜杠。 |\n\n</details>\n\n<details>\n<summary><b>改动分布</b>（3 个文件）</summary>\n\n| 文件 | 增 | 删 |\n| --- | ---: | ---: |\n| `src/utils/filepath.test.ts` | 13 | 0 |\n| `deno_dist/utils/filepath.ts` | 5 | 2 |\n| `src/utils/filepath.ts` | 5 | 2 |\n\n</details>\n"
+ },
+ "findings": [
+  {
+   "fingerprint": "87116861782191af58f993ee2e0fdf1008c2ee2d1627bf4df253a10ee400ac2f",
+   "primary_dimension": "spec_drift",
+   "dimensions": [
+    "edge_cases",
+    "spec_drift"
+   ],
+   "severity": "important",
+   "preexisting": false,
+   "file": "src/utils/filepath.ts",
+   "line_start": 25,
+   "line_end": 26,
+   "title": "反斜杠归一化只替换第一个，Windows 多级路径仍带反斜杠",
+   "body": "PR 的核心目的就是让 Windows 风格路径可用，但现在只处理了第一个分隔符：多级 Windows 路径（`a\\b\\c.png`）输出仍是 `a/b\\c.png`，在 Cloudflare Workers 的 manifest/KV 查找中失配并静默返回 404，用户看到的是「文件明明存在却 404」。新增测试也覆盖不到，因为 `src/utils/filepath.test.ts:29-36` 的输入在剥离开头后最多只剩一个反斜杠。",
+   "basis": [
+    {
+     "kind": "spec",
+     "source": "pr",
+     "quote": "This PR makes `filepath` util supports Windows and prevents the path traversal on Windows.",
+     "places": [
+      {
+       "file": "src/utils/filepath.ts",
+       "line_start": 25,
+       "line_end": 26,
+       "shows": "注释声明 `foo\\bar.txt` 会变成 `foo/bar.txt`，但 replace 的正则没有 g 标志，只会改写第一处反斜杠。"
+      }
+     ],
+     "explanation": "输入含两个及以上反斜杠时（如 `assets\\img\\logo.png`）结果是 `assets/img\\logo.png`，仍然保留反斜杠，没有达到 PR 所述「支持 Windows」所需的统一为 `/`。",
+     "check": {
+      "status": "ok",
+      "problem": null
+     }
+    },
+    {
+     "kind": "path",
+     "source": null,
+     "quote": null,
+     "places": [
+      {
+       "file": "src/adapter/cloudflare-workers/serve-static.ts",
+       "line_start": 28,
+       "line_end": 33,
+       "shows": "filename 来自 `options.path` 或 `rewriteRequestPath` 的返回值，原样交给 getFilePath。"
+      },
+      {
+       "file": "src/utils/filepath.ts",
+       "line_start": 26,
+       "line_end": 26,
+       "shows": "只把第一个反斜杠替换成 `/`，剩余反斜杠留在 path 中。"
+      },
+      {
+       "file": "src/utils/cloudflare.ts",
+       "line_start": 38,
+       "line_end": 38,
+       "shows": "把 path 直接当作 manifest 的 key 去查，再拿结果做 KV get。"
+      },
+      {
+       "file": "src/adapter/cloudflare-workers/serve-static.test.ts",
+       "line_start": 86,
+       "line_end": 88,
+       "shows": "manifest 的 key 使用 `/` 分隔，例如 `'assets/static/options/foo.txt'`。"
+      }
+     ],
+     "explanation": "带残留反斜杠的 path 命中不了 manifest key，KV get 取不到内容，请求被当作静态文件不存在继续 next()；在 Windows 上直接读文件时混合分隔符通常还能被文件系统接受，所以这个问题只在按字符串匹配资源键的路径上暴露。",
+     "check": {
+      "status": "ok",
+      "problem": null
+     }
+    }
+   ],
+   "verdict": "{\"holds\": true, \"reason\": \"\\u4ee3\\u7801\\u786e\\u8ba4 `filename.replace(/\\\\\\\\/, '/')` \\u6ca1\\u6709 `g` \\u6807\\u5fd7\\uff0c\\u591a\\u7ea7 Windows \\u8def\\u5f84\\u53ea\\u4f1a\\u5f52\\u4e00\\u5316\\u7b2c\\u4e00\\u4e2a\\u5206\\u9694\\u7b26\\uff0c\\u8fd9\\u4e0e PR \\u58f0\\u79f0\\u7684 Windows \\u652f\\u6301\\uff08\\u7edf\\u4e00\\u4e3a `/`\\uff09\\u4e0d\\u7b26\\uff0c\\u5e76\\u4f1a\\u4f7f manifest/KV \\u8fd9\\u7c7b\\u6309\\u5b57\\u7b26\\u4e32\\u5339\\u914d\\u7684\\u67e5\\u627e\\u5931\\u914d\\uff1b\\u6d4b\\u8bd5\\u8f93\\u5165\\u4e5f\\u8986\\u76d6\\u4e0d\\u5230\\u8be5\\u60c5\\u5f62\\uff0c\\u6545\\u6309 important \\u6210\\u7acb\\u3002\", \"basis\": [{\"kind\": \"spec\", \"source\": \"pr\", \"quote\": \"This PR makes `filepath` util supports Windows and prevents the path traversal on Windows.\", \"places\": [{\"file\": \"src/utils/filepath.ts\", \"line_start\": 25, \"line_end\": 26, \"shows\": \"\\u6ce8\\u91ca\\u58f0\\u660e `foo\\\\bar.txt` \\u4f1a\\u53d8\\u6210 `foo/bar.txt`\\uff0c\\u4f46 `replace(/\\\\\\\\/, '/')` \\u7f3a\\u5c11 `g` \\u6807\\u5fd7\\uff0c\\u53ea\\u6539\\u5199\\u7b2c\\u4e00\\u5904\\u53cd\\u659c\\u6760\\u3002\"}, {\"file\": \"src/utils/filepath.test.ts\", \"line_start\": 29, \"line_end\": 41, \"shows\": \"\\u65b0\\u589e\\u7528\\u4f8b\\u7684\\u8f93\\u5165\\u7ecf `slashToBackslash` \\u6362\\u884c\\u540e\\uff0c\\u5265\\u79bb\\u5f00\\u5934\\u5206\\u9694\\u7b26\\u540e\\u6700\\u591a\\u53ea\\u5269\\u4e00\\u4e2a\\u53cd\\u659c\\u6760\\uff0c\\u56e0\\u6b64\\u8986\\u76d6\\u4e0d\\u5230\\u591a\\u7ea7 Windows \\u8def\\u5f84\\u3002\"}], \"explanation\": \"PR \\u7684\\u76ee\\u6807\\u662f\\u8ba9 Windows \\u98ce\\u683c\\u8def\\u5f84\\u88ab\\u7edf\\u4e00\\u5f52\\u4e00\\u5316\\u4e3a `/`\\uff0c\\u4f46\\u4ee3\\u7801\\u53ea\\u5f52\\u4e00\\u5316\\u7b2c\\u4e00\\u4e2a\\u53cd\\u659c\\u6760\\uff0c`assets\\\\img\\\\logo.png` \\u4f1a\\u5f97\\u5230 `assets/img\\\\logo.png`\\uff0c\\u4ecd\\u6b8b\\u7559\\u53cd\\u659c\\u6760\\uff0c\\u4e0e\\u8be5\\u76ee\\u6807\\u4e0d\\u7b26\\uff0c\\u4e14\\u6d4b\\u8bd5\\u65e0\\u6cd5\\u53d1\\u73b0\\u3002\", \"check\": {\"status\": \"ok\", \"problem\": null}}, {\"kind\": \"path\", \"source\": null, \"quote\": null, \"places\": [{\"file\": \"src/adapter/cloudflare-workers/serve-static.ts\", \"line_start\": 28, \"line_end\": 33, \"shows\": \"filename \\u6765\\u81ea `options.path` \\u6216 `rewriteRequestPath` \\u7684\\u8fd4\\u56de\\u503c\\uff0c\\u539f\\u6837\\u4f20\\u7ed9 getFilePath\\u3002\"}, {\"file\": \"src/utils/filepath.ts\", \"line_start\": 26, \"line_end\": 26, \"shows\": \"\\u53ea\\u628a\\u7b2c\\u4e00\\u5904\\u53cd\\u659c\\u6760\\u66ff\\u6362\\u4e3a `/`\\uff0c\\u5176\\u4f59\\u53cd\\u659c\\u6760\\u4fdd\\u7559\\u5728 path \\u4e2d\\u3002\"}, {\"file\": \"src/utils/cloudflare.ts\", \"line_start\": 38, \"line_end\": 43, \"shows\": \"\\u628a path \\u76f4\\u63a5\\u4f5c\\u4e3a manifest key \\u67e5\\u8be2\\uff0c\\u518d\\u7528\\u5b83\\u505a KV get\\u3002\"}, {\"file\": \"src/adapter/cloudflare-workers/serve-static.test.ts\", \"line_start\": 86, \"line_end\": 88, \"shows\": \"manifest \\u7684 key \\u5168\\u90e8\\u4ee5 `/` \\u5206\\u9694\\uff0c\\u4f8b\\u5982 `'assets/static/options/foo.txt'`\\u3002\"}], \"explanation\": \"\\u542b\\u6b8b\\u7559\\u53cd\\u659c\\u6760\\u7684 path \\u65e0\\u6cd5\\u547d\\u4e2d\\u4ee5 `/` \\u5206\\u9694\\u7684 manifest key\\uff0cKV \\u53d6\\u4e0d\\u5230\\u5185\\u5bb9\\uff0c\\u8bf7\\u6c42\\u88ab\\u5f53\\u4f5c\\u9759\\u6001\\u6587\\u4ef6\\u4e0d\\u5b58\\u5728\\u7ee7\\u7eed next()\\uff1b\\u8be5\\u7f3a\\u9677\\u53ea\\u5728\\u6309\\u5b57\\u7b26\\u4e32\\u5339\\u914d\\u8d44\\u6e90\\u952e\\u8fd9\\u7c7b\\u8def\\u5f84\\u4e0a\\u66b4\\u9732\\uff0c\\u56e0\\u6b64\\u4e0d\\u662f\\u5fc5\\u73b0\\uff0c\\u4f46\\u5c5e\\u4e8e\\u8be5\\u6539\\u52a8\\u672a\\u5b8c\\u6210\\u5f52\\u4e00\\u5316\\u9020\\u6210\\u7684\\u771f\\u5b9e\\u9519\\u8bef\\u7ed3\\u679c\\u3002\", \"check\": {\"status\": \"ok\", \"problem\": null}}]}",
+   "status": "open"
+  },
+  {
+   "fingerprint": "89e9bb44b51b3ea03c5537e233567f627358a7456158ca4e0348d9f7333bd6b7",
+   "primary_dimension": "edge_cases",
+   "dimensions": [
+    "edge_cases"
+   ],
+   "severity": "robustness",
+   "preexisting": false,
+   "file": "src/utils/filepath.ts",
+   "line_start": 23,
+   "line_end": 26,
+   "title": "POSIX 上文件名里合法的反斜杠被当成分隔符，兼容性变化未声明",
+   "body": "仓库同时支持 macOS、Linux 和 Bun/Deno 的本地静态服务，反斜杠在这些平台上属于合法的文件名字符。PR 描述只说明「支持 Windows」，没有说明这会改变 POSIX 上已有文件的可达性，但改动后这些文件无法再通过 serveStatic 访问。",
+   "basis": [
+    {
+     "kind": "path",
+     "source": null,
+     "quote": null,
+     "places": [
+      {
+       "file": "src/adapter/deno/serve-static.ts",
+       "line_start": 27,
+       "line_end": 32,
+       "shows": "filename 来自 `decodeURI(url.pathname)`，URL 中的 `%5C` 会被解码成反斜杠。"
+      },
+      {
+       "file": "src/utils/filepath.ts",
+       "line_start": 23,
+       "line_end": 26,
+       "shows": "剥离开头后把第一个反斜杠替换成 `/`，把它当成路径分隔符。"
+      },
+      {
+       "file": "src/adapter/deno/serve-static.ts",
+       "line_start": 36,
+       "line_end": 41,
+       "shows": "用 `./` + path 去 open 文件。"
+      }
+     ],
+     "explanation": "请求 `/a%5Cb.txt` 时 filename 为 `/a\\b.txt`：改动前打开 `./a\\b.txt`（Linux/macOS 上合法文件名，能找到文件），改动后变成 `./a/b.txt`，原本存在的文件变成 404；`src/utils/filepath.ts:9` 也把含 `\\..\\` 的这类文件名直接判为穿越。",
+     "check": {
+      "status": "ok",
+      "problem": null
+     }
+    }
+   ],
+   "verdict": "{\"holds\": true, \"reason\": \"\\u4ee3\\u7801\\u786e\\u5b9e\\u628a\\u53cd\\u659c\\u6760\\u5728\\u6240\\u6709\\u5e73\\u53f0\\u4e0a\\u65e0\\u6761\\u4ef6\\u5f53\\u6210\\u5206\\u9694\\u7b26\\uff0c\\u5bfc\\u81f4 POSIX \\u4e0a\\u542b\\u53cd\\u659c\\u6760\\u7684\\u5408\\u6cd5\\u6587\\u4ef6\\u540d\\uff08\\u4ee5\\u53ca\\u542b `\\\\\\\\..\\\\\\\\` \\u7684\\u540d\\u5b57\\uff09\\u53ef\\u8fbe\\u6027\\u6539\\u53d8\\uff1b\\u867d\\u7136\\u9700\\u8981\\u4e0d\\u5e38\\u89c1\\u7684\\u6587\\u4ef6\\u540d\\u624d\\u80fd\\u89e6\\u53d1\\uff0c\\u4e14\\u5c5e PR \\u63cf\\u8ff0\\u7684 Windows \\u573a\\u666f\\u4e4b\\u5916\\uff0c\\u4f46\\u9000\\u5316\\u662f\\u771f\\u5b9e\\u5f15\\u5165\\u7684\\uff0c\\u4fdd\\u6301 robustness \\u7ea7\\u522b\\u3002\", \"basis\": [{\"kind\": \"path\", \"source\": null, \"quote\": null, \"places\": [{\"file\": \"src/adapter/deno/serve-static.ts\", \"line_start\": 27, \"line_end\": 32, \"shows\": \"\\u8bf7\\u6c42\\u8def\\u5f84\\u7ecf decodeURI \\u89e3\\u7801\\u540e\\u4f5c\\u4e3a filename \\u4f20\\u7ed9 getFilePath\\uff0c\\u56e0\\u6b64 URL \\u4e2d\\u7684 %5C \\u53d8\\u6210\\u771f\\u5b9e\\u7684\\u53cd\\u659c\\u6760\\u3002\"}, {\"file\": \"src/utils/filepath.ts\", \"line_start\": 23, \"line_end\": 26, \"shows\": \"\\u5148\\u5265\\u6389\\u5f00\\u5934\\u7684 / \\u6216 .\\\\\\uff0c\\u518d\\u628a\\u7b2c\\u4e00\\u4e2a\\u53cd\\u659c\\u6760\\u65e0\\u6761\\u4ef6\\u66ff\\u6362\\u6210 /\\uff0c\\u628a Windows \\u5206\\u9694\\u7b26\\u8bed\\u4e49\\u5957\\u7528\\u5230\\u6240\\u6709\\u5e73\\u53f0\\u3002\"}, {\"file\": \"src/adapter/deno/serve-static.ts\", \"line_start\": 36, \"line_end\": 41, \"shows\": \"\\u7528 `./` \\u52a0\\u8fd4\\u56de\\u7684 path \\u53bb open \\u6587\\u4ef6\\uff0c\\u6240\\u4ee5 path \\u91cc\\u5206\\u9694\\u7b26\\u7684\\u6539\\u53d8\\u76f4\\u63a5\\u51b3\\u5b9a\\u6700\\u7ec8\\u80fd\\u5426\\u547d\\u4e2d\\u6587\\u4ef6\\u3002\"}], \"explanation\": \"\\u6539\\u52a8\\u524d `/a%5Cb.txt` \\u89e3\\u7801\\u540e\\u4e3a `/a\\\\b.txt`\\uff0c\\u53bb\\u6389\\u5f00\\u5934\\u659c\\u6760\\u540e\\u539f\\u6837\\u8fd4\\u56de `a\\\\b.txt`\\uff0copen(`./a\\\\b.txt`) \\u5728 Linux/macOS \\u4e0a\\u53ef\\u4ee5\\u6253\\u5f00\\u8fd9\\u4e2a\\u5408\\u6cd5\\u6587\\u4ef6\\u540d\\u7684\\u6587\\u4ef6\\uff1b\\u6539\\u52a8\\u540e\\u7ed3\\u679c\\u4e3a `a/b.txt`\\uff0copen \\u7684\\u662f\\u53e6\\u4e00\\u4e2a\\u8def\\u5f84\\uff0c\\u539f\\u672c\\u53ef\\u8bbf\\u95ee\\u7684\\u6587\\u4ef6\\u53d8\\u6210 404\\uff0c\\u540c\\u65f6 filepath.ts:9 \\u7684\\u65b0\\u6b63\\u5219\\u8fd8\\u4f1a\\u628a\\u5305\\u542b `\\\\..\\\\` \\u7684\\u8fd9\\u7c7b\\u5408\\u6cd5\\u6587\\u4ef6\\u540d\\u76f4\\u63a5\\u5224\\u4e3a\\u7a7f\\u8d8a\\u3002\", \"check\": {\"status\": \"ok\", \"problem\": null}}]}",
+   "status": "open"
+  }
+ ],
+ "seconds": 195.1
+}

@@ -1,0 +1,107 @@
+{
+ "id": 34,
+ "repo": "izelcompany/morgan-eval",
+ "pr": 8,
+ "base_sha": "5e3e3679a0be6313ed65459e405b2204602d98da",
+ "head_sha": "0362a950b58f6af0905e80597bb1b3a1139427ff",
+ "round": 6,
+ "mode": "standard",
+ "status": "done",
+ "error": null,
+ "limit_hit": null,
+ "superseded_by": null,
+ "created_at": "2026-11-16T13:44:38.433Z",
+ "started_at": "2026-11-16T13:44:39.373Z",
+ "finished_at": "2026-11-16T13:45:52.912Z",
+ "report": {
+  "summary": "<!-- review-agents:summary -->\n## 审查结论：未发现阻断问题\n\n### 🔵 健壮性建议（1）\n- 测试断言的是 token 不在未使用的 env 文本里，而不是它不进入镜像 — `tests/test_mirror.py:100-113`\n  原因：如果以后 fetch 改成把 token 放进 remote URL 或 config，这条测试仍可能通过，脱敏与不落盘的承诺就没有真正的回归保护。\n  - 依据 · 路径\n    1. `tests/test_mirror.py:26`：store 的 remote_base 是本地路径 upstream.base，因此 sync 的 remote_url 是文件路径而非 https。\n    2. `tests/test_mirror.py:106-107`：测试自建一个 env（remote_prefix=\"https://github.com\"）用于断言，而 sync 内部另建 env（remote_prefix=本地路径）；两者不是同一个对象。\n    3. `src/review_agents/mirror.py:115-120`：sync 用 self._remote_base 生成 env 并执行 fetch，测试断言的那个 env 从未参与任何 git 调用。\n    4. `tests/test_mirror.py:110-113`：真正被验证的只有 base64 编码和镜像目录里没有明文 token。\n    为什么：测试断言的 env 与 fetch 实际使用的 env 是两次独立构造的字典，assert 109-110 只证明 git_env 做了 base64，与本 PR 里 sync 的行为无关；而 sync 的远端是本地路径，http.<prefix>.extraheader 的配置项既不会被 git 使用，写进 mirror 的 config 也不会含 token。因此实现若把 token 放进进程参数或改到别处，109-113 仍会通过。\n  建议：让测试的 upstream 走一个会检查请求头的本地 HTTP 服务，并断言 git config --list 与 remote -v 里都没有 token。\n\n### ⚪ 细节（2）\n- search_code 首参名为 pattern，但 glob_match 的首参也是 pattern，容易混淆 — `src/review_agents/tools.py:52-53`\n  原因：两个“pattern”一个是正则一个是 glob，读调用方代码时需要回查签名才知道含义。\n  建议：把 glob 版的参数改名为 glob，例如 glob_match(glob, path)。\n- RepoTools.NEAMES 与 agent_tools 的白名单测试重复维护工具清单 — `src/review_agents/tools.py:68`\n  原因：新增工具时要在 NAMES 与 tests/test_tools.py:210 的集合并行改两处，两处不同步时测试才会发现。\n  建议：保留测试里的显式断言作为唯一清单，或让测试断言 NAMES 本身，避免再写一份集合。\n\n### 本次审查的范围\n- 审了：规格漂移、边界问题、安全、可维护性、可验证性（各 1 次）· 8 个改动文件\n- 没审：改动文件都看了，各维度都交了卷\n- 能证明：发布的每条 🔴 / 🟡 都有程序核对过的依据，并经验证审查员重新读代码确认；引用的规则原文确实在所写的位置。\n- 不能证明：没有运行代码和测试；没有发现问题不代表没有问题；规格只来自 PR 描述、关联的 issue 和配置的规格文档；没验完的发现没有发布，不代表它们不成立。\n\n### 本次审查\nStandard 模式 · 907,610 token · 1 分 14 秒 · 审查 #34\n\n<!-- review-agents:counts {\"blocking\": 0, \"important\": 0, \"robustness\": 1, \"nit\": 2, \"complete\": true} -->\n",
+  "comments": [],
+  "counts": {
+   "blocking": 0,
+   "important": 0,
+   "robustness": 1,
+   "nit": 2,
+   "complete": true
+  },
+  "walkthrough": "<!-- review-agents:walkthrough -->\n## 📖 改动说明\n\nPR #8 · 8 个文件 · **+780 −1** · 1 次提交\n\n**一句话：** 新增每个仓库一份的 bare git 镜像（加锁、增量 fetch，token 只走环境变量）和五个只读仓库工具（直接读 git 对象，受跳过规则、大小、二进制与 25 次调用预算约束），并在运行时镜像里装 git；这些模块目前只有测试在调用，review 流水线尚未接入。\n\n#### 为什么改 — review agent 需要一个安全、可增量复用的方式读被审仓库，而这一层此前完全不存在。\n- 原来没有仓库访问层：`worker.py` 的默认 handler 是 `not_implemented`，agent 没有任何读代码的手段（`src/review_agents/worker.py:15-16`）。\n- **每次审都重新下载整个仓库**会浪费时间和流量，所以需要按仓库长期复用的本地镜像。\n- **不能 checkout 工作区**：PR 里可以放符号链接或构造过的路径，检出到磁盘就有机会读到宿主机文件。\n- **token 不能落到磁盘**：写进镜像 config、remote URL 或进程参数，会留在磁盘或 `ps` 里。\n\n#### 改了什么 — 新增 `mirror.py`（bare 镜像加锁增量 fetch）与 `tools.py`（五个只读工具加调用预算），并给运行时镜像装 git。\n- **`MirrorStore.sync()`** 在 `/data/repos/<owner>/<name>.git` 上 init bare 仓库，用 `+ref:ref` refspec 只拉需要的 ref，事后逐个 `cat-file -e` 确认要求的 commit 都在（`src/review_agents/mirror.py:100-124`）。\n- **token 只经环境变量**进入 git：`git_env()` 把它 base64 后放进 `http.<remote>.extraheader`，`run_git()` 出错时再把明文换成 `***`（`src/review_agents/mirror.py:30-71`）。\n- **`RepoTools`** 用 `cat-file`、`ls-tree -l`、`grep -I`、`log` 直接读对象，`_clean_path()` 拒绝 `..` 和反斜杠（`src/review_agents/tools.py:56-62`）。\n- **`ToolBudget`** 记满 25 次后返回 `LIMIT_REACHED` 文本，`ToolError` 变成 `error: ...` 交回给 agent（`src/review_agents/tools.py:195-218`）。\n\n#### 有什么影响 — 当前合入只增加能力与依赖：新模块尚无生产调用方，部署上多了一个 git 依赖。\n- **结果**：还没有任何 review 路径调用这些工具，`repos_dir` 也无人引用，现有行为不变（`src/review_agents/config.py:63-66`）。\n- **部署**：运行时镜像用 apt 装 git，镜像体积和攻击面都增加（`Dockerfile:15-20`）。\n- **磁盘**：每个被审仓库在数据卷上留一份镜像，只增不减，`/data/repos` 会随之增长。\n- **安全**：防线是路径清洗、不 checkout 和只读方法白名单，测试逐一覆盖跳过规则、大小、二进制与符号链接。\n\n```mermaid\nflowchart LR\n    A[\"review 请求: owner/name, refs, commits\"] --> B[\"MirrorStore.sync\"]\n    B --> C{\"镜像存在?\"}\n    C -- \"否\" --> D[\"git init --bare\"]\n    C -- \"是\" --> E[\"flock 仓库锁\"]\n    D --> E\n    E --> F[\"git fetch +ref:ref, token 走 GIT_CONFIG_*\"]\n    F --> G{\"要求的 commit 都在?\"}\n    G -- \"否\" --> H[\"MissingCommitError\"]\n    G -- \"是\" --> I[\"RepoTools(git_dir, commit, skip_paths)\"]\n    I --> J[\"agent_tools + ToolBudget(25)\"]\n    J --> K[\"read_file / list_dir / search_code / git_log / read_issue\"]\n```\n\n<details>\n<summary><b>01　为什么要改</b>（4 个问题）</summary>\n\n1. **agent 没有任何读仓库的手段** — review 流水线只有 `not_implemented` 占位 handler，agent 无法查看被审 commit 的文件、目录、历史或关联 issue，也就无法产出有代码依据的结论（`src/review_agents/worker.py:15-16`）。\n2. **没有可复用的本地仓库副本** — 没有镜像层时，每次 review 都要从 GitHub 重新获取仓库；同一个仓库被反复提交 review 时，已经存在的对象被重复传输。\n3. **检出工作区会放大 PR 内容的风险** — PR 作者能在提交里放符号链接或构造过的路径；如果先把文件 checkout 到磁盘再读，读取就可能落到宿主机文件上。因此需要一条不落盘、直接从 git 对象读取的通路。\n4. **访问私有仓库的 token 容易留下痕迹** — 把 token 拼进 remote URL 或命令行参数，会分别写进镜像的 git config 和 `ps` 可见的进程参数，并在 git 报错里原样出现；需要一条不落盘、不暴露的传递方式。\n\n</details>\n\n<details>\n<summary><b>02　怎么改的</b>（5 处改动）</summary>\n\n**1. 镜像存储与增量同步：`src/review_agents/mirror.py`**\n\n`MirrorStore` 的目录布局是 `<root>/<owner>/<name>.git`，`git_dir()` 和 `remote_url()` 都先过 `check_repo_name()`，只接受 `owner/name` 形式并拒绝 `..` 段（`src/review_agents/mirror.py:24-27`、`src/review_agents/mirror.py:81-86`）。\n\n`sync()` 的步骤：\n\n1. 校验每个 ref 以 `refs/` 开头且不含 ` :^~?*[\\\\`，每个 commit 是 40 位十六进制（`src/review_agents/mirror.py:108-113`）。\n2. 在 `<name>.git.lock` 上取 `fcntl.flock` 排它锁，同一仓库的并发同步串行执行（`src/review_agents/mirror.py:88-98`）。\n3. 镜像里没有 `HEAD` 就先 `git init --bare`，随后 `fetch --no-tags`，refspec 写成 `+ref:ref`，并传入 `secret=token` 以便报错时脱敏（`src/review_agents/mirror.py:117-120`）。\n4. 对每个要求的 commit 调 `has_commit()`，缺失就抛 `MissingCommitError`（`src/review_agents/mirror.py:121-123`）。\n\n测试断言第二次同步新增对象数正好是 3（一个 commit、一个根 tree、一个 blob），以及四个线程同时同步同一仓库都不报错（`tests/test_mirror.py:46-60`、`tests/test_mirror.py:128-146`）。\n\n**2. token 经环境变量进入 git 并在报错中脱敏**\n\n`git_env()` 构造一个干净的 git 环境：清空 system/global config、关闭终端提示、固定 `LC_ALL=C`；带 token 时把 `x-access-token:<token>` 做 base64，经 `GIT_CONFIG_COUNT` / `GIT_CONFIG_KEY_0` / `GIT_CONFIG_VALUE_0` 作为 `http.<remote_prefix>.extraheader` 传给 git，因此不进 remote URL、不进镜像 config、不进命令行（`src/review_agents/mirror.py:30-50`）。\n\n`run_git()` 统一所有 git 调用：固定 `--git-dir`，`check=False` 后自己判返回码，失败时把 stderr 里的明文 token 替换成 `***` 再抛 `GitError`（`src/review_agents/mirror.py:53-71`）。测试既遍历镜像里的文件确认 token 不在其中，也构造错误确认消息被脱敏（`tests/test_mirror.py:100-125`）。\n\n**3. 五个只读工具：`src/review_agents/tools.py`**\n\n工具全部通过 `run_git()` 读 git 对象，没有 checkout。每个工具读取前的共同约束：\n\n| 约束 | 位置 | 行为 |\n|---|---|---|\n| 跳过规则 | `src/review_agents/tools.py:86-87` | `is_skipped()` 用自写 glob 匹配，`**/` 匹配任意层目录，`*`、`?` 不跨 `/`（`src/review_agents/tools.py:34-53`） |\n| 路径清洗 | `src/review_agents/tools.py:56-62` | 去掉首尾斜杠，含 `..` 段或反斜杠即抛 `ToolError` |\n| 大小上限 | `src/review_agents/tools.py:106-107` | 复用 `repo_config.MAX_FILE_BYTES`（200 KB） |\n| 二进制判定 | `src/review_agents/tools.py:109-110` | 前 8000 字节含 NUL 即拒绝 |\n\n各工具的行为：\n\n- `read_file()` 先 `cat-file -t/-s` 判断类型和大小，再取 blob，可选行区间，返回带 `行号: ` 前缀的文本（`src/review_agents/tools.py:92-114`）。\n- `list_dir()` 用 `ls-tree -l` 输出 `dir`/`file`、大小与全路径，跳过项标注 `(skipped)`（`src/review_agents/tools.py:116-131`）。\n- `search_code()` 调 `git grep -n -I -E -e`，把退出码 1 当“无匹配”，再按跳过规则和 `path_glob` 过滤，满 100 条后追加提示（`src/review_agents/tools.py:133-162`）。\n- `git_log()` 读被审 commit 往前的历史，可选按路径过滤，条数限制在 1 到 50（`src/review_agents/tools.py:164-172`）。\n- `read_issue()` 用标准库 `urllib` 打 GitHub API，带 Bearer token，正文截断到 20000 字符，HTTP 错误与不可达都转成 `ToolError`（`src/review_agents/tools.py:174-192`）。\n\n测试用临时 bare 仓库当远端，并起一个本地 HTTP 服务器假扮 GitHub API（`tests/test_tools.py:24-43`、`tests/test_tools.py:113-158`）。\n\n**4. 调用预算与只读工具白名单：`ToolBudget` / `agent_tools`**\n\n`ToolBudget(limit)` 记录 `used`，达到上限后直接返回提示文本 `LIMIT_REACHED`，不再调用工具；成功与 `ToolError` 都计一次（`src/review_agents/tools.py:195-213`）。`agent_tools()` 按 `RepoTools.NAMES` 生成五个包装函数，并用 `functools.wraps` 保留签名和 docstring，测试注释说明 LangChain 会从签名生成参数 schema（`src/review_agents/tools.py:216-218`、`tests/test_tools.py:225-230`）。\n\n另有一个白名单测试：`dir(RepoTools)` 的公开方法必须恰好是五个工具加 `NAMES`、`is_skipped`，新增任何公开方法都必须先在此测试里显式加进去（`tests/test_tools.py:204-210`）。\n\n**5. 侧边配置与运行时依赖**\n\n`Settings.repos_dir` 返回 `data_dir / \"repos\"`，让镜像与数据库在同一个数据卷上（`src/review_agents/config.py:63-66`）。`Dockerfile` 在运行时阶段用 `apt-get` 装 `git` 并清掉 apt 列表，加了 `hadolint ignore=DL3008`，注释说明版本跟随基础镜像的 Debian 发行版而不是逐个钉版本（`Dockerfile:15-20`）。`pyproject.toml` 给 `tests/**` 追加 `S105`、`S106` 两条 ruff 忽略，使测试里的假 token 字符串能通过 lint（`pyproject.toml:42-43`）。\n\n</details>\n\n#### 有什么影响\n\n| 方面 | 影响 |\n| --- | --- |\n| 结果 | 本 PR 尚未接入 review 流水线：仓库里除测试外没有 `MirrorStore`、`RepoTools`、`agent_tools` 的调用方，`repos_dir` 也没有被读取，因此 agent 目前的输出不变。 |\n| 时间与性能 | 镜像复用后，同一仓库的后续同步只传新增对象（测试里一次提交只增加 3 个对象）；但同一仓库的同步被一把排它锁串行化，并发 review 同一仓库时会互相等待。 |\n| 磁盘 | 每个被审仓库在 `/data/repos/<owner>/<name>.git` 留下完整镜像，代码里没有清理或淘汰机制，数据卷会随被审仓库数量增长。 |\n| 部署与配置 | 运行时镜像新增 git 依赖，镜像体积变大；镜像目录固定在数据卷的 `repos/` 下，与 SQLite 数据库共享同一卷。 |\n| 安全 | 工具不检出文件、路径清洗拒绝 `..` 与反斜杠、`agent_tools` 只暴露五个只读方法，测试验证了符号链接被当作普通文本读出而不是跟随。访问 token 只经 `GIT_CONFIG_*` 环境变量传递，git 报错时脱敏。 |\n| 失败行为 | git 失败抛 `GitError`，同步后缺 commit 抛 `MissingCommitError`，被拒绝的工具请求以 `error: ...` 文本返回给 agent；用完预算后返回固定提示文本而不是异常。 |\n\n> [!WARNING]\n> **部署时注意**\n> - 运行时镜像现在需要 `git` 可执行文件；本 PR 已在 `Dockerfile` 里用 apt 安装，若换成其他镜像或裸机部署，需要自行保证 git 可用。\n> - 镜像存放在 `REVIEW_AGENTS_DATA_DIR` 下的 `repos/` 目录，Docker 部署下就是 `/data/repos`，需要数据卷有足够容量容纳所有被审仓库的镜像。\n> - token 通过 `GIT_CONFIG_*` 环境变量传给 git 进程，不进镜像 config；如果需要轮换 token，只需下次 `sync()` 传入新值。\n> - 测试用的假 token 依赖 `pyproject.toml` 中 `tests/**` 新增的 `S105`、`S106` 忽略规则。\n\n<details>\n<summary><b>取舍</b>（4 条）</summary>\n\n| 情况 | 这次的做法 | 理由 |\n| --- | --- | --- |\n| 同一仓库可能同时有多个 review 在同步镜像。 | 用 `fcntl.flock` 在 `<name>.git.lock` 上加排它锁，同一仓库的 fetch 串行执行。 | 代码注释写明两个 review 不能同时 fetch 同一个镜像（`src/review_agents/mirror.py:90`）；代价是同步期并发度下降，但不同仓库之间不互斥。 |\n| git 的访问 token 需要交给 fetch，但不能留下痕迹。 | 只在调用时通过 `GIT_CONFIG_*` 环境变量注入 `http.<remote>.extraheader`，而不是写进 remote URL 或镜像 config。 | PR 描述要求 token 绝不写进镜像、remote URL 或进程参数，并在 git 报错中脱敏（`src/review_agents/mirror.py:30-50`、`src/review_agents/mirror.py:66-70`）。 |\n| agent 需要看代码，但 PR 内容不可信。 | 所有读取走 `git cat-file` / `ls-tree` / `grep`，不 checkout 工作区。 | PR 描述说明这样符号链接无法触及宿主机；代价是符号链接只能读到其链接文本本身，无法读到目标内容。 |\n| 每个被审仓库在磁盘上留一份镜像。 | 不做清理或淘汰，镜像随数据卷长期保留。 | PR 描述给出的目标是让后续 review 只传输新对象；代码和描述都没有说明何时删除镜像。 |\n\n</details>\n\n<details>\n<summary><b>改动分布</b>（8 个文件）</summary>\n\n| 文件 | 增 | 删 |\n| --- | ---: | ---: |\n| `tests/test_tools.py` | 230 | 0 |\n| `src/review_agents/tools.py` | 218 | 0 |\n| `tests/test_mirror.py` | 146 | 0 |\n| `src/review_agents/mirror.py` | 132 | 0 |\n| `tests/gitrepo.py` | 42 | 0 |\n| `Dockerfile` | 6 | 0 |\n| `src/review_agents/config.py` | 5 | 0 |\n| `pyproject.toml` | 1 | 1 |\n\n</details>\n"
+ },
+ "findings": [
+  {
+   "fingerprint": "054f3f80d2dc59e527b0bb2cba033a8c28981a0c6e33417601e9f7cfa8d6776a",
+   "primary_dimension": "spec_drift",
+   "dimensions": [
+    "spec_drift"
+   ],
+   "severity": "robustness",
+   "preexisting": false,
+   "file": "tests/test_mirror.py",
+   "line_start": 100,
+   "line_end": 113,
+   "title": "测试断言的是 token 不在未使用的 env 文本里，而不是它不进入镜像",
+   "body": "如果以后 fetch 改成把 token 放进 remote URL 或 config，这条测试仍可能通过，脱敏与不落盘的承诺就没有真正的回归保护。",
+   "basis": [
+    {
+     "kind": "path",
+     "source": null,
+     "quote": null,
+     "places": [
+      {
+       "file": "tests/test_mirror.py",
+       "line_start": 110,
+       "line_end": 110,
+       "shows": "断言 token 不在 env[\"GIT_CONFIG_VALUE_0\"] 中，而同一次 sync 并没有使用这个 env；这里真正能失败的前提是 base64 编码，与实现无关。"
+      },
+      {
+       "file": "tests/test_mirror.py",
+       "line_start": 107,
+       "line_end": 107,
+       "shows": "sync 用的是远端为本地路径的 upstream，remote_prefix 不是 https，因此 extraheader 在 fetch 里不会被用到。"
+      }
+     ],
+     "explanation": "PR 描述承诺 token 绝不写进镜像、remote URL 或进程参数。这条测试只验证了 base64 编码这一点，镜像遍历（111-113 行）在远端是本地路径、token 也没被使用时几乎总会通过，即使实现把 token 写进 config 也未必被抓住。",
+     "check": {
+      "status": "ok",
+      "problem": null
+     }
+    }
+   ],
+   "verdict": "{\"holds\": true, \"reason\": \"\\u6d4b\\u8bd5\\u786e\\u5b9e\\u5b58\\u5728\\uff1a109-110 \\u884c\\u7684\\u65ad\\u8a00\\u9488\\u5bf9\\u4e00\\u4e2a\\u672a\\u88ab fetch \\u4f7f\\u7528\\u7684 env\\uff0c\\u53ea\\u8986\\u76d6 base64 \\u7f16\\u7801\\uff1b111-113 \\u884c\\u7684\\u955c\\u50cf\\u904d\\u5386\\u5728\\u8fdc\\u7aef\\u4e3a\\u672c\\u5730\\u8def\\u5f84\\u3001token \\u672a\\u88ab\\u4f7f\\u7528\\u7684\\u60c5\\u51b5\\u4e0b\\u51e0\\u4e4e\\u5fc5\\u7136\\u901a\\u8fc7\\uff0c\\u65e0\\u6cd5\\u4fdd\\u62a4 PR \\u63cf\\u8ff0\\u91cc\\u300ctoken \\u7edd\\u4e0d\\u5199\\u8fdb\\u955c\\u50cf\\u3001remote URL \\u6216\\u8fdb\\u7a0b\\u53c2\\u6570\\u300d\\u7684\\u627f\\u8bfa\\u3002\\u4f46\\u8fd9\\u53ea\\u662f\\u7f3a\\u5c11\\u56de\\u5f52\\u4fdd\\u62a4\\u3001\\u4e0d\\u5f71\\u54cd\\u5f53\\u524d\\u6b63\\u786e\\u884c\\u4e3a\\uff0c\\u5b9a\\u4e3a robustness \\u5408\\u9002\\u3002\", \"basis\": [{\"kind\": \"path\", \"source\": null, \"quote\": null, \"places\": [{\"file\": \"tests/test_mirror.py\", \"line_start\": 26, \"line_end\": 26, \"shows\": \"store \\u7684 remote_base \\u662f\\u672c\\u5730\\u8def\\u5f84 upstream.base\\uff0c\\u56e0\\u6b64 sync \\u7684 remote_url \\u662f\\u6587\\u4ef6\\u8def\\u5f84\\u800c\\u975e https\\u3002\"}, {\"file\": \"tests/test_mirror.py\", \"line_start\": 106, \"line_end\": 107, \"shows\": \"\\u6d4b\\u8bd5\\u81ea\\u5efa\\u4e00\\u4e2a env\\uff08remote_prefix=\\\"https://github.com\\\"\\uff09\\u7528\\u4e8e\\u65ad\\u8a00\\uff0c\\u800c sync \\u5185\\u90e8\\u53e6\\u5efa env\\uff08remote_prefix=\\u672c\\u5730\\u8def\\u5f84\\uff09\\uff1b\\u4e24\\u8005\\u4e0d\\u662f\\u540c\\u4e00\\u4e2a\\u5bf9\\u8c61\\u3002\"}, {\"file\": \"src/review_agents/mirror.py\", \"line_start\": 115, \"line_end\": 120, \"shows\": \"sync \\u7528 self._remote_base \\u751f\\u6210 env \\u5e76\\u6267\\u884c fetch\\uff0c\\u6d4b\\u8bd5\\u65ad\\u8a00\\u7684\\u90a3\\u4e2a env \\u4ece\\u672a\\u53c2\\u4e0e\\u4efb\\u4f55 git \\u8c03\\u7528\\u3002\"}, {\"file\": \"tests/test_mirror.py\", \"line_start\": 110, \"line_end\": 113, \"shows\": \"\\u771f\\u6b63\\u88ab\\u9a8c\\u8bc1\\u7684\\u53ea\\u6709 base64 \\u7f16\\u7801\\u548c\\u955c\\u50cf\\u76ee\\u5f55\\u91cc\\u6ca1\\u6709\\u660e\\u6587 token\\u3002\"}], \"explanation\": \"\\u6d4b\\u8bd5\\u65ad\\u8a00\\u7684 env \\u4e0e fetch \\u5b9e\\u9645\\u4f7f\\u7528\\u7684 env \\u662f\\u4e24\\u6b21\\u72ec\\u7acb\\u6784\\u9020\\u7684\\u5b57\\u5178\\uff0cassert 109-110 \\u53ea\\u8bc1\\u660e git_env \\u505a\\u4e86 base64\\uff0c\\u4e0e\\u672c PR \\u91cc sync \\u7684\\u884c\\u4e3a\\u65e0\\u5173\\uff1b\\u800c sync \\u7684\\u8fdc\\u7aef\\u662f\\u672c\\u5730\\u8def\\u5f84\\uff0chttp.<prefix>.extraheader \\u7684\\u914d\\u7f6e\\u9879\\u65e2\\u4e0d\\u4f1a\\u88ab git \\u4f7f\\u7528\\uff0c\\u5199\\u8fdb mirror \\u7684 config \\u4e5f\\u4e0d\\u4f1a\\u542b token\\u3002\\u56e0\\u6b64\\u5b9e\\u73b0\\u82e5\\u628a token \\u653e\\u8fdb\\u8fdb\\u7a0b\\u53c2\\u6570\\u6216\\u6539\\u5230\\u522b\\u5904\\uff0c109-113 \\u4ecd\\u4f1a\\u901a\\u8fc7\\u3002\", \"check\": {\"status\": \"ok\", \"problem\": null}}]}",
+   "status": "open"
+  },
+  {
+   "fingerprint": "197f926e612472b2ba7408ae3a9d7c02c520dd5abef6a4fbf5c8925e83af72b1",
+   "primary_dimension": "maintainability",
+   "dimensions": [
+    "maintainability"
+   ],
+   "severity": "nit",
+   "preexisting": false,
+   "file": "src/review_agents/tools.py",
+   "line_start": 52,
+   "line_end": 53,
+   "title": "search_code 首参名为 pattern，但 glob_match 的首参也是 pattern，容易混淆",
+   "body": "两个“pattern”一个是正则一个是 glob，读调用方代码时需要回查签名才知道含义。",
+   "basis": [],
+   "verdict": null,
+   "status": "open"
+  },
+  {
+   "fingerprint": "82e5a147ec599753fd82d1d8c40af0e551247c7babf7e02775989271995b5d9e",
+   "primary_dimension": "maintainability",
+   "dimensions": [
+    "maintainability"
+   ],
+   "severity": "nit",
+   "preexisting": false,
+   "file": "src/review_agents/tools.py",
+   "line_start": 68,
+   "line_end": 68,
+   "title": "RepoTools.NEAMES 与 agent_tools 的白名单测试重复维护工具清单",
+   "body": "新增工具时要在 NAMES 与 tests/test_tools.py:210 的集合并行改两处，两处不同步时测试才会发现。",
+   "basis": [],
+   "verdict": null,
+   "status": "open"
+  }
+ ],
+ "seconds": 75.0
+}

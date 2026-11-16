@@ -1,0 +1,78 @@
+{
+ "case": "py-mr-context-markup-001",
+ "run": 1,
+ "model": "deepseek-flash",
+ "seconds": 219.8,
+ "usage": {
+  "prompt_tokens": 11746,
+  "completion_tokens": 43974,
+  "total_tokens": 55720,
+  "prompt_tokens_details": {
+   "cached_tokens": 0
+  },
+  "completion_tokens_details": {
+   "reasoning_tokens": 43040
+  },
+  "prompt_cache_hit_tokens": 0,
+  "prompt_cache_miss_tokens": 11746
+ },
+ "findings": [
+  {
+   "file": "src/review_agents/context/markup.py",
+   "line_start": 11,
+   "line_end": 11,
+   "severity": "blocking",
+   "title": "Unescaped source can forge the untrusted data block",
+   "why": "untrusted interpolates source directly into the opening tag. Repository-controlled paths can contain quotes, angle brackets, and slashes, so a path can inject a literal </untrusted> or break out of the source attribute before the closing tag is defused. This defeats the prompt-injection boundary for convention, module, and memory blocks."
+  },
+  {
+   "file": "src/review_agents/context/summarizer.py",
+   "line_start": 21,
+   "line_end": 21,
+   "severity": "important",
+   "title": "Module path is placed outside the untrusted block",
+   "why": "HumanMessage puts `Module: {path}` before the `<untrusted>` block. The path comes from repository directory names and can contain newlines or instructions, so it can inject text outside the data block even after the sample is wrapped. The path itself must be treated as untrusted data or escaped."
+  },
+  {
+   "file": "src/review_agents/context/repo_layer.py",
+   "line_start": 103,
+   "line_end": 103,
+   "severity": "important",
+   "title": "Layer cache key ignores skip_paths",
+   "why": "_key hashes only LAYER_VERSION, the tree id, and memory_version. If skip_paths changes, the cached conventions and directory tree are still reused even though they were built with the old skip rules, leaving skipped files in context or newly unskipped files missing. Module summaries use the current skip set, so the layer also becomes inconsistent."
+  },
+  {
+   "file": "src/review_agents/config.py",
+   "line_start": 61,
+   "line_end": 61,
+   "severity": "important",
+   "title": "summary_tokens_per_build is never used",
+   "why": "The new safety-limit setting is added but no code reads it or constructs a TokenBudget from it. The advertised per-build cap on module-summary cost is inert; callers that do not independently pass a budget will keep summarising modules without this limit."
+  },
+  {
+   "file": "src/review_agents/context/modules.py",
+   "line_start": 166,
+   "line_end": 166,
+   "severity": "robustness",
+   "title": "Wide-character samples can exceed the token budget",
+   "why": "`excerpt = text[: remaining * 4]` assumes four characters per token, but estimate_tokens counts non-ASCII characters as roughly one token each. A CJK- or emoji-heavy file can make the excerpt up to about four times the remaining token budget, so a module sample can be far larger than _SAMPLE_TOKENS and blow context or cost."
+  },
+  {
+   "file": "src/review_agents/context/modules.py",
+   "line_start": 130,
+   "line_end": 130,
+   "severity": "robustness",
+   "title": "Flat directories can exceed MAX_MODULE_FILES",
+   "why": "When a directory has more than 50 files but no subdirectories, visit falls through to `modules.append(Module(path, tuple(own)))` and creates one module containing every direct file. This violates the stated 50-file module limit and can produce a huge file listing and summary input that the directory-based splitting algorithm cannot divide."
+  },
+  {
+   "file": "src/review_agents/context/git.py",
+   "line_start": 66,
+   "line_end": 66,
+   "severity": "robustness",
+   "title": "read_text scans the whole file list for every read",
+   "why": "read_text does a linear search over self.files() for each path, and sample_module calls it for every sampled file in every module. On a large repository this becomes O(N^2) over the file count, making context building very slow. A path-to-Entry map built once in Snapshot would avoid the repeated scans."
+  }
+ ],
+ "content": null
+}

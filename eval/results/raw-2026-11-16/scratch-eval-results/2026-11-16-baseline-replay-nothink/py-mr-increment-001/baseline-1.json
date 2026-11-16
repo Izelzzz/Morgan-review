@@ -1,0 +1,77 @@
+{
+ "case": "py-mr-increment-001",
+ "run": 1,
+ "model": "deepseek-flash",
+ "thinking": "disabled",
+ "seconds": 7.7,
+ "usage": {
+  "prompt_tokens": 3814,
+  "completion_tokens": 1109,
+  "total_tokens": 4923,
+  "prompt_tokens_details": {
+   "cached_tokens": 0
+  },
+  "prompt_cache_hit_tokens": 0,
+  "prompt_cache_miss_tokens": 3814
+ },
+ "findings": [
+  {
+   "file": "src/review_agents/context/increment.py",
+   "line_start": 90,
+   "line_end": 90,
+   "severity": "important",
+   "title": "diff() drops stderr and raises only on nonzero exit; special or quotePath-sensitive filenames may break",
+   "why": "run_git returns stdout only; the _FILE regex splits on ' b/', which is fine for most paths, but a path containing ' b/' or starting with quotes would misparse, producing wrong new_path keys and silently dropping increments. The -c core.quotePath=false handles octal quoting but not embedded ' b/'."
+  },
+  {
+   "file": "src/review_agents/context/increment.py",
+   "line_start": 122,
+   "line_end": 127,
+   "severity": "important",
+   "title": "Only added hunk lines are considered; a hunk that only modifies lines present only in the new side but also touches existing PR lines is missed",
+   "why": "kept uses hunk.added overlap with now. If a hunk adds zero lines but the author's change is a modification (removed+added), added is non-None so it works. But if the hunk deletes lines that the PR had previously added (removed overlap with before) AND also changed existing line via replacement is fine. The real gap: hunk.added is the whole new-side range of the hunk, including context-free lines, but with -U0 added covers all new lines in hunk. However removed check uses before.get(hunk.old_path) — if the file was renamed between previous_head and head, old_path in between-diff may not match before's path, so a taken-back change across a rename is not detected."
+  },
+  {
+   "file": "src/review_agents/context/increment.py",
+   "line_start": 100,
+   "line_end": 100,
+   "severity": "robustness",
+   "title": "UTF-8 replace can corrupt paths",
+   "why": "decode('utf-8','replace') replaces invalid bytes with U+FFFD; a filename that is not valid UTF-8 (allowed on Linux) will have its path corrupted, so its increment lines get keyed under a path that does not match the PR's real path, dropping that file's review."
+  },
+  {
+   "file": "src/review_agents/context/increment.py",
+   "line_start": 108,
+   "line_end": 111,
+   "severity": "important",
+   "title": "Only GitError is caught, not other git failures such as timeouts",
+   "why": "run_git may raise other exceptions (e.g., subprocess timeout or GitError only per code). If run_git surfaces TimeoutExpired separately, increment() crashes instead of returning None for a full review."
+  },
+  {
+   "file": "src/review_agents/context/increment.py",
+   "line_start": 122,
+   "line_end": 122,
+   "severity": "blocking",
+   "title": "hunk.new_path is used as the key for 'now' and 'before' lookups but the PR diff and between-diff may name the same file differently due to rename detection",
+   "why": "now/before are computed with -M (rename detection) so a renamed file's new_path in now is the new name; between also uses -M, so new_path should match for forward renames. But hunk.old_path for before is compared against hunk.old_path from between — if the file was renamed between base and previous_head the old_paths differ, so taking back a PR-added line in a file that was later renamed won't match before.get(hunk.old_path), missing the removal. The removed-side check therefore depends on path agreement that rename detection does not guarantee."
+  },
+  {
+   "file": "src/review_agents/context/increment.py",
+   "line_start": 67,
+   "line_end": 74,
+   "severity": "important",
+   "title": "Hunk added/removed ranges may be empty but the hunk can still be the author's change if it modifies lines not in the PR",
+   "why": "For a deletion-only hunk, added is None and removed is set; the code checks removed overlap with before. Good. But for a pure-addition hunk hunk.at uses max(new_start,1) which for a hunk that deletes at start of file (new_count=0) yields new_start which may point past EOF or to a line that shifts; the taken-back marker line may be off by one or out of range of the file at head."
+  },
+  {
+   "file": "src/review_agents/context/increment.py",
+   "line_start": 130,
+   "line_end": 131,
+   "severity": "robustness",
+   "title": "Empty Increment.lines when only removals of non-PR lines occur is correct, but empty==True when a deletion of PR-added content at a path with no other lines was recorded under a different path key",
+   "why": "Path key mismatch (see rename finding) can leave lines empty while the PR did change something, causing the round to be treated as 'nothing to review' and skip review entirely — a missed review rather than a full review."
+  }
+ ],
+ "content": null,
+ "error": null
+}

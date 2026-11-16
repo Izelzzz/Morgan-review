@@ -1,0 +1,78 @@
+{
+ "case": "py-mr-context-markup-001",
+ "run": 3,
+ "model": "deepseek-flash",
+ "seconds": 248.1,
+ "usage": {
+  "prompt_tokens": 11746,
+  "completion_tokens": 48374,
+  "total_tokens": 60120,
+  "prompt_tokens_details": {
+   "cached_tokens": 11520
+  },
+  "completion_tokens_details": {
+   "reasoning_tokens": 47670
+  },
+  "prompt_cache_hit_tokens": 11520,
+  "prompt_cache_miss_tokens": 226
+ },
+ "findings": [
+  {
+   "file": "src/review_agents/context/markup.py",
+   "line_start": 11,
+   "line_end": 11,
+   "severity": "blocking",
+   "title": "Untrusted source attribute is not escaped",
+   "why": "`source` is interpolated into the opening `<untrusted source=\"...\">` tag without escaping. Repository paths used as sources (nested AGENTS.md/CLAUDE.md paths and module paths) can contain quotes and `</untrusted>`, which can close the data block or forge tags, letting attacker-controlled names escape the data context."
+  },
+  {
+   "file": "src/review_agents/context/summarizer.py",
+   "line_start": 21,
+   "line_end": 21,
+   "severity": "blocking",
+   "title": "Module path is outside the untrusted block in the summary prompt",
+   "why": "`Module: {path}` is placed before the `<untrusted>` block. Directory names are repository content, so a crafted directory name can inject instructions that are not marked as data and can steer the finder model's summary."
+  },
+  {
+   "file": "src/review_agents/context/repo_layer.py",
+   "line_start": 103,
+   "line_end": 103,
+   "severity": "important",
+   "title": "Layer cache key ignores skip_paths",
+   "why": "The cached conventions and directory tree depend on `skip_paths`, but `_key` hashes only tree id, LAYER_VERSION and memory_version. Changing skip rules reuses stale conventions/tree (showing skipped files or omitting newly included ones) while module summaries use the new rules."
+  },
+  {
+   "file": "src/review_agents/config.py",
+   "line_start": 61,
+   "line_end": 61,
+   "severity": "important",
+   "title": "summary budget setting is never wired",
+   "why": "`summary_tokens_per_build` is added as the cost safety net, but no code in this change reads it to construct a TokenBudget/UsageMeter. `module_summaries` only stops on a BudgetExceededError supplied by an external `summarize`, so the default summary path has no enforced cap."
+  },
+  {
+   "file": "src/review_agents/context/modules.py",
+   "line_start": 167,
+   "line_end": 167,
+   "severity": "robustness",
+   "title": "Sample truncation can exceed the token budget for wide characters",
+   "why": "The excerpt length assumes four characters per token, but `estimate_tokens` counts non-ASCII characters as roughly one token each. A CJK-heavy file can produce an excerpt up to four times the remaining `_SAMPLE_TOKENS`, blowing the sample/context budget."
+  },
+  {
+   "file": "src/review_agents/context/git.py",
+   "line_start": 66,
+   "line_end": 66,
+   "severity": "robustness",
+   "title": "read_text scans the full file list for every lookup",
+   "why": "`read_text` linearly searches `self.files()` on each call. `sample_module` calls it per module file, making summary generation O(files^2) on large repositories and potentially very slow."
+  },
+  {
+   "file": "src/review_agents/context/modules.py",
+   "line_start": 109,
+   "line_end": 119,
+   "severity": "robustness",
+   "title": "Recursive module splitting can hit Python recursion limit",
+   "why": "`subtree` and `marked_below` recurse once per directory level. A repository with a deep enough tree (within git path limits) raises RecursionError and aborts context construction."
+  }
+ ],
+ "content": null
+}

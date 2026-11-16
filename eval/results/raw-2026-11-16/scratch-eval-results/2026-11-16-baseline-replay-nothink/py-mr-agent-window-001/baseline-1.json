@@ -1,0 +1,109 @@
+{
+ "case": "py-mr-agent-window-001",
+ "run": 1,
+ "model": "deepseek-flash",
+ "thinking": "disabled",
+ "seconds": 13.2,
+ "usage": {
+  "prompt_tokens": 6472,
+  "completion_tokens": 2049,
+  "total_tokens": 8521,
+  "prompt_tokens_details": {
+   "cached_tokens": 0
+  },
+  "prompt_cache_hit_tokens": 0,
+  "prompt_cache_miss_tokens": 6472
+ },
+ "findings": [
+  {
+   "file": "src/review_agents/pipeline/conversation.py",
+   "line_start": 120,
+   "line_end": 132,
+   "severity": "important",
+   "title": "fit() re-encodes already-shortened results and re-shrinks them, and never converges when shortened_tokens > result_tokens//2",
+   "why": "answer() calls shorten(result, result_tokens // 2, ...). For short results (<= result_tokens//2) that are <=2*keep_tokens the text is returned unchanged, but _Result.shortened stays False. fit() then calls shorten(result.text, shortened_tokens, ...) on the already-capped text. If the result was already cut by short_tokens boundaries... actually the real bug: results that answer() already shortened to result_tokens//2 will fit() re-shorten to shortened_tokens (smaller), which is intended for old results. But if shortened_tokens >= the head/tail the answer() already produced, shorten() returns the same text because total <= 2*shortened_tokens, yet result.shortened is set to True, so the loop marks it done without shrinking — fine. The actual defect: when result texts are all already shortened and total still exceeds room (e.g. many results, shortened_tokens too big relative to window), fit() returns having done nothing and the call still overflows the window, defeating the guard."
+  },
+  {
+   "file": "src/review_agents/pipeline/conversation.py",
+   "line_start": 117,
+   "line_end": 132,
+   "severity": "important",
+   "title": "fit() shrinks oldest results but ignores AIMessage growth and the most recent tool result",
+   "why": "Each model turn appends a fresh AIMessage with tool_calls and a large ToolMessage. fit() only cuts results already appended before this point (the ones in self._results) and only ever marks each once; the just-appended latest result is cut to result_tokens, not shortened_tokens, and the newest AIMessage is never considered. If a single new result plus already-cut-old results still exceed room, conversation_tokens stays over window - the invariant 'conversation and a reply fit the window' is not guaranteed."
+  },
+  {
+   "file": "src/review_agents/pipeline/agent.py",
+   "line_start": 158,
+   "line_end": 158,
+   "severity": "important",
+   "title": "conversation.fit(messages) is called before every model call but the SystemMessage/prompt-pack is never accounted for and truncation cannot shrink it",
+   "why": "fit only mutates ToolMessages it tracked. The initial system/human pack (which may take up to 4/5 of the window per D-030) plus the remaining assistant turns can already exceed room; fit then loops over all results, marks each shortened, and exits with total still > room, then invokes the model with an over-window prompt. The guard silently fails instead of preventing the overflow it was added to prevent."
+  },
+  {
+   "file": "src/review_agents/pipeline/conversation.py",
+   "line_start": 60,
+   "line_end": 97,
+   "severity": "robustness",
+   "title": "shorten() note-token accounting can push the result over the limit and the character fallback can return two identical slices",
+   "why": "_take keeps within keep_tokens per side, but the note line and the '[... left out ...]' marker are added on top, so the result can exceed 2*keep_tokens plus the note; the total budget (e.g. result_tokens) is not strictly enforced. Also when head/tail are empty (every line longer than keep_tokens), the char fallback is used, but if len(text) < 2*chars the 'text[-chars:]' and 'text[:chars]' slices overlap and the 'left out' count becomes negative — the marker claims characters were left out when none were."
+  },
+  {
+   "file": "src/review_agents/pipeline/conversation.py",
+   "line_start": 76,
+   "line_end": 79,
+   "severity": "robustness",
+   "title": "halving chars down from keep_tokens*3 may never satisfy estimate_tokens <= keep_tokens for scripts with more than one token per char, producing an over-budget slice",
+   "why": "The loop only halves while chars > 1 and the estimate exceeds keep_tokens. For a pathological script estimate_tokens(text[:1]) could still exceed keep_tokens if keep_tokens is very small (e.g. 1) or the estimator returns > keep_tokens for a single character; the loop stops at chars == 1 and returns text of 1 char per side plus notes, exceeding the limit. With shortened_tokens=1 and an expensive estimator the result overflows the intended cap."
+  },
+  {
+   "file": "src/review_agents/pipeline/agent.py",
+   "line_start": 245,
+   "line_end": 265,
+   "severity": "important",
+   "title": "_answer no longer returns a ToolMessage; the SUBMIT_ONLY and error paths must keep ordering, but tool_call_id is typed str|None and conversation.answer accepts None",
+   "why": "ToolMessage tool_call_id is required; Conversation.answer signature takes call_id: str | None and forwards it to ToolMessage, which requires a string. A tool_call without an id (possible from a provider) would produce an invalid ToolMessage, and downstream the assistant message's tool_call id would not match, breaking the conversation contract."
+  },
+  {
+   "file": "src/review_agents/pipeline/conversation.py",
+   "line_start": 88,
+   "line_end": 95,
+   "severity": "robustness",
+   "title": "Repeat reminder counts a key by tool+args including result-varying calls but suffix is only appended, never trimmed, so shortening preserves stale reminders",
+   "why": "When fit() shortens a result it re-wraps with the original suffix; that is fine, but answer() computes times before shortening and the suffix text 'You have made this exact call N times' is fixed. If the same call is shortened then later the result grows, no issue; however REPEAT_REMINDER_AT is a module constant not a server setting, contradicting the PR description that 'the three numbers are server settings'."
+  },
+  {
+   "file": "src/review_agents/pipeline/run.py",
+   "line_start": 336,
+   "line_end": 344,
+   "severity": "blocking",
+   "title": "settings.finder_model.context_tokens is asserted non-None but the model field may not expose context_tokens; window falls back silently if the attribute name is wrong",
+   "why": "Code assumes finder_model has a context_tokens attribute. If the model config object stores the window under a different name (the diff never shows its definition), this raises AttributeError at review start — a crash rather than a degraded guard. The assert only checks non-None, not the attribute's presence."
+  },
+  {
+   "file": "src/review_agents/pipeline/conversation.py",
+   "line_start": 145,
+   "line_end": 145,
+   "severity": "important",
+   "title": "_message wraps the already-wrapped text: double untrusted() when shortening",
+   "why": "answer() calls _message(tool, text, ...) which wraps text with untrusted(). fit() then calls _message(result.tool, result.text, ...) again, but result.text was stored *before* wrapping in answer() (good). However when a later fit re-shortens an already-shortened result, result.text was replaced by shorten(result.text,...) — still unwrapped, so OK. The real double-wrap risk: answer() stores text pre-wrap; fine. No double wrap. But shorten() on an already-shortened text (the second fit path can't happen due to shortened flag) — guarded. Not a bug; drop."
+  },
+  {
+   "file": "tests/test_pipeline_run.py",
+   "line_start": 566,
+   "line_end": 572,
+   "severity": "important",
+   "title": "Test asserts every tool result contains 'Shortened' even though the tool result for read_file may be under the limit and repeat reminder absent",
+   "why": "With tool_result_tokens=10, the read_file result is shortened to keep_tokens=5, and the assertion expects 'Shortened' in every result — the submit-only result and any error ToolMessage won't contain it. The test only passes because filter m.type == 'tool' may still include error/short messages. This makes the test fragile to the exact behavior it should verify: that shortening was applied exactly once with the right marker."
+  },
+  {
+   "file": "src/review_agents/pipeline/conversation.py",
+   "line_start": 104,
+   "line_end": 132,
+   "severity": "robustness",
+   "title": "conversation_tokens counts str(message.content) but ToolMessage content after untrusted() wrapping includes the data block markup, so token accounting drifts from what the model sees",
+   "why": "fit computes total once from conversation_tokens (which stringifies content including the <untrusted> wrapper added by _message) and then adjusts by delta of str(content). That is internally consistent, but answer() stores _Result.text as the pre-untrusted text and shorten() is computed against that raw text, while fit's budget check uses the wrapped text. The overhead of wrapping is not accounted when deciding how much to keep, so a result can exceed room by the markup cost on every result — a systematic under-estimate of the window usage."
+  }
+ ],
+ "content": null,
+ "error": null
+}

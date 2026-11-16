@@ -1,0 +1,78 @@
+{
+ "case": "py-mr-context-markup-001",
+ "run": 2,
+ "model": "deepseek-flash",
+ "seconds": 268.5,
+ "usage": {
+  "prompt_tokens": 11746,
+  "completion_tokens": 50897,
+  "total_tokens": 62643,
+  "prompt_tokens_details": {
+   "cached_tokens": 11520
+  },
+  "completion_tokens_details": {
+   "reasoning_tokens": 50189
+  },
+  "prompt_cache_hit_tokens": 11520,
+  "prompt_cache_miss_tokens": 226
+ },
+ "findings": [
+  {
+   "file": "src/review_agents/context/markup.py",
+   "line_start": 11,
+   "line_end": 11,
+   "severity": "blocking",
+   "title": "untrusted() does not escape the source attribute",
+   "why": "The function only defuses closing tags in text, but callers pass repository-controlled paths as source. A path containing a quote or '</untrusted>' can break the opening tag or forge a closing tag, so repository content can escape the data block and be read as instructions."
+  },
+  {
+   "file": "src/review_agents/context/summarizer.py",
+   "line_start": 21,
+   "line_end": 21,
+   "severity": "blocking",
+   "title": "Module path is outside the untrusted block in the summarizer prompt",
+   "why": "The repository-controlled module path is interpolated into HumanMessage before the <untrusted> block. Directory names can contain newlines or instruction text, so a malicious repository can prompt-inject the summarizer even after the block's closing tag is defused."
+  },
+  {
+   "file": "src/review_agents/context/modules.py",
+   "line_start": 125,
+   "line_end": 125,
+   "severity": "important",
+   "title": "Package-marker directories larger than 50 files are split",
+   "why": "The condition requires both len(all_files) <= MAX_MODULE_FILES and not marked_below(path), but never checks has_marker(path). A directory with package.json et al. and more than 50 files therefore falls through to the split branch, contradicting 'whatever its size' and fragmenting package modules."
+  },
+  {
+   "file": "src/review_agents/context/repo_layer.py",
+   "line_start": 102,
+   "line_end": 104,
+   "severity": "important",
+   "title": "Repo layer cache key ignores skip_paths",
+   "why": "_key hashes only LAYER_VERSION, tree id and memory_version. Changing skip rules leaves the tree id unchanged, so cached conventions/tree can keep files that should now be skipped (or omit newly included ones), leaking stale/skipped content into the context."
+  },
+  {
+   "file": "src/review_agents/context/modules.py",
+   "line_start": 166,
+   "line_end": 166,
+   "severity": "robustness",
+   "title": "Sample excerpt can exceed the token cap for wide characters",
+   "why": "The slice uses remaining * 4, assuming four characters per token, while estimate_tokens counts each non-ASCII character as a token. A CJK/emoji-heavy file can make the sample several times larger than _SAMPLE_TOKENS, risking context overflow and extra cost."
+  },
+  {
+   "file": "src/review_agents/context/modules.py",
+   "line_start": 197,
+   "line_end": 197,
+   "severity": "robustness",
+   "title": "Empty model output is cached as a valid summary",
+   "why": "summarize(...).strip() can produce the empty string, which is not None. It is then cached and later loaded as a summary, so the module never falls back to stats and is not retried until its files change."
+  },
+  {
+   "file": "src/review_agents/context/modules.py",
+   "line_start": 173,
+   "line_end": 173,
+   "severity": "important",
+   "title": "Module cache key serialization is ambiguous",
+   "why": "Paths and blob ids are joined with newline and '=' without escaping. Git paths may contain newlines and '=', so a crafted file set can serialize to the same string as a different set, causing a stale summary to be reused after the module content changes."
+  }
+ ],
+ "content": null
+}

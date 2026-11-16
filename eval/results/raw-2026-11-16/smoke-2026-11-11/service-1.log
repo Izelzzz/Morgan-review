@@ -1,0 +1,30 @@
+INFO:     Started server process [726]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://127.0.0.1:8080 (Press CTRL+C to quit)
+INFO:     127.0.0.1:52702 - "GET /healthz HTTP/1.1" 200 OK
+INFO:     127.0.0.1:43996 - "POST /v1/reviews HTTP/1.1" 202 Accepted
+INFO:     127.0.0.1:44012 - "GET /v1/reviews/1 HTTP/1.1" 200 OK
+ERROR:review_agents.worker:review 1 failed
+Traceback (most recent call last):
+  File "/home/user/review-lab-wt/ci/src/review_agents/worker.py", line 72, in run_once
+    handler(conn, review_id)
+  File "/home/user/review-lab-wt/ci/src/review_agents/api.py", line 101, in run_review
+    handler(conn, review_id)
+  File "/home/user/review-lab-wt/ci/src/review_agents/pipeline/run.py", line 902, in handle
+    run_review(
+  File "/home/user/review-lab-wt/ci/src/review_agents/pipeline/run.py", line 305, in run_review
+    git_dir = store.sync(
+              ^^^^^^^^^^^
+  File "/home/user/review-lab-wt/ci/src/review_agents/mirror.py", line 174, in sync
+    self._fetch(git_dir, [url, *refspecs], env, token, deadline, clock)
+  File "/home/user/review-lab-wt/ci/src/review_agents/mirror.py", line 195, in _fetch
+    run_git(
+  File "/home/user/review-lab-wt/ci/src/review_agents/mirror.py", line 109, in run_git
+    raise GitError(f"git {args[0]} failed: {message}")
+review_agents.mirror.GitError: git fetch failed: fatal: could not read Username for 'https://github.com': terminal prompts disabled
+INFO:     127.0.0.1:33558 - "GET /v1/reviews/1 HTTP/1.1" 200 OK
+INFO:     Shutting down
+INFO:     Waiting for application shutdown.
+INFO:     Application shutdown complete.
+INFO:     Finished server process [726]

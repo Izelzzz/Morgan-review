@@ -1,0 +1,93 @@
+{
+ "case": "py-mr-strategy-room-001",
+ "run": 1,
+ "model": "deepseek-flash",
+ "thinking": "disabled",
+ "seconds": 12.2,
+ "usage": {
+  "prompt_tokens": 9581,
+  "completion_tokens": 1915,
+  "total_tokens": 11496,
+  "prompt_tokens_details": {
+   "cached_tokens": 0
+  },
+  "prompt_cache_hit_tokens": 0,
+  "prompt_cache_miss_tokens": 9581
+ },
+ "findings": [
+  {
+   "file": "src/review_agents/pipeline/run.py",
+   "line_start": 578,
+   "line_end": 590,
+   "severity": "blocking",
+   "title": "Deadlock: walkthrough_first agents wait on the walkthrough thread pool slot they hold",
+   "why": "The walkthrough (`write`) is submitted to the same `finders` ThreadPoolExecutor as the dimension jobs. An agent with `after_walkthrough=True` calls `wait([written], ...)` from *inside* a worker thread while the walkthrough future is still pending. If the pool is fully occupied by dimension workers that block in `find`, no thread is left to execute `write`, so the walkthrough never completes, the wait never unblocks, and the whole review hangs until the outer deadline. The comment claims the walkthrough is queued first so this cannot happen, but queuing order does not guarantee execution once the pool is saturated. Under `walkthrough_first` with several groups/runs this is easy to hit."
+  },
+  {
+   "file": "src/review_agents/pipeline/run.py",
+   "line_start": 377,
+   "line_end": 381,
+   "severity": "important",
+   "title": "dimensions stops respecting config.dimensions readiness/toggle semantics",
+   "why": "`plan()` now derives the dimensions from `config.enabled_dimensions` (via `mode_plan` in strategy.py), while the pre-refactor code read `getattr(config.dimensions, d)`. If `enabled_dimensions` has different semantics from the per-field booleans (ordering, defaults, or a separate 'unset' representation), strategies like `general`/`walkthrough_first` could include dimensions the old code excluded or vice versa. The test `test_a_single_dimension_needs_no_general_agent` only covers the fully-explicit case; the mapping between the two representations is not verified here, so a change in `repo_config` semantics silently changes which agents run."
+  },
+  {
+   "file": "src/review_agents/pipeline/strategy.py",
+   "line_start": 54,
+   "line_end": 59,
+   "severity": "important",
+   "title": "Strategy is not validated/normalized against the literal at the boundary",
+   "why": "`plan()` accepts `Strategy` but never validates the incoming value; `Settings.strategy` is a `Literal`, but `run_review` passes `settings.strategy` straight through. If a strategy outside the literal ever reaches `plan` (e.g. a config object constructed with `model_copy` bypassing pydantic validation, as the tests themselves do), the `else` branch silently treats it as `general` plus `walkthrough_first`, changing behavior without error. There's no explicit fallback or assertion."
+  },
+  {
+   "file": "src/review_agents/context/pack.py",
+   "line_start": 54,
+   "line_end": 66,
+   "severity": "important",
+   "title": "General task tells the agent to tag findings, but the shared rules' output format may not include a dimension field",
+   "why": "The new general task instructs 'set its `dimension` field to the one dimension above it belongs to most', and the fallback in `run_dimension` (agent.py:350-352) rewrites tags outside `held` back to the agent's name (`GENERAL`). The shared rules' submission schema is what actually defines whether `dimension` exists and what values it accepts; if the shared rules' schema doesn't declare `dimension` (or validates against `DIMENSIONS` only), `Submission.model_validate` will either reject the submission or drop the field, and every general finding will end up tagged `GENERAL`, losing the per-dimension attribution the whole strategy depends on. The change adds the instruction without a corresponding schema change."
+  },
+  {
+   "file": "src/review_agents/pipeline/agent.py",
+   "line_start": 350,
+   "line_end": 353,
+   "severity": "robustness",
+   "title": "Untrusted-tag fallback collapses all invalid tags to the agent's name (GENERAL), not to a held dimension",
+   "why": "When a general agent's finding carries a tag not in `held`, `item.dimension = dimension` sets it to `GENERAL` (the job's name), not to any real dimension. Downstream, `GENERAL` is not one of `DIMENSIONS`, so merging, ranking, and the report's per-dimension summary may drop it or misclassify it. A safer fallback would be a held dimension (or the first enabled one). The test `test_a_general_agent_s_findings_keep_the_dimension_it_tagged` even asserts this behavior for `spec_drift` when only `edge_cases`/`security` are held."
+  },
+  {
+   "file": "src/review_agents/pipeline/run.py",
+   "line_start": 576,
+   "line_end": 591,
+   "severity": "robustness",
+   "title": "Opening transcript shares mutable message objects with the walkthrough's run",
+   "why": "The walkthrough's `transcript` is built from `messages` (the list handed to `tool_loop`). That list, and possibly its messages, may have been mutated in place by `tool_loop`/model callbacks during the walkthrough run. The finder then extends it (`messages = [*opening, messages[-1]]`) and hands it to another `tool_loop` which will append to it. If `tool_loop` mutates the incoming list in place (a `list` parameter with `.append`), the walkthrough's stored transcript will be mutated by the finder's run, corrupting any retry/observability that reads `written.result().transcript`. Copy-on-use or a frozen transcript is needed."
+  },
+  {
+   "file": "src/review_agents/pipeline/run.py",
+   "line_start": 580,
+   "line_end": 586,
+   "severity": "robustness",
+   "title": "wait() then checking .done() has a TOCTOU gap with the shared futures pool and budget",
+   "why": "The code waits with a timeout equal to `submit_by - clock`, then checks `written.done()`. Between the wait returning due to timeout and the `done()` check, the walkthrough could complete; the agent then races into `opening = written.result().transcript` with essentially no time budget left, or conversely the walkthrough completes just after the check and is ignored. More importantly, the timeout uses `submit_by` but `tool_loop` will then re-check its own deadline; an agent whose wait consumed the entire budget will start its model call with zero time remaining and immediately hit a time limit, producing a 'no findings' result that looks like the agent failed rather than being starved. There's no handling for 'the wait consumed the budget'."
+  },
+  {
+   "file": "src/review_agents/walkthrough.py",
+   "line_start": 243,
+   "line_end": 247,
+   "severity": "robustness",
+   "title": "transcript built from `messages` list that tool_loop may have mutated",
+   "why": "`messages` is passed to `tool_loop` and then the same list is used to build `transcript`. If `tool_loop` appends the assistant tool-call message and the tool result to the list (typical for a chat loop), the transcript will already contain the assistant call, and the code then appends *another* `ToolMessage` for `submit_id`, producing a duplicate/corrupt conversation for any agent that carries on from it. The test only exercises a simple single-submit case via `ScriptedModel.sent`, which may not reflect in-place mutation. Needs verification or an explicit snapshot before `tool_loop` runs."
+  },
+  {
+   "file": "src/review_agents/pipeline/run.py",
+   "line_start": 377,
+   "line_end": 379,
+   "severity": "important",
+   "title": "repeats/dimensions unpacked from plan but used to compute verifying only; state not propagated to steps",
+   "why": "`dimensions, repeats = planned.dimensions, planned.runs` is computed, but `dimensions` is not used except to seed the report's 'reviewed' list, and `repeats` is dropped in favor of `plan_jobs`. If any downstream step (e.g. `_step(conn, review_id, ...)`) or report generation depended on the pre-refactor local `dimensions` list to mark which dimensions were reviewed, the switch to `planned.dimensions` (which for `general` returns all enabled dimensions) could change reporting semantics — e.g. Quick mode with `general` reports both `edge_cases` and `security` as 'reviewed' even when only one finding was produced. No assertion or test covers the report's dimension list for quick+general."
+  }
+ ],
+ "content": null,
+ "error": null
+}

@@ -1,0 +1,94 @@
+{
+ "case": "py-mr-mirror-tools-001",
+ "run": 1,
+ "model": "deepseek-flash",
+ "seconds": 322.4,
+ "usage": {
+  "prompt_tokens": 9799,
+  "completion_tokens": 60751,
+  "total_tokens": 70550,
+  "prompt_tokens_details": {
+   "cached_tokens": 0
+  },
+  "completion_tokens_details": {
+   "reasoning_tokens": 59640
+  },
+  "prompt_cache_hit_tokens": 0,
+  "prompt_cache_miss_tokens": 9799
+ },
+ "findings": [
+  {
+   "file": "src/review_agents/tools.py",
+   "line_start": 81,
+   "line_end": 81,
+   "severity": "important",
+   "title": "RepoTools accepts an unvalidated commit and passes it to git as an argument",
+   "why": "The constructor stores `commit` without checking that it is a 40-hex SHA. `search_code` and `git_log` pass `self._commit` as a standalone git argument, so a value beginning with `--` is parsed as a git option (e.g. `git grep --open-files-in-pager=...` can execute a command, `git log --output=...` can write a file). `MirrorStore.sync` validates commits, but `RepoTools` does not enforce that invariant, so any caller forwarding webhook/PR data without going through sync is exposed."
+  },
+  {
+   "file": "src/review_agents/tools.py",
+   "line_start": 56,
+   "line_end": 62,
+   "severity": "important",
+   "title": "Agent-controlled path/pattern with NUL crashes the tool",
+   "why": "`_clean_path` does not reject NUL, and `search_code` also passes an agent-supplied pattern to subprocess without rejecting NUL. Python's subprocess raises `ValueError: embedded null byte` before git runs; `ToolBudget.wrap` only catches `ToolError`, so the agent's tool call aborts instead of returning an error string. Reject control/NUL bytes before building git arguments."
+  },
+  {
+   "file": "src/review_agents/tools.py",
+   "line_start": 153,
+   "line_end": 156,
+   "severity": "important",
+   "title": "search_code can bypass skip rules via quoted git grep paths",
+   "why": "`git grep` quotes unusual pathnames by default (`core.quotePath`). The code extracts text before the first colon as `path` and compares that raw text against skip globs. For a file under a skipped directory whose name contains a non-ASCII/control/quote character, the parsed path includes quotes/escapes and does not match `is_skipped` (or `path_glob`), so matching lines from a skipped file are returned. Use `git grep -z` and parse NUL-delimited, verbatim paths before filtering."
+  },
+  {
+   "file": "src/review_agents/tools.py",
+   "line_start": 139,
+   "line_end": 161,
+   "severity": "important",
+   "title": "search_code buffers unbounded output and ignores MAX_FILE_BYTES",
+   "why": "`run_git` uses `capture_output=True` on `git grep`, so the entire match set is read into memory before `MAX_SEARCH_MATCHES` is applied. It also searches every text file regardless of `MAX_FILE_BYTES`, contrary to the stated 200 KB limit. A large repository or a file with a very long matching line can exhaust memory/agent context."
+  },
+  {
+   "file": "src/review_agents/tools.py",
+   "line_start": 204,
+   "line_end": 207,
+   "severity": "robustness",
+   "title": "ToolBudget check-and-increment is racy",
+   "why": "The limit check and `self.used += 1` are separate operations without a lock. If an agent invokes tools concurrently, two calls can both observe `used < limit` and both execute, exceeding the 25-call budget. Use an atomic counter or lock."
+  },
+  {
+   "file": "src/review_agents/tools.py",
+   "line_start": 124,
+   "line_end": 131,
+   "severity": "robustness",
+   "title": "list_dir returns an unbounded number of entries",
+   "why": "There is no cap on the number of entries or output size. A repository with a very large directory can produce a massive response, exhausting memory or the agent context; the other tools have per-call limits, but this one does not."
+  },
+  {
+   "file": "src/review_agents/tools.py",
+   "line_start": 34,
+   "line_end": 49,
+   "severity": "robustness",
+   "title": "Agent-supplied path_glob can cause catastrophic regex backtracking and cache growth",
+   "why": "`_glob_regex` translates `**` to `.*` and is decorated with unbounded `@cache`. A path_glob supplied by the agent (prompt-injectable) can compile to overlapping `.*` sequences that backtrack exponentially on long paths, and every distinct pattern is retained forever. Limit pattern length/use a safe glob implementation, and bound the cache."
+  },
+  {
+   "file": "src/review_agents/tools.py",
+   "line_start": 184,
+   "line_end": 185,
+   "severity": "robustness",
+   "title": "read_issue does not handle non-JSON API responses",
+   "why": "`json.load(response)` can raise `json.JSONDecodeError` or `UnicodeDecodeError` (for example, a proxy/rate-limit/HTML response). Those exceptions are not caught, and `ToolBudget.wrap` only catches `ToolError`, so the tool call crashes instead of returning an error string."
+  },
+  {
+   "file": "src/review_agents/mirror.py",
+   "line_start": 120,
+   "line_end": 120,
+   "severity": "robustness",
+   "title": "git fetch has no timeout",
+   "why": "`run_git` runs `git fetch` with no timeout. A stalled network or malicious/unresponsive remote can block the review process indefinitely; `read_issue` already uses a 10-second timeout, but mirror sync does not."
+  }
+ ],
+ "content": null
+}

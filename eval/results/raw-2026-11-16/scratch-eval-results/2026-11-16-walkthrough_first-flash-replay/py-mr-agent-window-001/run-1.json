@@ -1,0 +1,150 @@
+{
+ "id": 13,
+ "repo": "izelcompany/morgan-eval",
+ "pr": 4,
+ "base_sha": "3889bc42de3e2ef1cef83ba8f36e81d48bf4d313",
+ "head_sha": "05ba2a5d0b7062df20355b39bf1836e75f3c8a2d",
+ "round": 1,
+ "mode": "standard",
+ "status": "done",
+ "error": null,
+ "limit_hit": null,
+ "superseded_by": null,
+ "created_at": "2026-11-16T07:53:16.443Z",
+ "started_at": "2026-11-16T07:53:17.961Z",
+ "finished_at": "2026-11-16T07:59:05.511Z",
+ "report": {
+  "summary": "<!-- review-agents:summary -->\n## 审查结论：未发现阻断问题\n\n### 🔵 健壮性建议（2）\n- `Conversation.fit` 对每条结果只裁一次，裁完仍超窗口时没有任何后续手段 — `src/review_agents/pipeline/conversation.py:126-141`\n  原因：只有默认的 128k 窗口能靠 25 条裁剪后的结果勉强放下；窗口配小一些（本地模型常见）时，裁剪看起来生效了，实际上对话仍然溢出，agent 依旧失败，而且没有任何提示说明是窗口不够。\n  - 依据 · 路径\n    1. `src/review_agents/config.py:17-18`：窗口是可配置的服务设置，最小允许 8000 token，本地小模型是合法配置。\n    2. `src/review_agents/context/pack.py:84-92`：上下文包按窗口的 70%（1 - AGENT_SHARE=0.3）构造，因此包本身可以占掉窗口的 0.7 倍。\n    3. `src/review_agents/repo_config.py:63`：一个 agent 最多 25 次工具调用（默认值即上限）。\n    4. `src/review_agents/pipeline/conversation.py:122-124`：第一层把每个结果裁到 result_tokens//2 头尾各一份，最坏约 10k token。\n    5. `src/review_agents/pipeline/conversation.py:126-141`：fit 只对每条结果裁一次到 shortened_tokens(500) 头尾，已裁过的直接跳过；循环结束后没有任何补救（函数在 141 行结束）。\n    6. `src/review_agents/pipeline/agent.py:159-162`：每轮先 fit，紧接着把整段 messages 原样交给模型调用，没有其它收缩手段。\n    为什么：按窗口 32000 计算：room = 32000 - 4000 = 28000，上下文包最多占 0.7*32000 = 22400，只剩约 5.6k 给工具结果；而 25 次大结果（如 read_file 每次最多 200KB，第一层裁到约 10k）经 fit 各裁到约 1k 后仍有约 25k，加上包约 47k，远超 28000。fit 把所有结果都标成 shortened 后直接返回，下一次 invoke 仍发送约 47k token，provider 拒绝请求，异常被 agent.py 记成 run.reason，该维度以 incomplete 结束——正是本 PR 想避免的失败。窗口低于约 100k 时都可能复现，而 context_tokens 允许从 8000 起配置、本地小模型是明确支持的场景。\n  建议：在所有结果都裁过一次后仍不够时再做一步：把最旧的结果整条换成一句占位说明（或直接丢弃最早的若干条），直到对话加回复能落进窗口；同时把错误消息、`LIMIT_REACHED` 等也算进可裁剪的对象。\n  同类问题还在：`src/review_agents/pipeline/conversation.py:70-80`\n- 工具结果被裁剪时没有任何记录，事后无法判断 agent 是在残缺上下文里工作的 — `src/review_agents/pipeline/agent.py:159`\n  原因：当一次评审漏掉了本该发现的问题，维护者无法区分「模型没看出来」和「模型看到的代码被截掉了中间」：`AgentRun` 只有 done/incomplete 和 limit_hit，步骤表里也没有任何痕迹，排查只能靠猜。\n  - 依据 · 路径\n    1. `src/review_agents/pipeline/agent.py:159`：每轮模型调用前调用 conversation.fit(messages)，被裁剪的结果只会替换 messages 里对应那条 ToolMessage。\n    2. `src/review_agents/pipeline/conversation.py:126-141`：fit() 把旧结果换成长短头尾，只更新 _Result.text/_Result.shortened 和本地 messages 列表，不写日志、不改任何外部可见状态。\n    3. `src/review_agents/pipeline/conversation.py:9-18`：新模块只导入 json/Counter/dataclass/Any 和消息类型、markup、estimate_tokens，没有 logging。\n    4. `src/review_agents/pipeline/agent.py:76-85`：AgentRun 只有 findings/dropped/reason/limit_hit/tool_calls，没有记录被裁剪结果条数的字段。\n    5. `src/review_agents/pipeline/run.py:378-379`：只有 run.status != \"done\" 时才把 reason 写进 steps 表的 error，成功跑完的 agent 不留下任何裁剪痕迹。\n    为什么：裁剪只发生在进程内的 messages 列表和 ToolMessage 内容里（模型能看到 \"[Shortened: ...]\" 提示），而 AgentRun、steps 表和日志都没有任何关于裁剪发生了多少、裁到多短的记录，因此事后确实无法判断某次漏报是否因为上下文被截。\n  建议：在 `AgentRun` 上记一个计数（例如被裁剪的结果条数），或在 `_step` 的错误/备注里写出来；`conversation.py` 至少加一条 debug 日志，说明哪条结果、从多少 token 裁到多少。\n  同类问题还在：`tests/test_pipeline_run.py:560-572`\n\n### ⚪ 细节（1）\n- 描述说上下文包可能占窗口五分之四，代码实际按 70% 打包 — `src/review_agents/context/pack.py:84-100`\n  原因：读者按描述去核算剩余空间会算错：真实留给工具结果的空间比描述写的大约多 13k token，之后调参或排查窗口溢出时会以此为据。\n  - 依据 · 规格 PR 描述\n    > A context pack may take four fifths of the\n    - `src/review_agents/context/pack.py:28`：`AGENT_SHARE = 0.3`，即给 agent 留 30%。\n    - `src/review_agents/context/pack.py:87`：包的预算按 `int(window_tokens * (1 - AGENT_SHARE))` 计算，也就是 70% 窗口，不是 80%。\n    - `src/review_agents/context/modules.py:29-35`：五分之四出现在模块摘要的预算 `context_tokens * 4 // 5`，与上下文包无关。\n    为什么：描述用「包可能占窗口五分之四、128k 模型只剩约 25k token 给工具结果」来论证三个默认值，但 `build_packs` 把包限制在 70%，留出的空间约 38k；五分之四是模块摘要的预算。数值结论（10k/500/4k）不受影响，但描述的前提与代码不符。\n  建议：把描述里的「五分之四」改成代码里的 70%（或指出这个数字来自模块摘要预算），并把 25k 换成按 70% 算出的约 38k。\n\n### 本次审查的范围\n- 审了：规格漂移、边界问题、安全、可维护性、可验证性（各 1 次）· 8 个改动文件\n- 没审：改动文件都看了，各维度都交了卷\n- 能证明：发布的每条 🔴 / 🟡 都有程序核对过的依据，并经验证审查员重新读代码确认；引用的规则原文确实在所写的位置。\n- 不能证明：没有运行代码和测试；没有发现问题不代表没有问题；规格只来自 PR 描述、关联的 issue 和配置的规格文档；没验完的发现没有发布，不代表它们不成立。\n\n### 本次审查\nStandard 模式 · 1,608,912 token · 5 分 48 秒 · 审查 #13\n\n<!-- review-agents:counts {\"blocking\": 0, \"important\": 0, \"robustness\": 2, \"nit\": 1, \"complete\": true} -->\n",
+  "comments": [],
+  "counts": {
+   "blocking": 0,
+   "important": 0,
+   "robustness": 2,
+   "nit": 1,
+   "complete": true
+  },
+  "walkthrough": "<!-- review-agents:walkthrough -->\n## 📖 改动说明\n\nPR #4 · 8 个文件 · **+312 −10** · 1 次提交 · 决策 D-030\n\n**一句话：** 工具返回的内容和 agent 的对话历史现在都会被裁到模型的上下文窗口之内：单条结果只留头尾，窗口不够时先裁最旧的结果，同一个调用重复三次会得到提醒。\n\n#### 为什么改 — 一次大文件读取就可能超出模型窗口，而对话里没有任何东西会把历史收回来\n- `read_file` 直接返回文件内容，上限是 `MAX_FILE_BYTES`（`src/review_agents/tools.py:121-122`），而打包时只给 agent 留出窗口的 30%（`src/review_agents/context/pack.py:28` 与 `src/review_agents/context/pack.py:87`）。\n- 工具结果作为 ToolMessage 追加进对话后，改动前不会再被动过；窗口用满时没有第二层可以退。\n- 工具预算只按调用次数扣减（`src/review_agents/tools.py:234-252`），模型反复发同一个调用时只会安静地耗掉预算。\n- 同一 PR 还在镜像里显式装了 `apt`（`Dockerfile:22-23`），PR 描述没有提到这一项。\n\n#### 改了什么 — 新增 `Conversation`，在工具结果入库时和每次模型调用前两层裁剪，外加一个重复调用提醒\n- 新设置的默认值是 **10000 / 500 / 4000** token：单条结果上限、让位时头尾各留多少、给回复预留多少（`src/review_agents/config.py:75-81`）。\n- `shorten()` 保留**整行的头尾**并注明漏掉多少行；整行取不到时改按字符切，对中文这类文本也守住上限（`src/review_agents/pipeline/conversation.py:50-80`）。\n- `Conversation.fit()` 在每次调用模型前统计整段对话，把**最旧**的结果先裁到 500 token，再包回原来的数据块（`src/review_agents/pipeline/conversation.py:126-141`）。\n- 同一个工具加同样参数的第 **3** 次调用，结果末尾会附一句提醒（`src/review_agents/pipeline/conversation.py:110-124`）。\n\n#### 有什么影响 — 模型看到的是裁过的工具结果；最终发布的 finding 不受影响，但没有任何一条结果超出上限的保证\n- 裁剪只作用于工具结果和历史，发布的 finding 仍来自模型的提交。\n- 发给模型的输入 token 变少；代价是模型可能多调几次工具才看清中间部分。\n- 所有结果都裁到 500 token 后仍放不下时，`fit` 没有别的办法可退（`src/review_agents/pipeline/conversation.py:130-134`）。\n- 多出三个可选环境变量；窗口来源是 `finder_model.context_tokens`（`src/review_agents/config.py:18`）。\n\n```mermaid\nflowchart TD\n    A[\"fit()：统计整段对话的 token\"] --> B{\"超过 window - output_reserve？\"}\n    B -- 是 --> C[\"把最老的、还没裁过的结果裁到 shortened_tokens\"]\n    C --> B\n    B -- 否 --> D[\"调用模型\"]\n    D --> E{\"有工具调用？\"}\n    E -- 否 --> D\n    E -- 是 --> F[\"执行工具\"]\n    F --> G[\"answer()：超过 result_tokens 就裁\"]\n    G --> H[\"包回 untrusted 数据块，必要时加重复提醒\"]\n    H --> D\n```\n\n<details>\n<summary><b>01　为什么要改</b>（4 个问题）</summary>\n\n1. **一次工具返回就可能撑爆窗口** — read_file 会返回文件内容，上限是 MAX_FILE_BYTES（`src/review_agents/tools.py:121-122`），而上下文打包时只给 agent 留出窗口的 30%（AGENT_SHARE = 0.3，`src/review_agents/context/pack.py:28` 与 `src/review_agents/context/pack.py:87`）。一次大文件读取的结果就足以让这次模型调用超出窗口而失败。\n2. **对话历史只增不减** — 改动前，工具结果作为一个 ToolMessage 追加进 messages 后就不会再被动过；agent 多轮读取的累积只有「打包时预留 30%」这一层保护，窗口用满后没有第二步可以退。\n3. **重复同一个调用没有提示** — 工具预算只按调用次数扣减（`src/review_agents/tools.py:234-252`），模型反复发完全相同的调用时，只会安静地耗掉预算，直到被迫提交。\n4. **基础镜像之后发布的 apt 安全修复没有装进镜像** — 这项与上下文窗口无关：Dockerfile 的注释说 apt 被显式点名，是为了装上基础镜像发布后修复的 CVE-2026-109518（`Dockerfile:22-23`）。PR 描述里没有提到这个改动，原因只写在这条注释里。\n\n</details>\n\n<details>\n<summary><b>02　怎么改的</b>（7 处改动）</summary>\n\n**1. 三个新的服务设置（`src/review_agents/config.py`）**\n\nSettings 增加了三项，都可以用 `REVIEW_AGENTS_*` 环境变量覆盖：\n\n| 设置 | 默认 | 约束 | 含义 |\n|---|---|---|---|\n| `tool_result_tokens` | `10_000` | `ge=1` | 单条工具结果最多多少 token |\n| `shortened_result_tokens` | `500` | `ge=1` | 让位时头、尾各留多少 token |\n| `output_reserve_tokens` | `4_000` | `ge=0` | 给模型回复预留的空闲 |\n\n三个字段在 `src/review_agents/config.py:75-81`。窗口本身不是新设置，用已有的 `finder_model.context_tokens`（`src/review_agents/config.py:18`，默认 128000）。\n\nPR 描述说「一个上下文包可能占窗口的五分之四」，代码里 `build_packs` 实际按 `1 - AGENT_SHARE` 也就是 70% 算（`src/review_agents/context/pack.py:87`）；五分之四出现在模块摘要的预算里（`src/review_agents/context/modules.py:29-35`）。描述与代码在这一处不一致。\n\n**2. 每个维度 agent 拿到一份 `ConversationLimits`（`src/review_agents/pipeline/run.py`）**\n\n`_run_dimensions` 在提交任务前，从 `settings.finder_model.context_tokens` 和三个新设置组装一个 `ConversationLimits`，再传给每个 `run_dimension` 调用（`src/review_agents/pipeline/run.py:336-342` 与 `src/review_agents/pipeline/run.py:344-358`）。`finder_model` 为此加了一个断言，注释说它在评审开始时已检查过。同一个 `limits` 对象被这一批线程共享，它是 `frozen` 的 dataclass。\n\n**3. `shorten()`：保留头部与尾部，并说明中间去了哪里（`src/review_agents/pipeline/conversation.py`）**\n\n`shorten` 是纯函数，`keep_tokens` 指的是**头、尾各**多少 token（`src/review_agents/pipeline/conversation.py:50-80`）：\n\n1. 总 token 不超过 `2 * keep_tokens` 就原样返回，不裁剪。\n2. 否则按整行取头部（`_take`，`src/review_agents/pipeline/conversation.py:37-47`），反转后再取尾部，中间注明漏掉多少行。\n3. 头尾都取不到整行时（例如压缩成一行的代码），改按字符切：初始 `keep_tokens * 3` 个字符，然后折半，直到切出的头、尾各自都在预算内（注释说明中文这类文本会走到这一步）。\n\n说明文字分两种：`read_file` 提示用 `start_line` / `end_line` 读剩下的部分，其它工具提示把请求缩小。`read_file` 返回的行本来就带行号（`src/review_agents/tools.py:129`），所以保留下来的行能直接对应行区间。整个过程不调用模型、也不写摘要。\n\n**4. `Conversation.answer()`：结果入库时裁剪、包数据块、提醒重复（`src/review_agents/pipeline/conversation.py`）**\n\n每个成功执行的工具结果都经过 `answer`（`src/review_agents/pipeline/conversation.py:110-124`）：\n\n- 用 `json.dumps([tool, args], sort_keys=True)` 当键计数同一个调用；第 3 次起在结果末尾追加一句提醒，让它改变做法或提交（`REPEAT_REMINDER_AT = 3`，`src/review_agents/pipeline/conversation.py:22-24`）。\n- 按 `result_tokens // 2` 作为「头、尾各多少」调用 `shorten`，所以一条结果的实际上限就是 `result_tokens`。\n- 记下这条结果在 messages 里的下标、工具名、裁剪后的文本和尾注，作为之后可以再裁的对象。\n- 用 `_message` 把文本重新包进 `<untrusted source=\"tool:…\">` 数据块（`src/review_agents/pipeline/conversation.py:144-145`，包裹函数在 `src/review_agents/context/markup.py:9-12`）。重复提醒加在数据块**之外**，裁剪时重放同样的 `suffix` 就能保持不变。\n\n**5. `Conversation.fit()`：每次模型调用前先裁最旧的结果（`src/review_agents/pipeline/conversation.py`）**\n\n`run_dimension` 在 `bind_tools` 和 `invoke` 之前调用 `conversation.fit(messages)`（`src/review_agents/pipeline/agent.py:159`）。`fit` 先把整段对话按「文本 + `AIMessage` 的 `tool_calls` JSON」估一遍 token（`conversation_tokens`，`src/review_agents/pipeline/conversation.py:83-90`），可用空间是 `window - output_reserve`；然后从最旧的结果开始，把还没裁过的结果裁到 `shortened_tokens`，替换掉原来的 ToolMessage，并用新旧文本的差值修正总数（`src/review_agents/pipeline/conversation.py:126-141`）。已经裁过的结果会被跳过，够用了就提前返回。\n\n**6. `_answer()` 改成往 messages 里追加，而不是返回消息（`src/review_agents/pipeline/agent.py`）**\n\n改动前 `_answer` 返回一个 `ToolMessage`，由调用处追加；现在它直接追加（`src/review_agents/pipeline/agent.py:244-269`），因为 `Conversation` 需要知道消息落在列表的哪个位置。三种不是工具结果的消息仍然直接追加、不经过 `Conversation`：工具名不存在、预算已满返回的 `LIMIT_REACHED`，以及工具抛异常时的 `error: …`。它们会算进 `conversation_tokens`，但不会成为可裁剪的对象。同一循环里，`SUBMIT_ONLY`、`SUBMIT_IGNORED` 和提交格式出错时的 ToolMessage 也是直接追加（`src/review_agents/pipeline/agent.py:178-212`）。\n\n**7. 测试与镜像（`tests/`、`Dockerfile`）**\n\n- `run_dimension` 新增 `limits` 参数，默认值是模块级的 `ConversationLimits()`，注释说明它 frozen、可以安全共享（`src/review_agents/pipeline/agent.py:128`）；原有测试不传这个参数，行为不变。\n- 新增测试覆盖：长结果保留头尾并给出读取提示、窗口紧张时最老的结果先缩小、第三次相同调用被提醒、极少但极长的行和中文文本仍落在上限内（`tests/test_pipeline_agent.py:498-559`，夹具与辅助函数在 `tests/test_pipeline_agent.py:468-495`）。\n- 端到端测试把 `tool_result_tokens` 改成 10，断言发出去的每条工具结果都被裁剪；`ByDimension` 为此多记下每次调用收到的 messages（`tests/test_pipeline_run.py:63`）。\n- 镜像里 `apt-get install` 的包列表加了 `apt`（`Dockerfile:25-27`）。\n\n</details>\n\n#### 有什么影响\n\n| 方面 | 影响 |\n| --- | --- |\n| 结果用户看到的评审 | 最终发布的 finding 来自模型的提交，裁剪只作用于工具结果和历史；模型看到的是带「Shortened」说明的头尾片段，说明里写明了怎么把中间读回来。 |\n| 花费 | 发给模型的输入变短，单轮和整段对话的输入 token 都会减少；代价是模型可能因为看不到中间部分而多调几次工具。 |\n| 时间与性能 | 每一轮模型调用前 `fit` 都要把整段对话重新估一遍 token（`src/review_agents/pipeline/conversation.py:126-141`），估算走 tiktoken 的 o200k_base（`src/review_agents/context/tokens.py:63-68`），编码加载失败时退回按字符估算（`src/review_agents/context/tokens.py:56-60`）。 |\n| 失败行为 | 单条超长结果不再直接撑爆窗口。但如果所有记录过的结果都已经裁到 `shortened_tokens` 仍然放不下，`fit` 没有别的办法可退，循环结束（`src/review_agents/pipeline/conversation.py:130-134`）；不在 `_results` 里的消息（错误、`LIMIT_REACHED`、`SUBMIT_NOW` 等）也不会被缩小。 |\n| 部署与配置 | 多出三个可以覆盖的服务设置；`_run_dimensions` 现在会从 `finder_model.context_tokens` 取窗口（`src/review_agents/pipeline/run.py:336-342`）。镜像构建多装一个 apt 包。 |\n| 安全 | 工具结果仍然包在 `<untrusted source=\"tool:…\">` 数据块里，裁剪不会把它撕开；重复提醒作为新的一句加在数据块之外。 |\n\n> [!WARNING]\n> **部署时注意**\n> - 新增可选设置 `REVIEW_AGENTS_TOOL_RESULT_TOKENS`、`REVIEW_AGENTS_SHORTENED_RESULT_TOKENS`、`REVIEW_AGENTS_OUTPUT_RESERVE_TOKENS`，默认分别是 10000、500、4000，不设也能启动。\n> - 窗口取自 `REVIEW_AGENTS_FINDER_MODEL__CONTEXT_TOKENS`，本地模型如果窗口小于默认的 128000，需要自己调小，否则裁剪按窗口算不准。\n> - 没有数据库迁移；Dockerfile 有改动，需要重新构建镜像才能拿到那条 apt 安全修复。\n\n<details>\n<summary><b>取舍</b>（4 条）</summary>\n\n| 情况 | 这次的做法 | 理由 |\n| --- | --- | --- |\n| 一条工具结果超过了上限 | 保留头尾整行，加一句说明，而不是让模型总结或重新取一次 | PR 描述写明「nothing calls a model or summarises」，并且保留的行带行号，agent 可以用 `start_line` / `end_line` 精确读回中间。 |\n| 对话接近窗口 | 按从旧到新的顺序裁结果，每个只裁一次，已经裁过的跳过 | 最近读到的代码对当前判断最有用，最旧的先让位；每个结果只裁一次，避免同一段文本被反复压缩。 |\n| `ConversationLimits` 被单独使用（例如测试，或没走 `run.py` 的调用） | 默认 `window` 是 10 亿 token，等于不裁 | `src/review_agents/pipeline/conversation.py:29-31` 把它注释成「the decided values, windowless」，真实窗口只在 `run.py` 组装 limits 时注入。 |\n| 模型反复发同一个调用 | 第 3 次起加提醒，而不是拒绝这次调用 | `REPEAT_REMINDER_AT = 3`（`src/review_agents/pipeline/conversation.py:23-24`）；调用照常执行，次数仍照旧被工具预算扣减（`src/review_agents/tools.py:234-252`）。 |\n\n</details>\n\n<details>\n<summary><b>改动分布</b>（8 个文件）</summary>\n\n| 文件 | 增 | 删 |\n| --- | ---: | ---: |\n| `src/review_agents/pipeline/conversation.py` | 145 | 0 |\n| `tests/test_pipeline_agent.py` | 101 | 0 |\n| `src/review_agents/pipeline/agent.py` | 20 | 8 |\n| `tests/test_pipeline_run.py` | 17 | 0 |\n| `tests/test_config.py` | 10 | 0 |\n| `src/review_agents/pipeline/run.py` | 9 | 0 |\n| `src/review_agents/config.py` | 7 | 0 |\n| `Dockerfile` | 3 | 2 |\n\n</details>\n"
+ },
+ "findings": [
+  {
+   "fingerprint": "b84758d2ba5d5410e6dca3d67bea6c689bba9569c520605175c4778f777fb1c1",
+   "primary_dimension": "edge_cases",
+   "dimensions": [
+    "edge_cases"
+   ],
+   "severity": "robustness",
+   "preexisting": false,
+   "file": "src/review_agents/pipeline/conversation.py",
+   "line_start": 126,
+   "line_end": 141,
+   "title": "`Conversation.fit` 对每条结果只裁一次，裁完仍超窗口时没有任何后续手段",
+   "body": "只有默认的 128k 窗口能靠 25 条裁剪后的结果勉强放下；窗口配小一些（本地模型常见）时，裁剪看起来生效了，实际上对话仍然溢出，agent 依旧失败，而且没有任何提示说明是窗口不够。",
+   "basis": [
+    {
+     "kind": "path",
+     "source": null,
+     "quote": null,
+     "places": [
+      {
+       "file": "src/review_agents/config.py",
+       "line_start": 18,
+       "line_end": 18,
+       "shows": "窗口取自 `context_tokens`，允许从 8000 起配置，本地小模型是它明确支持的场景。"
+      },
+      {
+       "file": "src/review_agents/repo_config.py",
+       "line_start": 63,
+       "line_end": 63,
+       "shows": "一个 agent 最多 25 次工具调用。"
+      },
+      {
+       "file": "src/review_agents/pipeline/conversation.py",
+       "line_start": 130,
+       "line_end": 141,
+       "shows": "单次循环从最旧到最新，每个结果裁一次，`shortened` 为真就跳过；循环结束后不再做任何处理。"
+      },
+      {
+       "file": "src/review_agents/pipeline/agent.py",
+       "line_start": 159,
+       "line_end": 162,
+       "shows": "`fit` 之后紧接着就用整段 messages 调用模型，没有任何补偿步骤。"
+      }
+     ],
+     "explanation": "取 `REVIEW_AGENTS_FINDER_MODEL__CONTEXT_TOKENS=32000`（合法值）：room = 32000-4000 = 28000。25 次工具调用的结果各被裁到 500+500 ≈ 1.1k token 共约 27.5k，加上最大占窗口 70% 的上下文包约 22.4k，合计约 50k，远超 28000；`fit` 把每条结果都裁过一遍后直接返回，下一次 invoke 仍把约 50k token 发给 32k 窗口的模型，provider 拒绝请求，`run.reason` 记成该异常，这个维度以 incomplete 结束——正是本 PR 想避免的失败。未登记进 `_results` 的错误消息、`LIMIT_REACHED`、`SUBMIT_ONLY` 也永远不会被缩小。",
+     "check": {
+      "status": "ok",
+      "problem": null
+     }
+    }
+   ],
+   "verdict": "{\"holds\": true, \"reason\": \"\\u4ee3\\u7801\\u786e\\u8ba4 fit \\u5bf9\\u6bcf\\u6761\\u7ed3\\u679c\\u53ea\\u88c1\\u4e00\\u6b21\\u3001\\u5df2\\u88c1\\u5373\\u8df3\\u8fc7\\uff0c\\u5faa\\u73af\\u540e\\u65e0\\u4efb\\u4f55\\u515c\\u5e95\\uff0c\\u4e14\\u9519\\u8bef\\u6d88\\u606f\\u3001LIMIT_REACHED\\u3001SUBMIT_ONLY \\u4e5f\\u4e0d\\u5728\\u53ef\\u88c1\\u526a\\u96c6\\u5408\\u91cc\\uff1b\\u5728\\u5141\\u8bb8\\u7684\\u5c0f\\u7a97\\u53e3\\u914d\\u7f6e\\u4e0b\\uff0c\\u5305\\u5360 70% \\u7a97\\u53e3\\u540e\\u5269\\u4f59\\u7a7a\\u95f4\\u4e0d\\u8db3\\u4ee5\\u5bb9\\u7eb3 25 \\u6761\\u88c1\\u526a\\u540e\\u7684\\u7ed3\\u679c\\uff0c\\u5bf9\\u8bdd\\u4ecd\\u4f1a\\u6ea2\\u51fa\\u5e76\\u8ba9\\u8be5\\u7ef4\\u5ea6\\u4ee5\\u5f02\\u5e38\\u7ed3\\u675f\\u3002\\u56e0\\u4e3a\\u9700\\u8981\\u628a context_tokens \\u914d\\u6210\\u975e\\u9ed8\\u8ba4\\u7684\\u5c0f\\u7a97\\u53e3\\u5e76\\u8ba9 agent \\u7528\\u6ee1\\u5927\\u91cf\\u5927\\u7ed3\\u679c\\u624d\\u89e6\\u53d1\\uff0c\\u9ed8\\u8ba4 128k \\u573a\\u666f\\u4e0b\\u4ecd\\u80fd\\u653e\\u4e0b\\uff0c\\u6240\\u4ee5\\u7ef4\\u6301 robustness \\u7ea7\\u522b\\u3002\", \"basis\": [{\"kind\": \"path\", \"source\": null, \"quote\": null, \"places\": [{\"file\": \"src/review_agents/config.py\", \"line_start\": 17, \"line_end\": 18, \"shows\": \"\\u7a97\\u53e3\\u662f\\u53ef\\u914d\\u7f6e\\u7684\\u670d\\u52a1\\u8bbe\\u7f6e\\uff0c\\u6700\\u5c0f\\u5141\\u8bb8 8000 token\\uff0c\\u672c\\u5730\\u5c0f\\u6a21\\u578b\\u662f\\u5408\\u6cd5\\u914d\\u7f6e\\u3002\"}, {\"file\": \"src/review_agents/context/pack.py\", \"line_start\": 84, \"line_end\": 92, \"shows\": \"\\u4e0a\\u4e0b\\u6587\\u5305\\u6309\\u7a97\\u53e3\\u7684 70%\\uff081 - AGENT_SHARE=0.3\\uff09\\u6784\\u9020\\uff0c\\u56e0\\u6b64\\u5305\\u672c\\u8eab\\u53ef\\u4ee5\\u5360\\u6389\\u7a97\\u53e3\\u7684 0.7 \\u500d\\u3002\"}, {\"file\": \"src/review_agents/repo_config.py\", \"line_start\": 63, \"line_end\": 63, \"shows\": \"\\u4e00\\u4e2a agent \\u6700\\u591a 25 \\u6b21\\u5de5\\u5177\\u8c03\\u7528\\uff08\\u9ed8\\u8ba4\\u503c\\u5373\\u4e0a\\u9650\\uff09\\u3002\"}, {\"file\": \"src/review_agents/pipeline/conversation.py\", \"line_start\": 122, \"line_end\": 124, \"shows\": \"\\u7b2c\\u4e00\\u5c42\\u628a\\u6bcf\\u4e2a\\u7ed3\\u679c\\u88c1\\u5230 result_tokens//2 \\u5934\\u5c3e\\u5404\\u4e00\\u4efd\\uff0c\\u6700\\u574f\\u7ea6 10k token\\u3002\"}, {\"file\": \"src/review_agents/pipeline/conversation.py\", \"line_start\": 126, \"line_end\": 141, \"shows\": \"fit \\u53ea\\u5bf9\\u6bcf\\u6761\\u7ed3\\u679c\\u88c1\\u4e00\\u6b21\\u5230 shortened_tokens(500) \\u5934\\u5c3e\\uff0c\\u5df2\\u88c1\\u8fc7\\u7684\\u76f4\\u63a5\\u8df3\\u8fc7\\uff1b\\u5faa\\u73af\\u7ed3\\u675f\\u540e\\u6ca1\\u6709\\u4efb\\u4f55\\u8865\\u6551\\uff08\\u51fd\\u6570\\u5728 141 \\u884c\\u7ed3\\u675f\\uff09\\u3002\"}, {\"file\": \"src/review_agents/pipeline/agent.py\", \"line_start\": 159, \"line_end\": 162, \"shows\": \"\\u6bcf\\u8f6e\\u5148 fit\\uff0c\\u7d27\\u63a5\\u7740\\u628a\\u6574\\u6bb5 messages \\u539f\\u6837\\u4ea4\\u7ed9\\u6a21\\u578b\\u8c03\\u7528\\uff0c\\u6ca1\\u6709\\u5176\\u5b83\\u6536\\u7f29\\u624b\\u6bb5\\u3002\"}], \"explanation\": \"\\u6309\\u7a97\\u53e3 32000 \\u8ba1\\u7b97\\uff1aroom = 32000 - 4000 = 28000\\uff0c\\u4e0a\\u4e0b\\u6587\\u5305\\u6700\\u591a\\u5360 0.7*32000 = 22400\\uff0c\\u53ea\\u5269\\u7ea6 5.6k \\u7ed9\\u5de5\\u5177\\u7ed3\\u679c\\uff1b\\u800c 25 \\u6b21\\u5927\\u7ed3\\u679c\\uff08\\u5982 read_file \\u6bcf\\u6b21\\u6700\\u591a 200KB\\uff0c\\u7b2c\\u4e00\\u5c42\\u88c1\\u5230\\u7ea6 10k\\uff09\\u7ecf fit \\u5404\\u88c1\\u5230\\u7ea6 1k \\u540e\\u4ecd\\u6709\\u7ea6 25k\\uff0c\\u52a0\\u4e0a\\u5305\\u7ea6 47k\\uff0c\\u8fdc\\u8d85 28000\\u3002fit \\u628a\\u6240\\u6709\\u7ed3\\u679c\\u90fd\\u6807\\u6210 shortened \\u540e\\u76f4\\u63a5\\u8fd4\\u56de\\uff0c\\u4e0b\\u4e00\\u6b21 invoke \\u4ecd\\u53d1\\u9001\\u7ea6 47k token\\uff0cprovider \\u62d2\\u7edd\\u8bf7\\u6c42\\uff0c\\u5f02\\u5e38\\u88ab agent.py \\u8bb0\\u6210 run.reason\\uff0c\\u8be5\\u7ef4\\u5ea6\\u4ee5 incomplete \\u7ed3\\u675f\\u2014\\u2014\\u6b63\\u662f\\u672c PR \\u60f3\\u907f\\u514d\\u7684\\u5931\\u8d25\\u3002\\u7a97\\u53e3\\u4f4e\\u4e8e\\u7ea6 100k \\u65f6\\u90fd\\u53ef\\u80fd\\u590d\\u73b0\\uff0c\\u800c context_tokens \\u5141\\u8bb8\\u4ece 8000 \\u8d77\\u914d\\u7f6e\\u3001\\u672c\\u5730\\u5c0f\\u6a21\\u578b\\u662f\\u660e\\u786e\\u652f\\u6301\\u7684\\u573a\\u666f\\u3002\", \"check\": {\"status\": \"ok\", \"problem\": null}}]}",
+   "status": "open"
+  },
+  {
+   "fingerprint": "bf70cbdfea5268c5cbc15275ece06f34fd36362c3a0a8482df394eafd9603978",
+   "primary_dimension": "verifiability",
+   "dimensions": [
+    "verifiability"
+   ],
+   "severity": "robustness",
+   "preexisting": false,
+   "file": "src/review_agents/pipeline/agent.py",
+   "line_start": 159,
+   "line_end": 159,
+   "title": "工具结果被裁剪时没有任何记录，事后无法判断 agent 是在残缺上下文里工作的",
+   "body": "当一次评审漏掉了本该发现的问题，维护者无法区分「模型没看出来」和「模型看到的代码被截掉了中间」：`AgentRun` 只有 done/incomplete 和 limit_hit，步骤表里也没有任何痕迹，排查只能靠猜。",
+   "basis": [],
+   "verdict": "{\"holds\": true, \"reason\": \"\\u4ee3\\u7801\\u786e\\u8ba4\\u88c1\\u526a\\u52a8\\u4f5c\\u6ca1\\u6709\\u4efb\\u4f55\\u65e5\\u5fd7\\u3001\\u6ca1\\u6709 AgentRun \\u5b57\\u6bb5\\u3001\\u4e5f\\u4e0d\\u8fdb steps \\u8868\\uff0c\\u53ea\\u6709\\u6a21\\u578b\\u81ea\\u5df1\\u80fd\\u5728\\u5de5\\u5177\\u7ed3\\u679c\\u91cc\\u770b\\u5230\\u63d0\\u793a\\uff1b\\u7ef4\\u62a4\\u8005\\u4e8b\\u540e\\u65e0\\u6cd5\\u56de\\u6eaf\\u67d0\\u6b21\\u8bc4\\u5ba1\\u662f\\u5728\\u88ab\\u622a\\u65ad\\u7684\\u4e0a\\u4e0b\\u6587\\u91cc\\u5b8c\\u6210\\u7684\\uff0c\\u5c5e\\u4e8e\\u53ef\\u89c2\\u5bdf\\u6027\\u4e0a\\u7684\\u7f3a\\u53e3\\uff0c\\u6309\\u5171\\u4eab\\u89c4\\u5219\\u5c5e\\u4e8e robustness \\u7ea7\\u522b\\uff08\\u4e0d\\u9020\\u6210\\u9519\\u8bef\\u7ed3\\u679c\\uff0c\\u4e0d\\u4f1a\\u963b\\u65ad\\u5408\\u5165\\uff09\\u3002\", \"basis\": [{\"kind\": \"path\", \"source\": null, \"quote\": null, \"places\": [{\"file\": \"src/review_agents/pipeline/agent.py\", \"line_start\": 159, \"line_end\": 159, \"shows\": \"\\u6bcf\\u8f6e\\u6a21\\u578b\\u8c03\\u7528\\u524d\\u8c03\\u7528 conversation.fit(messages)\\uff0c\\u88ab\\u88c1\\u526a\\u7684\\u7ed3\\u679c\\u53ea\\u4f1a\\u66ff\\u6362 messages \\u91cc\\u5bf9\\u5e94\\u90a3\\u6761 ToolMessage\\u3002\"}, {\"file\": \"src/review_agents/pipeline/conversation.py\", \"line_start\": 126, \"line_end\": 141, \"shows\": \"fit() \\u628a\\u65e7\\u7ed3\\u679c\\u6362\\u6210\\u957f\\u77ed\\u5934\\u5c3e\\uff0c\\u53ea\\u66f4\\u65b0 _Result.text/_Result.shortened \\u548c\\u672c\\u5730 messages \\u5217\\u8868\\uff0c\\u4e0d\\u5199\\u65e5\\u5fd7\\u3001\\u4e0d\\u6539\\u4efb\\u4f55\\u5916\\u90e8\\u53ef\\u89c1\\u72b6\\u6001\\u3002\"}, {\"file\": \"src/review_agents/pipeline/conversation.py\", \"line_start\": 9, \"line_end\": 18, \"shows\": \"\\u65b0\\u6a21\\u5757\\u53ea\\u5bfc\\u5165 json/Counter/dataclass/Any \\u548c\\u6d88\\u606f\\u7c7b\\u578b\\u3001markup\\u3001estimate_tokens\\uff0c\\u6ca1\\u6709 logging\\u3002\"}, {\"file\": \"src/review_agents/pipeline/agent.py\", \"line_start\": 76, \"line_end\": 85, \"shows\": \"AgentRun \\u53ea\\u6709 findings/dropped/reason/limit_hit/tool_calls\\uff0c\\u6ca1\\u6709\\u8bb0\\u5f55\\u88ab\\u88c1\\u526a\\u7ed3\\u679c\\u6761\\u6570\\u7684\\u5b57\\u6bb5\\u3002\"}, {\"file\": \"src/review_agents/pipeline/run.py\", \"line_start\": 378, \"line_end\": 379, \"shows\": \"\\u53ea\\u6709 run.status != \\\"done\\\" \\u65f6\\u624d\\u628a reason \\u5199\\u8fdb steps \\u8868\\u7684 error\\uff0c\\u6210\\u529f\\u8dd1\\u5b8c\\u7684 agent \\u4e0d\\u7559\\u4e0b\\u4efb\\u4f55\\u88c1\\u526a\\u75d5\\u8ff9\\u3002\"}], \"explanation\": \"\\u88c1\\u526a\\u53ea\\u53d1\\u751f\\u5728\\u8fdb\\u7a0b\\u5185\\u7684 messages \\u5217\\u8868\\u548c ToolMessage \\u5185\\u5bb9\\u91cc\\uff08\\u6a21\\u578b\\u80fd\\u770b\\u5230 \\\"[Shortened: ...]\\\" \\u63d0\\u793a\\uff09\\uff0c\\u800c AgentRun\\u3001steps \\u8868\\u548c\\u65e5\\u5fd7\\u90fd\\u6ca1\\u6709\\u4efb\\u4f55\\u5173\\u4e8e\\u88c1\\u526a\\u53d1\\u751f\\u4e86\\u591a\\u5c11\\u3001\\u88c1\\u5230\\u591a\\u77ed\\u7684\\u8bb0\\u5f55\\uff0c\\u56e0\\u6b64\\u4e8b\\u540e\\u786e\\u5b9e\\u65e0\\u6cd5\\u5224\\u65ad\\u67d0\\u6b21\\u6f0f\\u62a5\\u662f\\u5426\\u56e0\\u4e3a\\u4e0a\\u4e0b\\u6587\\u88ab\\u622a\\u3002\", \"check\": {\"status\": \"ok\", \"problem\": null}}]}",
+   "status": "open"
+  },
+  {
+   "fingerprint": "806e198ed53f348831c74f9a164a6408ae6407093e85993fb6c5f6504f4728e7",
+   "primary_dimension": "spec_drift",
+   "dimensions": [
+    "spec_drift"
+   ],
+   "severity": "nit",
+   "preexisting": false,
+   "file": "src/review_agents/context/pack.py",
+   "line_start": 84,
+   "line_end": 100,
+   "title": "描述说上下文包可能占窗口五分之四，代码实际按 70% 打包",
+   "body": "读者按描述去核算剩余空间会算错：真实留给工具结果的空间比描述写的大约多 13k token，之后调参或排查窗口溢出时会以此为据。",
+   "basis": [
+    {
+     "kind": "spec",
+     "source": "pr",
+     "quote": "A context pack may take four fifths of the",
+     "places": [
+      {
+       "file": "src/review_agents/context/pack.py",
+       "line_start": 28,
+       "line_end": 28,
+       "shows": "`AGENT_SHARE = 0.3`，即给 agent 留 30%。"
+      },
+      {
+       "file": "src/review_agents/context/pack.py",
+       "line_start": 87,
+       "line_end": 87,
+       "shows": "包的预算按 `int(window_tokens * (1 - AGENT_SHARE))` 计算，也就是 70% 窗口，不是 80%。"
+      },
+      {
+       "file": "src/review_agents/context/modules.py",
+       "line_start": 29,
+       "line_end": 35,
+       "shows": "五分之四出现在模块摘要的预算 `context_tokens * 4 // 5`，与上下文包无关。"
+      }
+     ],
+     "explanation": "描述用「包可能占窗口五分之四、128k 模型只剩约 25k token 给工具结果」来论证三个默认值，但 `build_packs` 把包限制在 70%，留出的空间约 38k；五分之四是模块摘要的预算。数值结论（10k/500/4k）不受影响，但描述的前提与代码不符。",
+     "check": {
+      "status": "ok",
+      "problem": null
+     }
+    }
+   ],
+   "verdict": null,
+   "status": "open"
+  }
+ ],
+ "seconds": 360.2
+}

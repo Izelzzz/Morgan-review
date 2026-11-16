@@ -1,0 +1,54 @@
+{
+ "case": "py-mr-basis-001",
+ "run": 1,
+ "model": "deepseek-flash",
+ "seconds": 263.0,
+ "usage": {
+  "prompt_tokens": 14991,
+  "completion_tokens": 48459,
+  "total_tokens": 63450,
+  "prompt_tokens_details": {
+   "cached_tokens": 0
+  },
+  "completion_tokens_details": {
+   "reasoning_tokens": 47663
+  },
+  "prompt_cache_hit_tokens": 0,
+  "prompt_cache_miss_tokens": 14991
+ },
+ "findings": [
+  {
+   "file": "src/review_agents/pipeline/basis.py",
+   "line_start": 156,
+   "line_end": 167,
+   "severity": "important",
+   "title": "A quote that occurs more than once is 'corrected' to its first occurrence, even when the model's lines were right",
+   "why": "`_find` returns only the first whitespace-insensitive match in the file, and `_source_problem` compares the model's `start-end` against that single occurrence. When the same quote appears twice (repeated rule lines, repeated code like `return total`, a repeated config entry), a basis that correctly cites the later occurrence fails the containment test and is reported as `corrected`, with `source` rewritten to the earlier lines. The recorded basis then points at code the model never cited, `supported()`/`checked_out()` accept it, and the verifier is told \"the files, lines and quote are there\" — so the check actively corrupts a correct citation and cannot be trusted for repeated quotes."
+  },
+  {
+   "file": "src/review_agents/pipeline/basis.py",
+   "line_start": 190,
+   "line_end": 196,
+   "severity": "robustness",
+   "title": "An 'unchecked' basis (git timeout) is treated as unsupported, so quick mode silently drops valid 🔴/🟡 findings",
+   "why": "`check_basis` deliberately distinguishes `unchecked` (git timed out, \"says nothing about the basis\") from `failed`, but `checked_out` accepts only `ok`/`corrected`, so `supported()` collapses the two. Through `_publishable_unverified` (run.py:608-623) a blocking or important finding is then discarded whenever any git call is slow, with a note claiming \"no basis checked out\", and `merge._lead` likewise refuses to count such bases as argument. A transient infrastructure hiccup therefore suppresses real findings in quick mode, which has no verifier to recover them."
+  },
+  {
+   "file": "src/review_agents/migrations/0008_basis.sql",
+   "line_start": 4,
+   "line_end": 4,
+   "severity": "robustness",
+   "title": "Dropping `evidence` destroys the recorded rationale of every existing finding with no backfill",
+   "why": "The migration adds `basis` with a default of `'[]'` and then drops `evidence`, so all rows written before this change lose their only explanation irreversibly; the findings endpoint (api.py:219-234) then serves `basis: []` for every historical review, and the stored `evidence` text cannot be recovered. There is no data migration, fallback or retention of the old column, so old reviews silently lose the reason their findings hold and any consumer of the old `evidence` key gets nothing."
+  },
+  {
+   "file": "src/review_agents/pipeline/merge.py",
+   "line_start": 274,
+   "line_end": 275,
+   "severity": "robustness",
+   "title": "The merge judge's brief lost the concrete reason: `evidence` replaced by `why`, bases not included",
+   "why": "`_describe(candidate)` is the only view `model_judge` gets when deciding `same_problem`/`same_kind`. Swapping the traced reason for `f.why` (the user-facing consequence) and not rendering `f.basis` means the judge now groups findings on title, consequence, file and line only. Two distinct problems with the same consequence on nearby lines get wrongly merged, and one problem reported with different `why` wording in different files gets split, so merging degrades even though the (now structured) reason is available."
+  }
+ ],
+ "content": null
+}

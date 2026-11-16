@@ -1,0 +1,56 @@
+INFO:     Started server process [13019]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://127.0.0.1:8080 (Press CTRL+C to quit)
+INFO:     127.0.0.1:40098 - "GET /healthz HTTP/1.1" 200 OK
+INFO:     127.0.0.1:40112 - "POST /v1/reviews HTTP/1.1" 202 Accepted
+INFO:     127.0.0.1:40122 - "GET /v1/reviews/1 HTTP/1.1" 200 OK
+WARNING:langchain_openai.chat_models._client_utils:langchain-openai injected a custom httpx transport to apply `http_socket_options`, which disables httpx's proxy auto-detection (HTTPS_PROXY, https_proxy set in environment). Set `LANGCHAIN_OPENAI_TCP_KEEPALIVE=0` or pass `http_socket_options=()` to restore default proxy behavior, or supply `openai_proxy` / your own `http_client` / `http_async_client` to take full control.
+INFO:httpx2:HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+INFO:httpx2:HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+INFO:httpx2:HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+INFO:httpx2:HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+INFO:httpx2:HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+INFO:httpx2:HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+INFO:httpx2:HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+INFO:     127.0.0.1:60664 - "GET /v1/reviews/1 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:36240 - "GET /v1/reviews/1 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:57224 - "GET /v1/reviews/1 HTTP/1.1" 200 OK
+INFO:httpx2:HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+INFO:     127.0.0.1:39544 - "GET /v1/reviews/1 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:60274 - "GET /v1/reviews/1 HTTP/1.1" 200 OK
+INFO:httpx2:HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+INFO:     127.0.0.1:36914 - "GET /v1/reviews/1 HTTP/1.1" 200 OK
+INFO:httpx2:HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+INFO:httpx2:HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+INFO:httpx2:HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+INFO:httpx2:HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+INFO:httpx2:HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+INFO:httpx2:HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+INFO:httpx2:HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+INFO:     127.0.0.1:36950 - "GET /v1/reviews/1 HTTP/1.1" 200 OK
+INFO:httpx2:HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+INFO:httpx2:HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+INFO:httpx2:HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+INFO:httpx2:HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+INFO:     127.0.0.1:38634 - "GET /v1/reviews/1 HTTP/1.1" 200 OK
+INFO:httpx2:HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+INFO:httpx2:HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+INFO:     127.0.0.1:56760 - "GET /v1/reviews/1 HTTP/1.1" 200 OK
+INFO:httpx2:HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+INFO:httpx2:HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+INFO:     127.0.0.1:41650 - "GET /v1/reviews/1 HTTP/1.1" 200 OK
+INFO:httpx2:HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+INFO:     127.0.0.1:41890 - "GET /v1/reviews/1 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:41976 - "GET /v1/reviews/1 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:41252 - "GET /v1/reviews/1 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:44038 - "GET /v1/reviews/1 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:38316 - "GET /v1/reviews/1 HTTP/1.1" 200 OK
+INFO:httpx2:HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+INFO:     127.0.0.1:59090 - "GET /v1/reviews/1 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:49348 - "GET /v1/reviews/1 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:51264 - "GET /v1/reviews/1 HTTP/1.1" 200 OK
+INFO:     Shutting down
+INFO:     Waiting for application shutdown.
+INFO:     Application shutdown complete.
+INFO:     Finished server process [13019]

@@ -1,0 +1,54 @@
+{
+ "case": "py-mr-model-stream-001",
+ "run": 2,
+ "model": "deepseek-flash",
+ "seconds": 302.2,
+ "usage": {
+  "prompt_tokens": 9830,
+  "completion_tokens": 59020,
+  "total_tokens": 68850,
+  "prompt_tokens_details": {
+   "cached_tokens": 9600
+  },
+  "completion_tokens_details": {
+   "reasoning_tokens": 58054
+  },
+  "prompt_cache_hit_tokens": 9600,
+  "prompt_cache_miss_tokens": 230
+ },
+ "findings": [
+  {
+   "file": "src/review_agents/models.py",
+   "line_start": 195,
+   "line_end": 200,
+   "severity": "robustness",
+   "title": "A given-up attempt is abandoned, not joined or closed: it keeps running (and firing callbacks) after the call has already failed",
+   "why": "When the deadline passes, `_within_deadline` sets `cancelled` and raises, but the worker thread is never joined and the stream is only closed when its generator is resumed — i.e. at the next piece of data (`until_cancelled` checks `cancelled` only after `stream` yielded) or at the read timeout, which is `idle_seconds` (300 s by default). So a timed-out call leaves a live socket and thread behind for up to five minutes, and, because the chunk has already come out of `ChatOpenAI._stream`, the abandoned thread keeps invoking `run_manager.on_llm_new_token` on a run that the caller has already ended (langchain raises `on_llm_error` for the same run). Callback handlers see token events after the run is closed, and the abandoned attempt's result/error is silently dropped. Under a slow model this happens on every turn, so threads and connections accumulate during a review."
+  },
+  {
+   "file": "src/review_agents/models.py",
+   "line_start": 168,
+   "line_end": 172,
+   "severity": "robustness",
+   "title": "A stream that yields no chunk at all is not treated as an empty reply, so it is never retried",
+   "why": "`_check_not_empty` only examines generations that exist. When a service answers with an SSE stream that ends immediately (`data: [DONE]`, nothing else), `generate_from_stream` has no chunk to merge and raises its own `ValueError` (\"No generations found in stream.\"); with any implementation that returns an empty `ChatResult` instead, `_check_not_empty` loops over nothing and reports success. Either way the case D-030 calls \"an empty reply with no finish reason\" is not turned into `EmptyReplyError`, so `retry_wait` never retries it (the `ValueError` is not an `APIConnectionError`/`TransportError`/`APIStatusError`) and the caller receives an `EmptyReplyError`-less failure or an empty reply instead of a retry."
+  },
+  {
+   "file": "src/review_agents/models.py",
+   "line_start": 168,
+   "line_end": 173,
+   "severity": "important",
+   "title": "Streamed replies only charge the token budget if the service echoes a usage chunk",
+   "why": "`_attempt` replaces `llm_output` with just `{\"model_name\": ...}` and relies on `stream_usage=True` to get the counts from the trailing usage-only chunk that `stream_options.include_usage` requests. Any OpenAI-compatible service that ignores/rejects `stream_options` (Ollama, some proxies) then yields a message with no `usage_metadata`, so nothing is written to the usage table and `TokenBudget` is never decremented — the review silently runs without a cost ceiling, where a non-streamed reply always carried `usage` in `llm_output`. The same path silently drops the tokens the service already generated for a stream that stalled or broke mid-reply and was retried. There is no fallback (e.g. the local token counter) and no endpoint switch to turn usage reporting off/on."
+  },
+  {
+   "file": "src/review_agents/pipeline/run.py",
+   "line_start": 225,
+   "line_end": 225,
+   "severity": "robustness",
+   "title": "Repository summaries now run with no deadline at all",
+   "why": "Summaries are built with `model_for(math.inf)`, so `chat_model` sets `deadline=math.inf` and the only bound left is the idle read timeout (300 s by default) times up to four retries — and a stream that keeps sending data or heartbeats is never cut, as intended for calls that have a deadline. Previously the summary model was bounded by `REQUEST_TIMEOUT_SECONDS` (120 s) x 3 attempts. A misbehaving model server can therefore hold a summary call, and the `_summaries` thread the review waits on in `wait_for_summaries`, effectively forever (or for many tens of minutes) with no way to give up."
+  }
+ ],
+ "content": null
+}

@@ -1,0 +1,117 @@
+{
+ "case": "py-mr-strategy-room-001",
+ "run": 3,
+ "model": "deepseek-flash",
+ "thinking": "disabled",
+ "seconds": 13.9,
+ "usage": {
+  "prompt_tokens": 9581,
+  "completion_tokens": 2313,
+  "total_tokens": 11894,
+  "prompt_tokens_details": {
+   "cached_tokens": 9344
+  },
+  "prompt_cache_hit_tokens": 9344,
+  "prompt_cache_miss_tokens": 237
+ },
+ "findings": [
+  {
+   "file": "src/review_agents/pipeline/run.py",
+   "line_start": 583,
+   "line_end": 592,
+   "severity": "blocking",
+   "title": "wait() on a shared Future from multiple finder threads can deadlock or race the pool",
+   "why": "Each find(job) with after_walkthrough blocks a finder worker thread on wait([written], ...). With the default thread pool sized to the number of jobs, the walkthrough runs first, but the general agent for run 2 and 3 (and any other group) also block on the same Future, consuming finder workers. More seriously, when written completes the futures are not removed, but blocking workers can starve run-2/3 tasks; if the pool size equals the job count, one blocked worker waiting on 'written' while 'written' itself is still occupying a worker can still work only because it's queued first — but the second and third run's general agents hold threads blocked until the walkthrough finishes, which is correct in design, yet they hold the only threads available for the verifier/other work. In deep mode with 3 runs and a multi-group pack, all run>1 general agents block on 'written' concurrently and consume finder threads; whether deadlock occurs depends on pool size. At minimum this serializes and may exhaust the pool untracked."
+  },
+  {
+   "file": "src/review_agents/pipeline/agent.py",
+   "line_start": 348,
+   "line_end": 351,
+   "severity": "important",
+   "title": "Out-of-scope dimension tags silently become the agent's own name (GENERAL), not a valid dimension",
+   "why": "For a general agent, `held` is the enabled dimensions and `dimension` is GENERAL. When the model tags a finding with a dimension outside `held` (or a typo), the code sets item.dimension = dimension = GENERAL. GENERAL is not a real dimension, so downstream merging/report grouping can receive an unknown dimension ('general') that has no entry in SKILLS or per-dimension reporting logic, and report.py only added 'general' labels—not full dimension semantics. Silent retagging loses the model's intent and can produce findings grouped under a non-dimension."
+  },
+  {
+   "file": "src/review_agents/pipeline/agent.py",
+   "line_start": 324,
+   "line_end": 328,
+   "severity": "important",
+   "title": "Opening replaces the system message and prefix, dropping the shared rules and repo/PR context",
+   "why": "`messages = [*opening, messages[-1]]` keeps only the walkthrough's prior conversation plus the new task, discarding the system message with SHARED_RULES and the HumanMessage prefix carrying repo/PR context. The walkthrough conversation was produced with its own system prompt and a walkthrough-specific task, so the finder now runs with the walkthrough's system message (not the shared finder rules), and its conversation references the walkthrough context rather than the pack prefix. Findings format described in SHARED_RULES is no longer in the system prompt, so output format expectations may not hold."
+  },
+  {
+   "file": "src/review_agents/pipeline/agent.py",
+   "line_start": 270,
+   "line_end": 271,
+   "severity": "important",
+   "title": "submit_id is set before checking that the answer was actually accepted/complete",
+   "why": "`end.submit_id = submitted['id']` is assigned unconditionally before the tool_calls limit check and before any validation that the submission is the final forced answer. That means a run that hit the tool_calls budget (forced submit) still records a submit_id, and walkthrough.py's transcript construction only checks `end.answer is not None and end.submit_id is not None`, so an incomplete/forced walkthrough submission yields a transcript that downstream agents carry on from, even though the walkthrough was cut short. Contract: transcript should be None unless the walkthrough was genuinely handed in."
+  },
+  {
+   "file": "src/review_agents/walkthrough.py",
+   "line_start": 243,
+   "line_end": 247,
+   "severity": "important",
+   "title": "Transcript appends a ToolMessage with no preceding AIMessage carrying the tool call",
+   "why": "The constructed transcript is `[*messages, ToolMessage('received', tool_call_id=end.submit_id)]`. But the assistant message that issued the submit tool call (with id=end.submit_id) is not in `messages`—tool_loop kept it internally, not appended to the caller's list. Feeding this transcript back to a chat model produces a ToolMessage whose tool_call_id has no matching assistant tool_call in the conversation; OpenAI-style APIs reject such transcripts with an error, so the walkthrough_first strategy fails at the model call."
+  },
+  {
+   "file": "src/review_agents/pipeline/strategy.py",
+   "line_start": 52,
+   "line_end": 58,
+   "severity": "important",
+   "title": "walkthrough_first with only one enabled dimension becomes a plain dimension agent but the walkthrough still waits",
+   "why": "plan() with strategy 'walkthrough_first' and a single enabled dimension returns authors=[Author(d,(d,))] (because `len(dimensions) == 1`), and Plan.walkthrough_first=True. plan_jobs still marks the first group's job after_walkthrough=True, so a single-dimension agent carries on from the walkthrough with its dimension's task, even though the description says the shared agent holds every enabled dimension's rules—here there's only one, but the code path treats it as a general agent with the walkthrough opening, which may not be intended. More importantly, if the config is 'general'/'walkthrough_first' but only one dimension, the finding tag validation uses len(held)==1 so the model's own dimension tag is overwritten—fine—but Plan.walkthrough_first remains true, conflating strategies."
+  },
+  {
+   "file": "src/review_agents/pipeline/run.py",
+   "line_start": 381,
+   "line_end": 383,
+   "severity": "robustness",
+   "title": "plan(settings.strategy, config) uses global settings, not the per-review settings used elsewhere",
+   "why": "run_review computes `planned = plan(settings.strategy, config)`, but `settings` here is the module/global `Settings()` rather than the job's settings. In tests, `setup.settings` is mutated via model_copy and passed to run, and other code (e.g. run) uses the per-run settings. If run_review receives settings through another path, the strategy will not match the configured instance. In test_with_strategy, setup.settings is replaced—if run_review reads a different `settings`, the strategy never takes effect."
+  },
+  {
+   "file": "src/review_agents/pipeline/run.py",
+   "line_start": 588,
+   "line_end": 592,
+   "severity": "robustness",
+   "title": "Exception from written.result() is swallowed and the agent silently falls back, losing diagnostic detail",
+   "why": "The check `written.exception() is None` treats any walkthrough exception as 'no opening', causing the general agent to start fresh. That's fine for correctness, but a timeout means the agent starts without the walkthrough conversation, and no signal is propagated that the run was degraded, potentially masking a systematic walkthrough failure affecting every run."
+  },
+  {
+   "file": "src/review_agents/context/pack.py",
+   "line_start": 104,
+   "line_end": 105,
+   "severity": "robustness",
+   "title": "fixed_tokens estimate for general agent assumes enabled; DIMENSIONS constant superset may underestimate when subset enabled but overestimate for large enabled subsets",
+   "why": "`tasks = [task(d) for d in DIMENSIONS] + [task(GENERAL, DIMENSIONS)]` uses all DIMENSIONS for the general task. When all are enabled the estimate is exact; but a general agent in quick mode holds only ('edge_cases','security') and fixed_tokens overestimates (safe). However, `task(GENERAL, DIMENSIONS)` is computed at import time for every call to fixed_tokens—it's a max, so correctness is fine but cost repeats. Minor."
+  },
+  {
+   "file": "src/review_agents/pipeline/strategy.py",
+   "line_start": 46,
+   "line_end": 50,
+   "severity": "robustness",
+   "title": "mode_plan no longer returns an empty list when no dimensions enabled after strategy moved—behavior for zero dims",
+   "why": "Previously enabled_dimensions could be empty if all dims disabled; quick fell back to `enabled[:1]` which is empty, giving empty plan. Same now. But for `general`, if `dimensions` is empty, the `else` branch creates Author(GENERAL, ()) with no rules—task(GENERAL, ()) falls to `task(GENERAL, None)` using SKILLS[GENERAL] which does not exist (KeyError), since held=(GENERAL,) when dimensions=(). RepoConfig likely forbids all-off, but that invariant is no longer enforced here."
+  },
+  {
+   "file": "src/review_agents/pipeline/run.py",
+   "line_start": 115,
+   "line_end": 135,
+   "severity": "robustness",
+   "title": "Removed RepoConfig import but Job creation uses planned only; dimension list no longer reflects config via enabled_dimensions",
+   "why": "`enabled_dimensions` helper was deleted; `dimensions, repeats = planned.dimensions, planned.runs` and `dimensions` is only used elsewhere (need to confirm). If report keys derive from `dimensions`, the general strategy's Plan.dimensions returns all DIMENSIONS that authors hold—correct—but Plan.dimensions uses DIMENSIONS order, hiding which were actually enabled if sub-selected. In quick mode the general agent holds only ('edge_cases','security'), Plan.dimensions filters to those, correct. Only a concern if report keys derived per-author."
+  },
+  {
+   "file": "src/review_agents/pipeline/agent.py",
+   "line_start": 350,
+   "line_end": 351,
+   "severity": "robustness",
+   "title": "Out-of-scope general tag fallback sets dimension to the agent's name (GENERAL), which does not exist in report dimension map for per-finding grouping",
+   "why": "See earlier: assigning GENERAL as a finding dimension can surface as 'general reviewer' in reports for individual findings rather than a real dimension. When the model's tag is invalid, the safer fallback is to drop or force a valid enabled dimension, not the agent's identity."
+  }
+ ],
+ "content": null,
+ "error": null
+}

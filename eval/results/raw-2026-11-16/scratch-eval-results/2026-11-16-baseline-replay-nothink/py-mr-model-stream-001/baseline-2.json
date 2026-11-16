@@ -1,0 +1,29 @@
+{
+ "case": "py-mr-model-stream-001",
+ "run": 2,
+ "model": "deepseek-flash",
+ "thinking": "disabled",
+ "seconds": 1.9,
+ "usage": {
+  "prompt_tokens": 9806,
+  "completion_tokens": 100,
+  "total_tokens": 9906,
+  "prompt_tokens_details": {
+   "cached_tokens": 9600
+  },
+  "prompt_cache_hit_tokens": 9600,
+  "prompt_cache_miss_tokens": 206
+ },
+ "findings": [
+  {
+   "file": "src/review_agents/models.py",
+   "line_start": 132,
+   "line_end": 145,
+   "severity": "blocking",
+   "title": "Retry counter and wait are lost when `_generate` retries after `_attempt`'s own `_within_deadline` raise",
+   "why": "Not a real bug: `retry` and `wait` are in scope. Skipped."
+  }
+ ],
+ "content": null,
+ "error": null
+}

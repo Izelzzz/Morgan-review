@@ -1,0 +1,7 @@
+py-mr-basis-001 baseline 2: 45 findings
+py-mr-verify-schedule-001 baseline 1: 15 findings
+py-mr-verify-schedule-001 baseline 2: 0 findings
+py-mr-verify-schedule-001 baseline 3: 25 findings
+yaml-mr-ci-template-001 baseline 1: 0 findings
+
+[exited with code 0]

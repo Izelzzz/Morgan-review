@@ -1,0 +1,125 @@
+{
+ "case": "py-mr-strategy-room-001",
+ "run": 2,
+ "model": "deepseek-flash",
+ "thinking": "disabled",
+ "seconds": 14.3,
+ "usage": {
+  "prompt_tokens": 9581,
+  "completion_tokens": 2413,
+  "total_tokens": 11994,
+  "prompt_tokens_details": {
+   "cached_tokens": 9344
+  },
+  "prompt_cache_hit_tokens": 9344,
+  "prompt_cache_miss_tokens": 237
+ },
+ "findings": [
+  {
+   "file": "src/review_agents/pipeline/run.py",
+   "line_start": 577,
+   "line_end": 590,
+   "severity": "blocking",
+   "title": "Deadlock risk: finder waits in its thread for the walkthrough that needs a thread",
+   "why": "The walkthrough is submitted to the same `finders` ThreadPoolExecutor as the finder jobs. `find` for a walkthrough_first job blocks inside its worker thread on `wait([written], ...)`. If the pool has no free thread left for `write` (the walkthrough), it can never run, and the finders time out and fall back to a fresh opening. The comment claims the ordering avoids this, but submitting `write` first only guarantees it is queued, not that a worker runs it, because the walkthrough may be blocked behind finders that are themselves blocking on `written`. In the worst case every walkthrough_first finder occupies a worker while the walkthrough has none, so the walkthrough step reports a timeout/error instead of running."
+  },
+  {
+   "file": "src/review_agents/pipeline/run.py",
+   "line_start": 581,
+   "line_end": 585,
+   "severity": "important",
+   "title": "Walkthrough done but cancelled/exception path leaves opening None silently",
+   "why": "The finder only carries on from the walkthrough if `written.done() and not cancelled and exception() is None`. Otherwise it silently starts a fresh conversation. That is acceptable behaviorally, but the fallback path now depends on timeout `submit_by`, so a walkthrough that finishes just after the timeout, or that was submitted but is still queued, results in the walkthrough_first strategy not actually carrying on—contradicting its defining contract. At minimum this needs logging/observation; as written the strategy can degrade to `general` without any signal."
+  },
+  {
+   "file": "src/review_agents/pipeline/agent.py",
+   "line_start": 344,
+   "line_end": 350,
+   "severity": "important",
+   "title": "Trusted dimension tag can be GENERAL or otherwise not in DIMENSIONS, breaking report/summary accounting",
+   "why": "For a general agent (`len(held) > 1`), `item.dimension` is kept whenever it is in `held`. But `held` is the agent's dimension tuple and the tag is arbitrary model output; the test even asserts that a single-dimension run keeps `GENERAL` as the finding's dimension. That leaks `GENERAL` into `primary_dimension`, which the report maps and ranks as a dimension; downstream `plan.dimensions`/summary code assumes real DIMENSIONS. The fallback `item.dimension = dimension` sets it to the agent's name (`GENERAL`), not to a real dimension, so findings from a general agent with a missing/invalid tag get dimension `general`, not a valid dimension."
+  },
+  {
+   "file": "src/review_agents/context/pack.py",
+   "line_start": 53,
+   "line_end": 69,
+   "severity": "robustness",
+   "title": "`task(dimension, dimensions=None)` change breaks single-dimension callers passing GENERAL",
+   "why": "`run_dimension` now calls `pack.messages(dimension, held)` where `held = dimensions or (dimension,)`. For a general agent whose `dimensions` is `None` (e.g. `plan` returns `Author(GENERAL, tuple(dimensions))`, but `Job.dimensions` in `plan_jobs` is `author.dimensions`; if `len(dimensions)==1` the author is a real dimension, but a caller can pass GENERAL with dimensions=None), `task` indexes `SKILLS[GENERAL]` which does not exist—KeyError. The signature allows `task(GENERAL)` and `GENERAL` is not a key of `SKILLS`, so any path passing the general name without explicit dimensions crashes."
+  },
+  {
+   "file": "src/review_agents/context/pack.py",
+   "line_start": 103,
+   "line_end": 104,
+   "severity": "robustness",
+   "title": "fixed_tokens now always includes the full multi-dimension task, over-reserving for the common dimensions strategy",
+   "why": "`fixed_tokens` unconditionally takes the max over single-dimension tasks and `task(GENERAL, DIMENSIONS)`, so the reserved window is sized for the largest general-agent task even when strategy is `dimensions`. This silently shrinks the usable context window for every dimension agent (cost/truncation behavior change) regardless of strategy. It is not a correctness bug but changes budgeting for the default path."
+  },
+  {
+   "file": "src/review_agents/pipeline/agent.py",
+   "line_start": 313,
+   "line_end": 320,
+   "severity": "important",
+   "title": "Opening transcript replaces the system message and prefix, dropping shared rules and PR context framing",
+   "why": "`messages = [*opening, messages[-1]]` keeps only the last HumanMessage of the fresh messages and discards the SystemMessage (shared rules) and the prefix HumanMessage. The walkthrough's transcript has its own system message, but it was composed for the walkthrough task, not for the finder; the finder's SHARED_RULES/system prompt is lost. The finder now runs with the walkthrough's system prompt and only its task as the new last message, which is a different contract than a normal finder conversation and may cause output-format/schema violations."
+  },
+  {
+   "file": "src/review_agents/pipeline/agent.py",
+   "line_start": 268,
+   "line_end": 271,
+   "severity": "robustness",
+   "title": "submit_id captured but ToolMessage appended with content 'received' may not match provider expectations",
+   "why": "The transcript synthesizes `ToolMessage(\"received\", tool_call_id=end.submit_id)`. The actual submit tool result content from the loop may differ (the tool may return structured data). Replaying a fabricated tool result as conversation history for a real provider can be rejected or confuse the model; the tool result content should be the actual one the loop produced for that call id, not a placeholder."
+  },
+  {
+   "file": "src/review_agents/pipeline/run.py",
+   "line_start": 581,
+   "line_end": 585,
+   "severity": "important",
+   "title": "Waiting up to submit_by in a worker burns the finder's time budget/thread while idle",
+   "why": "The finder thread blocks until `submit_by` (the latest submit time) with no accounting against its own timing; this is the deadline of the whole review phase, so a walkthrough that is slow makes every walkthrough_first finder sit idle until near the deadline, then run and likely hit the limit. There is no smaller bound; the wait uses `submit_by` rather than a time budget for the finder, so the finder's effective working time is silently reduced by the wait."
+  },
+  {
+   "file": "src/review_agents/pipeline/strategy.py",
+   "line_start": 56,
+   "line_end": 59,
+   "severity": "robustness",
+   "title": "`length == 1` shortcut ignores requested strategy semantics",
+   "why": "When only one dimension is enabled and strategy is `walkthrough_first`, `plan` creates `Author(d, (d,))` but still sets `walkthrough_first=strategy=='walkthrough_first'`. That part is fine; but the `general` strategy with one dimension is collapsed to the dimension agent, which is intended. However, for `walkthrough_first` with one dimension, the author name becomes the dimension, and the report step is named `dimension.<dim>`, so the step naming differs from the general case—tests only cover multi-dimension. Not a bug per se, but the single-dimension `general`/`walkthrough_first` paths produce a differently shaped plan than the description promises."
+  },
+  {
+   "file": "src/review_agents/pipeline/run.py",
+   "line_start": 580,
+   "line_end": 585,
+   "severity": "important",
+   "title": "`written.result().transcript` used without checking it is non-None",
+   "why": "`written.result()` is a WalkthroughRun; if the walkthrough did not hand in, `transcript` is None. The code sets `opening = written.result().transcript`, so opening is None and the finder starts fresh — correct. But the check `written.exception() is None` combined with `done()` does not guard that `transcript` may be None; the code sets `opening = None` then, so it falls back. That part is consistent, but note the comment says 'carries on from it' while silently not doing so; this is the same silent-degradation concern. Also if `written` is not done by timeout, opening stays None without recording why the strategy didn't carry on."
+  },
+  {
+   "file": "src/review_agents/report.py",
+   "line_start": 171,
+   "line_end": 174,
+   "severity": "nit",
+   "title": "Only a Chinese/English translation for `general`; dimension leakage may render untranslated",
+   "why": "`general` is added as a report text key, but if `GENERAL` leaks into `dimension` fields (see the agent.py tag finding) other code paths (e.g. summary keyed by DIMENSIONS) may not have `general`. The translation is present, so rendering is okay, but ranking/ordering that iterates DIMENSIONS will drop general-tagged findings. This is a symptom of the broader tag-validation issue."
+  },
+  {
+   "file": "tests/test_strategy.py",
+   "line_start": 130,
+   "line_end": 145,
+   "severity": "important",
+   "title": "Test asserts GENERAL is kept as a finding dimension, enshrining the bug",
+   "why": "The test `test_a_general_agent_s_findings_keep_the_dimension_it_tagged` asserts that a finding tagged with a dimension not in `held` gets `GENERAL` as its dimension. That confirms `run_dimension` falls back to the agent's name rather than a real dimension, so `general` ends up as a finding dimension. This validates the buggy behavior and makes it hard to fix later."
+  },
+  {
+   "file": "src/review_agents/pipeline/run.py",
+   "line_start": 583,
+   "line_end": 585,
+   "severity": "robustness",
+   "title": "Blocking wait uses wall clock `self.clock()` but timeout measured before meter start",
+   "why": "The wait timeout is `max(0.0, submit_by - self.clock())`, computed before `self.starts[job.node] = _utc_now()`. The finder's start time therefore does not include the waiting period, so the recorded start/duration of a walkthrough_first finder excludes the time it spent blocked. Reporting/deadline accounting will under-report how long the job actually took, and later budget calculations based on starts may be off."
+  }
+ ],
+ "content": null,
+ "error": null
+}

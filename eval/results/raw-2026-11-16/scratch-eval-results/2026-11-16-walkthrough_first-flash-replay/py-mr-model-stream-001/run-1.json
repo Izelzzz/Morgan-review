@@ -1,0 +1,30 @@
+{
+ "id": 28,
+ "repo": "izelcompany/morgan-eval",
+ "pr": 9,
+ "base_sha": "37435626952a4310fe2a61b79c075c1684e24a99",
+ "head_sha": "adc297621a2b686fbb3ca9d160c63c9cabdbefb2",
+ "round": 1,
+ "mode": "standard",
+ "status": "done",
+ "error": null,
+ "limit_hit": null,
+ "superseded_by": null,
+ "created_at": "2026-11-16T08:10:04.984Z",
+ "started_at": "2026-11-16T08:10:06.929Z",
+ "finished_at": "2026-11-16T08:10:10.174Z",
+ "report": {
+  "summary": "<!-- review-agents:summary -->\n## 审查结论：审查未完成，以下只是已完成部分的结果\n\n### 未完成的部分\n- 通用审查员维度：APIStatusError: Error code: 402 - Insufficient Balance (request_id: 788fcc9d-c523-4a78-bd8d-a424ddf572ec)\n\n### 本次审查的范围\n- 审了：规格漂移、边界问题、安全、可维护性、可验证性（各 1 次）· 8 个改动文件\n- 没审：1 个维度没交卷\n- 能证明：发布的每条 🔴 / 🟡 都有程序核对过的依据，并经验证审查员重新读代码确认；引用的规则原文确实在所写的位置。\n- 不能证明：没有运行代码和测试；没有发现问题不代表没有问题；规格只来自 PR 描述、关联的 issue 和配置的规格文档；没验完的发现没有发布，不代表它们不成立。\n\n### 本次审查\nStandard 模式 · 0 token · 3 秒 · 审查 #28\n\n<!-- review-agents:counts {\"blocking\": 0, \"important\": 0, \"robustness\": 0, \"nit\": 0, \"complete\": false} -->\n",
+  "comments": [],
+  "counts": {
+   "blocking": 0,
+   "important": 0,
+   "robustness": 0,
+   "nit": 0,
+   "complete": false
+  },
+  "walkthrough": "<!-- review-agents:walkthrough -->\n## 📖 改动说明\n\n改动说明没能生成：APIStatusError: Error code: 402 - Insufficient Balance (request_id: 7bd0af75-0d9d-476b-b8b4-f5e90ff0f5ad)\n"
+ },
+ "findings": [],
+ "seconds": 15.0
+}

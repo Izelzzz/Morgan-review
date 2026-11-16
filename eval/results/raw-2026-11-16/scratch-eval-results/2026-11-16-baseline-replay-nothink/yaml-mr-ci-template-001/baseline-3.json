@@ -1,0 +1,317 @@
+{
+ "case": "yaml-mr-ci-template-001",
+ "run": 3,
+ "model": "deepseek-flash",
+ "thinking": "disabled",
+ "seconds": 31.1,
+ "usage": {
+  "prompt_tokens": 14722,
+  "completion_tokens": 5478,
+  "total_tokens": 20200,
+  "prompt_tokens_details": {
+   "cached_tokens": 14588
+  },
+  "prompt_cache_hit_tokens": 14588,
+  "prompt_cache_miss_tokens": 134
+ },
+ "findings": [
+  {
+   "file": "ci/review_agents_ci.py",
+   "line_start": 178,
+   "line_end": 187,
+   "severity": "blocking",
+   "title": "Service receives the job's GITHUB_TOKEN with read access to the whole repo; token can be exfiltrated by the service or leaked via logs",
+   "why": "The whole point of separating review/post is that the read-only token goes to the service, but this token is still a repo-scoped credential. Passing it in the POST body to the service is by design per the description, but a compromised or malicious REVIEW_AGENTS_URL (set as a secret by repo owner, so lower risk) sees the token. Not a bug per the design; not reporting."
+  },
+  {
+   "file": "ci/review_agents_ci.py",
+   "line_start": 195,
+   "line_end": 205,
+   "severity": "blocking",
+   "title": "Poll loop can exceed 45-minute job timeout because WAIT_SECONDS is checked before sleeping and each request has 60s timeout",
+   "why": "The review job timeout-minutes is 50 and WAIT_SECONDS is 45 minutes, but each poll call has timeout=60 and sleep is 15s; the check `clock() - start >= WAIT_SECONDS` happens before sleeping, so up to 15+60=75 seconds past WAIT_SECONDS the loop runs, fine within 50m. Not a bug."
+  },
+  {
+   "file": "ci/review_agents_ci.py",
+   "line_start": 279,
+   "line_end": 281,
+   "severity": "blocking",
+   "title": "Superseded status returns 0 from review() but post() returns 1, contradicting the review() docstring",
+   "why": "review() docstring says 'The job itself fails only on a broken run', but a superseded review is recorded with status 'superseded'. In post(), a superseded result hits the `status in ('skipped','superseded')` branch and returns `0 if outcome.passed else 1`. gate() for status 'superseded' (not 'skipped', not 'done') returns Outcome(False, ...), so post returns 1 (red). A superseded run — superseded by a newer push — should not be red; the newer run's post job decides. This makes the required check red on a superseded run."
+  },
+  {
+   "file": "ci/review_agents_ci.py",
+   "line_start": 351,
+   "line_end": 358,
+   "severity": "blocking",
+   "title": "Walkthrough/summary are upserted only after a successful review; a re-run that skips cannot clear a stale walkthrough, and on failure only summary is replaced",
+   "why": "When status is 'done' it upserts walkthrough and summary then posts inline comments. When status is not done, it replaces the summary but leaves the walkthrough comment untouched — so a previous successful walkthrough remains visible on top of a failed review. Description says 'A failed review replaces the last summary', which it does, but the walkthrough stale content remains. However not contradicted by description. Not reporting (matches stated behaviour)."
+  },
+  {
+   "file": "ci/review_agents_ci.py",
+   "line_start": 361,
+   "line_end": 372,
+   "severity": "important",
+   "title": "Race: walkthrough/summary markers upserted before new inline comments are posted; concurrent post jobs (issue_comment run + push run) can double-post inline comments",
+   "why": "The concurrency group is on the review job only; the post job has no concurrency. Two review/post sequences (e.g. a push and a /review comment) can run post() concurrently. Both read `posted` fingerprints before either writes the inline review, so both POST the same inline comments → duplicate inline comments. Also both upsert summary; last-writer-wins is acceptable but the duplicate inline comments violate D-033's 'not posted yet' guarantee."
+  },
+  {
+   "file": "ci/review_agents_ci.py",
+   "line_start": 200,
+   "line_end": 203,
+   "severity": "important",
+   "title": "Base sha used for result but the post job never re-checks the head before posting; a newer push could be posted against a stale head",
+   "why": "review() checks the head only before submitting. The comment inline POSTs use `commit_id: head` from the result. If a push happens during the 45-minute wait, the review's inline comments are attached to an old commit. The post job does not re-check `head_sha` against the PR's current head, so it can post outdated inline comments and set green/red for a commit that is no longer the head. Description only mentions the review-side check, but the inline posting should also verify; at minimum a stale-but-superseded status handles the service side."
+  },
+  {
+   "file": "ci/review_agents_ci.py",
+   "line_start": 322,
+   "line_end": 326,
+   "severity": "important",
+   "title": "issue_comment '/review' path uses event's issue number but fetches PR without verifying it's the PR the comment is on, and does not check the PR head is still current before submitting",
+   "why": "In the issue_comment branch, `pr = github.ok('GET', f'/pulls/{issue[\"number\"]}')` is fetched but the D-021 head check (`current['head']['sha'] != pr['head']['sha']`) is only in the else branch. A manual /review comment submitted right as a push lands can send the old head to the service and supersede the new push. Root cause: PR head equality check applies only to pull_request_target events."
+  },
+  {
+   "file": "ci/review_agents_ci.py",
+   "line_start": 146,
+   "line_end": 155,
+   "severity": "robustness",
+   "title": "pages() pagination relies on `len(batch) < 100` to stop; an API that returns exactly 100 per page always terminates via a short page, but a fix: no infinite loop here; fine.",
+   "why": "Not a bug."
+  },
+  {
+   "file": "ci/review_agents_ci.py",
+   "line_start": 240,
+   "line_end": 250,
+   "severity": "important",
+   "title": "Inline comments are posted without checking fingerprint idempotency across the reviews endpoint vs individual comments endpoint; on partial batch success the loop re-posts anyway",
+   "why": "The batch POST /pulls/{number}/reviews may partially succeed? No — GitHub's review creation with multiple comments is atomic: either the review with all comments is created or it 422s. So trying each alone after a batch failure is safe. Not a bug."
+  },
+  {
+   "file": "ci/review_agents_ci.py",
+   "line_start": 366,
+   "line_end": 374,
+   "severity": "important",
+   "title": "Rejected-comments section insertion splits on a fixed comment-counts prefix; if the summary from the service has no counts marker, rejected comments are silently dropped",
+   "why": "`head_part, sep, tail = summary.rpartition('\\n<!-- review-agents:counts')`; if sep is empty (no counts line), the code sets `updated = summary` — the rejected inline comments are discarded even though D-033 ③ promises none are lost. The service's summary is not guaranteed to end with a counts comment; the gate reads counts separately from the report object, not from the summary text. Root cause: silent loss of rejected findings when the marker is absent."
+  },
+  {
+   "file": "ci/review_agents_ci.py",
+   "line_start": 370,
+   "line_end": 372,
+   "severity": "important",
+   "title": "After posting inline comments, the summary is refetched and upserted, but the rejected section is computed from stale `summary` and then a fresh `_upsert` compares against refreshed comments; if another job changed the summary in between, the rejected section can be applied to the wrong base",
+   "why": "`refreshed = github.pages(...)` then `_upsert(... refreshed ...)` — but `_upsert` picks the first matching comment from `refreshed` and PATCHes it with `updated` computed from the *old* `summary`, overwriting any concurrent change. Combined with no concurrency on post, two runs can clobber each other's summary edits (e.g. one run's rejected section overwritten by another's)."
+  },
+  {
+   "file": "ci/review_agents_ci.py",
+   "line_start": 363,
+   "line_end": 372,
+   "severity": "robustness",
+   "title": "A partial failure posting inline comments (some rejected) still returns green based only on gate; rejected comments only go to summary and do not affect the colour",
+   "why": "Per description, rejected inline comments go into the summary and colour depends on blocking/complete. This matches the stated contract; not a bug."
+  },
+  {
+   "file": "ci/review_agents_ci.py",
+   "line_start": 296,
+   "line_end": 298,
+   "severity": "robustness",
+   "title": "For a skipped result, post() returns gate outcome; but skipped returns Outcome(True). Then returns 0 if passed else 1 → 0. Fine.",
+   "why": "Not a bug."
+  },
+  {
+   "file": "ci/review/action.yml",
+   "line_start": 22,
+   "line_end": 29,
+   "severity": "important",
+   "title": "upload-artifact step runs even when the review step fails/errors, so a missing result file fails the artifact step and the post job's download fails",
+   "why": "If review() raises (e.g. env missing → returns 2, or unhandled exception like KeyError on missing event fields, json decode error), the result file may not be written. upload-artifact with a non-existent path fails (default behavior), and download-artifact in post then fails because the artifact does not exist. post's `needs.review.result != 'skipped'` still runs post, but post crashes on read. That does yield red, so the colour is correct; but this is brittle. More importantly, upload-artifact has no `if: always()` — composite action steps: upload-artifact only runs if the previous step succeeded. If review step exits non-zero (it returns 2 for missing secrets), the upload step is skipped, so the artifact is missing. The post job then fails to download → red. Acceptable but the reason is opaque. Also, review() returns 0 even on recorded Failure (writes error result), so upload runs — fine."
+  },
+  {
+   "file": "ci/review_agents_ci.py",
+   "line_start": 307,
+   "line_end": 310,
+   "severity": "important",
+   "title": "main() for review uses Path(env['GITHUB_EVENT_PATH']) without guarding; fine. But for post, args.result is read without existence check; if download failed the error is a traceback, not a nice message.",
+   "why": "Robustness/nit; not a real bug."
+  },
+  {
+   "file": "ci/review_agents_ci.py",
+   "line_start": 122,
+   "line_end": 137,
+   "severity": "important",
+   "title": "Ok() treats 3xx as success (code >= 300 fails), correct; but Http follows redirects by default — a 3xx from the service could redirect an HTTPS request to another host, re-sending the signed body to an attacker",
+   "why": "urllib.request.urlopen follows redirects automatically. The HTTPS-only check is on the initial URL only; a redirected URL (e.g. 307 to http:// or to another host) is followed by urllib without the scheme check, forward-slash the signed body and the GitHub token (in the review POST body) to the redirect target. Root cause: the https check is applied to the requested URL, not to the final response.url. For the GitHub API this is low risk, but for the service (controlled by REVIEW_AGENTS_URL, a secret) a misconfiguration or MITM redirect could leak the body. Real security concern for token leakage. Also redirects for POST resend body."
+  },
+  {
+   "file": "ci/review_agents_ci.py",
+   "line_start": 118,
+   "line_end": 137,
+   "severity": "important",
+   "title": "No host allow-list; service URL from secret could be any HTTPS host. By design. Not reporting.",
+   "why": "—"
+  },
+  {
+   "file": "ci/review_agents_ci.py",
+   "line_start": 62,
+   "line_end": 66,
+   "severity": "important",
+   "title": "The GitHub token is placed in the JSON body sent to the service (request['token']); if the service URL is misconfigured or the request is redirected, the token leaves GitHub. That's the design per description (review job's token goes to the service). Not reporting.",
+   "why": "—"
+  },
+  {
+   "file": "ci/review_agents_ci.py",
+   "line_start": 155,
+   "line_end": 160,
+   "severity": "important",
+   "title": "GitHub.ok error message includes the response message which may echo the token? No. Not a bug.",
+   "why": "—"
+  },
+  {
+   "file": "ci/review_agents_ci.py",
+   "line_start": 296,
+   "line_end": 305,
+   "severity": "blocking",
+   "title": "gate() treats status 'superseded' as failure (No result) — post returns red on a superseded review, which is a normal outcome from concurrency",
+   "why": "gate() only special-cases 'skipped' and 'done'; 'superseded' falls to `if status != 'done': return Outcome(False, ...)`, producing a red 'No result: superseded'. In post(), the superseded branch is taken early — it calls write_summary and returns `0 if outcome.passed else 1` = 1. So a superseded review (because a newer push cancelled it, per concurrency cancel-in-progress) makes the required check red even though a fresh review is running. This blocks merges incorrectly and is a regression vs. the intent (D-021 says older runs should not supersede newer ones — superseded means the newer one is in flight and will decide). Root cause: superseded is not treated like skipped in the gate."
+  },
+  {
+   "file": "ci/review-agents.yml",
+   "line_start": 33,
+   "line_end": 42,
+   "severity": "important",
+   "title": "review job's concurrency group uses github.event.pull_request.number || github.event.issue.number for BOTH pull_request_target and issue_comment, so a /review comment cancels an in-flight push review (same group), and cancel-in-progress cancels the actual push review",
+   "why": "The concurrency group is keyed by PR number only, and cancel-in-progress: true. A comment-triggered run on the same PR shares the group and cancels the running push review. Conversely a push cancels an in-flight manual review. Also, the post job runs after review with `needs: review`; if the review job is cancelled by concurrency, `needs.review.result` is 'cancelled', which is != 'skipped', so post runs — but the review run wrote no artifact (cancelled mid-run), so download-artifact fails in post. That yields red for a cancelled-but-superseded run, blocking merges. Root cause: concurrency cancels the review step before the artifact is written, and post has no guard for `needs.review.result == 'cancelled'`."
+  },
+  {
+   "file": "ci/review-agents.yml",
+   "line_start": 46,
+   "line_end": 50,
+   "severity": "important",
+   "title": "post job `if: !cancelled() && needs.review.result != 'skipped'` runs when review was cancelled; download-artifact finds no artifact and the post step crashes red — a cancelled (concurrency) run blocks the required check",
+   "why": "When cancel-in-progress cancels the review job, `needs.review.result` is 'cancelled' and the post job still runs; the result artifact from review was never uploaded, so download-artifact fails and the job is red. A push that supersedes a review therefore makes the superseded run's required check red, blocking merge until a new run finishes — contradicts the design that a newer push makes an older review pointless (D-021). Root cause: no handling of cancelled/skipped artifact."
+  },
+  {
+   "file": "ci/review-agents.yml",
+   "line_start": 20,
+   "line_end": 24,
+   "severity": "important",
+   "title": "issue_comment trigger runs on every comment but the `review` job `if` doesn't require startsWith on the comment body — it does: `startsWith(github.event.comment.body, '/review')`. Fine. But the `review` job if uses startsWith without trimming leading whitespace, while the script uses lstrip().startswith('/review'). A comment ' /review' would be filtered out by the workflow but accepted by the script if it ran; inconsistent but workflow is stricter. Not a bug.",
+   "why": "—"
+  },
+  {
+   "file": "ci/review-agents.yml",
+   "line_start": 22,
+   "line_end": 23,
+   "severity": "responsible",
+   "title": "in the if, github.event.comment.body could be null for non-comment events, but the OR short-circuits via event_name; for pull_request_target the first branch is true. For issue_comment the body exists. Fine.",
+   "why": "—"
+  },
+  {
+   "file": "ci/review/action.yml",
+   "line_start": 22,
+   "line_end": 29,
+   "severity": "important",
+   "title": "upload-artifact has no `if: always()` and no `if-no-files-found: warn`; if the review step exits non-zero (missing secrets → returns 2), the artifact is never uploaded; the post job then fails on download — red, but with an unhelpful error instead of the recorded reason",
+   "why": "When REVIEW_AGENTS_URL/SECRET are missing, main() returns 2 before writing a result file; the review step fails, upload-artifact is skipped (composite steps are sequential; a failed step stops the action). post job runs (needs.review != skipped) and download-artifact fails because the artifact doesn't exist → red with a download error, not the 'secrets must be set' message. The failure reason the reviewer needs is lost. Root cause: no `if: always()` on upload and no graceful handling in post."
+  },
+  {
+   "file": "ci/review_agents_ci.py",
+   "line_start": 269,
+   "line_end": 284,
+   "severity": "important",
+   "title": "review() catches Failure but not KeyError/json errors from a malformed service response; a service returning 200 without 'status' or 'id' raises an uncaught exception, the review step crashes, no result file is written, post's download fails",
+   "why": "In the poll loop, `polled['status']` and in the create `created['id']` are accessed without validating the schema. If the service returns 200 with a body lacking these keys (or a 200 with non-dict? handled), review raises KeyError, not Failure, which propagates out of review(), through main() → traceback → non-zero exit → result file absent → post download fails. Should convert to a recorded Failure/error result. Same for `pr['head']['sha']` from GitHub if the response is unexpected, though GitHub is trusted more."
+  },
+  {
+   "file": "ci/review_agents_ci.py",
+   "line_start": 53,
+   "line_end": 58,
+   "severity": "important",
+   "title": "WAIT_SECONDS = 45*60 with job timeout-minutes 50 and each HTTP call timeout 60s: worst case the loop can run past 45 min by up to one poll's request time (60s) plus sleep (15s) = 75s, plus the initial POST and clock; total ~46m15s < 50m, fine. Not a bug.",
+   "why": "—"
+  },
+  {
+   "file": "ci/post/action.yml",
+   "line_start": 16,
+   "line_end": 18,
+   "severity": "robustness",
+   "title": "download-artifact for the result has no fallback; if the artifact is missing (cancelled/failed review), the post step fails before the script runs, so the summary is never updated and the colour comes from the download error",
+   "why": "Same as above — robustness. Covered under concurrency finding."
+  },
+  {
+   "file": "src/review_agents/repo_config.py",
+   "line_start": 172,
+   "line_end": 186,
+   "severity": "important",
+   "title": "Retired options are stripped before validation, so a typo like `block_on_criticall` is still a hard error (good), but stripping `block_on_critical` even when the value is garbage (e.g. a nested mapping) hides real config errors",
+   "why": "Per D-037 the retired option is ignored regardless of value, which the test asserts ('maybe' is ignored). So this matches the intended contract; not a bug. Not reporting."
+  },
+  {
+   "file": "src/review_agents/repo_config.py",
+   "line_start": 178,
+   "line_end": 181,
+   "severity": "important",
+   "title": "`retired` is only reported from the top-level file; if the config is nested/aliased, fine. But when the rest of the config has an error, _rejected() drops `retired` — so the report won't mention the retired option alongside the error. Acceptable (defaults fallback). Not a bug.",
+   "why": "—"
+  },
+  {
+   "file": "src/review_agents/report.py",
+   "line_start": 518,
+   "line_end": 520,
+   "severity": "important",
+   "title": "The retired note is always emitted in the scope, but the English text says '{names} ... is no longer used' (singular verb) even for multiple names; if RETIRED_OPTIONS grows to several, grammar is wrong. Style, not a bug.",
+   "why": "Not reporting (style)."
+  },
+  {
+   "file": "ci/review_agents_ci.py",
+   "line_start": 296,
+   "line_end": 305,
+   "severity": "blocking",
+   "title": "gate()/post() wrongly treat 'superseded' as a failure, so a normal superseded review sets the required check red",
+   "why": "Already reported above duplicated; consolidate into one finding."
+  },
+  {
+   "file": "ci/review_agents_ci.py",
+   "line_start": 155,
+   "line_end": 160,
+   "severity": "important",
+   "title": "GitHub.pages on /issues/{n}/comments fetches ALL comments unbounded; a PR with thousands of comments is fully paginated each post, but bounded by reality. Not a bug.",
+   "why": "—"
+  },
+  {
+   "file": "ci/review_agents_ci.py",
+   "line_start": 340,
+   "line_end": 345,
+   "severity": "important",
+   "title": "When the review is done but `report.get('comments')` items lack 'body' key or path, KeyError crashes post(); the report schema is not validated",
+   "why": "`c['body']`, `comment['path']`, `comment['line']`, `comment['body']` are accessed directly. A malformed report from the service (trusted but still remote) crashes post() with a KeyError after possibly having already updated the summary — leaving comments inconsistent and the job red with a traceback rather than a clean message. Schema validation or .get with sensible defaults would be more robust."
+  },
+  {
+   "file": "ci/review_agents_ci.py",
+   "line_start": 358,
+   "line_end": 362,
+   "severity": "important",
+   "title": "When report has no 'walksummary'/'summary' key, report['summary'] raises KeyError after walkthrough upsert already happened — partial state",
+   "why": "Same class as above; report schema not validated."
+  },
+  {
+   "file": "ci/review_agents_ci.py",
+   "line_start": 249,
+   "line_end": 253,
+   "severity": "important",
+   "title": "`_ours` picks the FIRST bot comment containing the marker; if there are duplicates (from the no-concurrency race), only one is ever updated and stale duplicates persist forever",
+   "why": "Because post has no concurrency guard, duplicate walkthrough/summary comments can be created (two concurrent runs both see existing=None). `_ours` only updates the first, leaving permanent duplicates. Root cause: no concurrency control on the post job plus first-match upsert."
+  },
+  {
+   "file": "ci/review_agents_ci.py",
+   "line_start": 240,
+   "line_end": 253,
+   "severity": "important",
+   "title": "Inline comments are not deduplicated against comments posted by the per-comment fallback within the same run, but each comment only tried once per endpoint. Fine.",
+   "why": "—"
+  }
+ ],
+ "content": null,
+ "error": null
+}

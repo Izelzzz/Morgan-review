@@ -1,0 +1,201 @@
+{
+ "id": 4,
+ "repo": "izelcompany/morgan-eval",
+ "pr": 2,
+ "base_sha": "a3e3f741208a1b44755f86e60a9783c1cf96364b",
+ "head_sha": "0843319e4eadbef97aa82d68b4d5316ac1d15539",
+ "round": 3,
+ "mode": "standard",
+ "status": "done",
+ "error": null,
+ "limit_hit": null,
+ "superseded_by": null,
+ "created_at": "2026-11-16T06:55:28.872Z",
+ "started_at": "2026-11-16T06:55:30.556Z",
+ "finished_at": "2026-11-16T06:58:03.893Z",
+ "report": {
+  "summary": "<!-- review-agents:summary -->\n## 审查结论：需要先处理 1 条 🔴\n\n### 🔴 阻断（1）\n- 去掉 os.path.basename 后，客户端可控的 filename 中的目录部分会原样进入落盘路径，可写到 UPLOAD_DIR 之外 — `python_multipart/multipart.py:376-380`（见行间评论）\n\n### 🟡 重要（2）\n- UPLOAD_KEEP_FILENAME 的文档仍承诺会去掉非法路径片段，与新代码不符 — `python_multipart/multipart.py:349`（见下方「不在本次改动行上的发现」；规格漂移、可验证性都发现了；同类问题还在：`python_multipart/multipart.py:376-380`）\n- 普通但含目录分隔符的 filename 会抛 FileError 或落到意料之外的子目录 — `python_multipart/multipart.py:471-483`（见下方「不在本次改动行上的发现」）\n\n### 不在本次改动行上的发现（2）\n> 以下问题出在这次 PR 没有改动的代码上，GitHub 不允许在这些行发行间评论，所以列在这里。\n- 🟡 UPLOAD_KEEP_FILENAME 的文档仍承诺会去掉非法路径片段，与新代码不符 — `python_multipart/multipart.py:349`\n  原因：按文档启用 UPLOAD_KEEP_FILENAME 的使用者会得到与说明相反的行为（未清洗的文件名），且不会收到任何告警。\n  - 依据 · 规格 `python_multipart/multipart.py:349`\n    > Whether or not to keep the filename of the uploaded file. If True, then the filename will be converted to a safe representation (e.g. by removing any invalid path segments), and then saved with the same name).\n    - `python_multipart/multipart.py:377-380`：新的 __init__ 只做 os.path.splitext(file_name) 并直接保存 base/ext，不再移除任何路径片段\n    - `python_multipart/multipart.py:471-478`：_get_disk_file 把 _file_base(+_ext) 原样 os.path.join 到 UPLOAD_DIR 后 open，没有任何清洗步骤\n    为什么：docstring 是 File 这个公开类对 UPLOAD_KEEP_FILENAME 的唯一说明，它承诺文件名会被转成安全表示（例如去掉非法路径片段）；改动后代码完全没有这一步，文档所说的保证已不成立，而改动前至少 os.path.basename 会剥掉目录部分。\n  - 依据 · 路径\n    1. `python_multipart/multipart.py:360`：File.__init__ 接收调用方传入的 file_name（来自 multipart 的 filename 参数）\n    2. `python_multipart/multipart.py:378-380`：file_name=b\"../../etc/passwd\" 经 splitext 后，_file_base 仍是 b\"../../etc/passwd\"\n    3. `python_multipart/multipart.py:473-478`：配合 UPLOAD_KEEP_FILENAME/UPLOAD_KEEP_EXTENSIONS，os.path.join(UPLOAD_DIR, fname) 得到带 .. 的路径并直接 open\n    为什么：带目录分隔符或 .. 的文件名会原样进入落盘路径，这与文档宣称的“removing any invalid path segments”直接矛盾，启用该选项的用户得不到文档所说的安全文件名。\n  建议：要么恢复路径清洗实现，要么同步修改 UPLOAD_KEEP_FILENAME 的文档并在 CHANGELOG 中记录这一行为变化。\n  规格漂移、可验证性都发现了\n  同类问题还在：`python_multipart/multipart.py:376-380`\n- 🟡 普通但含目录分隔符的 filename 会抛 FileError 或落到意料之外的子目录 — `python_multipart/multipart.py:471-483`\n  原因：同一份代码在升级后会拒收原本能成功的上传，或把文件保存到运维没有预期的位置，且现象只在 filename 含分隔符时出现，很难排查。\n  - 依据 · 路径\n    1. `python_multipart/multipart.py:200-205`：parse_options_header 只对 Windows 形式的 filename（`C:\\` 或 `\\\\`）取末端段，Posix 风格的 `dir/report.txt` 原样保留并进入 options[b\"filename\"]。\n    2. `python_multipart/multipart.py:1689-1697`：caller 把 options 里的 filename 原样交给 FileClass/File 构造，File._file_name 即含分隔符的路径。\n    3. `python_multipart/multipart.py:377-380`：改动后只用 os.path.splitext 处理整个 file_name，不再取 basename，于是 base=b\"uploads/report\"、ext=b\".txt\"（改动前 basename 会得到 b\"report\"）。\n    4. `python_multipart/multipart.py:471-478`：fname = base+ext 仍含目录段，os.path.join(upload_dir, b\"uploads/report.txt\") 得到 upload_dir/uploads/report.txt（若 fname 为绝对路径则 join 直接返回该绝对路径），随后 open 该路径。\n    5. `python_multipart/multipart.py:476-483`：子目录不存在时 open 抛 FileNotFoundError（OSError 子类），被 except OSError 捕获后重新抛出 FileError，整个上传失败；若子目录存在则文件被静默写入子目录。\n    为什么：filename 来自客户端 Content-Disposition，只有 Windows 盘符形式被裁剪，含 `/` 的相对或绝对路径会一路传到 _get_disk_file；由于基名步骤被删除，这些路径现在会参与目录拼接，导致原本能成功的上传抛出 FileError 或落到 UPLOAD_DIR 下未被预期的子目录。改动前 os.path.basename 会先把路径压平，不会出现这两种结果。\n  建议：对 filename 做 basename 处理（或校验其为单一路径段）后再拼路径，并补充 filename 含 `/`、含 `..`、为空目录段的测试用例。\n\n### 本次审查的范围\n- 审了：规格漂移、边界问题、安全、可维护性、可验证性（各 1 次）· 2 个改动文件\n- 没审：改动文件都看了，各维度都交了卷\n- 能证明：发布的每条 🔴 / 🟡 都有程序核对过的依据，并经验证审查员重新读代码确认；引用的规则原文确实在所写的位置。\n- 不能证明：没有运行代码和测试；没有发现问题不代表没有问题；规格只来自 PR 描述、关联的 issue 和配置的规格文档；没验完的发现没有发布，不代表它们不成立。\n\n### 本次审查\nStandard 模式 · 663,206 token · 2 分 33 秒 · 审查 #4\n\n<!-- review-agents:counts {\"blocking\": 1, \"important\": 2, \"robustness\": 0, \"nit\": 0, \"complete\": true} -->\n",
+  "comments": [
+   {
+    "path": "python_multipart/multipart.py",
+    "start_line": null,
+    "line": 378,
+    "body": "**🔴 阻断 · 去掉 os.path.basename 后，客户端可控的 filename 中的目录部分会原样进入落盘路径，可写到 UPLOAD_DIR 之外**\n\n只要部署方按文档启用了 UPLOAD_DIR + UPLOAD_KEEP_FILENAME，任何能上传的表单都能让进程在 UPLOAD_DIR 之外创建或覆盖文件，属于由不受信任输入直接导致的安全问题。\n\n- 依据 · 路径\n  1. `python_multipart/multipart.py:1685-1698`：filename 直接取自 Content-Disposition 头并通过 `FileClass(file_name, field_name, config=...)` 传入 File，没有任何清洗。\n  2. `python_multipart/multipart.py:200-205`：唯一的文件名处理只针对 IE6 风格的反斜杠 Windows 路径，`../` 或绝对路径这类正斜杠路径原样保留。\n  3. `python_multipart/multipart.py:377-380`：改成 `base, ext = os.path.splitext(file_name)`，`os.path.splitext` 只切扩展名，目录部分完整留在 `_file_base` 中（原来由 `os.path.basename` 去掉）。\n  4. `python_multipart/multipart.py:471-478`：`fname = self._file_base + self._ext` 后 `path = os.path.join(file_dir, fname)`，再 `open(path, \"w+b\")` 创建/截断文件；绝对 fname 会让 os.path.join 丢弃 file_dir，`../` 则逃出 UPLOAD_DIR。\n  5. `tests/test_multipart.py:186-198`：`UPLOAD_DIR` + `UPLOAD_KEEP_FILENAME` 是文档化的常规用法，但残留用例的 filename 为无目录的 `b\"foo\"`；删除的 tests/test_file.py 是唯一覆盖带目录 filename 的用例。\n  为什么：攻击者可控的 filename 在只做 splitext 后保留 `../` 或前导 `/`，配合文档化的 UPLOAD_DIR + UPLOAD_KEEP_FILENAME（FileConfig 允许 bytes，被删测试即用 bytes）在超过默认 1 MiB 阈值落盘时，`open(path, \"w+b\")` 会写到 UPLOAD_DIR 之外甚至覆盖任意可写文件。原来正是 os.path.basename 阻止了这一点，本 PR 同时移除了该保护与守护测试。\n\n**建议：**恢复对 basename 的提取（或等价地拒绝含路径分隔符、绝对路径的 filename），并且不要删除 tests/test_file.py 中对该行为的断言。\n\n<!-- review-agents:finding f9f2463d673c46b522c2e63b449f6d98ee2d3a49ded3976ba1e034b3c6363e18 -->\n"
+   }
+  ],
+  "counts": {
+   "blocking": 1,
+   "important": 2,
+   "robustness": 0,
+   "nit": 0,
+   "complete": true
+  },
+  "walkthrough": "<!-- review-agents:walkthrough -->\n## 📖 改动说明\n\n改动说明没能生成：OpenAIInvalidRequestError: Error code: 400 - An assistant message with 'tool_calls' must be followed by tool messages responding to each 'tool_call_id'. (insufficient tool messages following tool_calls message) (request_id: 7e452f7d-ab17-4594-969f-8f984c64f961)\n"
+ },
+ "findings": [
+  {
+   "fingerprint": "f9f2463d673c46b522c2e63b449f6d98ee2d3a49ded3976ba1e034b3c6363e18",
+   "primary_dimension": "security",
+   "dimensions": [
+    "security"
+   ],
+   "severity": "blocking",
+   "preexisting": false,
+   "file": "python_multipart/multipart.py",
+   "line_start": 376,
+   "line_end": 380,
+   "title": "去掉 os.path.basename 后，客户端可控的 filename 中的目录部分会原样进入落盘路径，可写到 UPLOAD_DIR 之外",
+   "body": "只要部署方按文档启用了 UPLOAD_DIR + UPLOAD_KEEP_FILENAME，任何能上传的表单都能让进程在 UPLOAD_DIR 之外创建或覆盖文件，属于由不受信任输入直接导致的安全问题。",
+   "basis": [
+    {
+     "kind": "path",
+     "source": null,
+     "quote": null,
+     "places": [
+      {
+       "file": "python_multipart/multipart.py",
+       "line_start": 1690,
+       "line_end": 1697,
+       "shows": "filename 直接取自请求头 Content-Disposition 的 filename 选项，未做任何清洗就传给 FileClass(file_name, ...)"
+      },
+      {
+       "file": "python_multipart/multipart.py",
+       "line_start": 377,
+       "line_end": 380,
+       "shows": "现在只做 os.path.splitext(file_name)，不再取 basename，目录部分完整保留在 _file_base 中"
+      },
+      {
+       "file": "python_multipart/multipart.py",
+       "line_start": 471,
+       "line_end": 475,
+       "shows": "fname 由未清洗的 _file_base/_ext 拼成，再用 os.path.join(file_dir, fname) 组合出落盘路径"
+      },
+      {
+       "file": "python_multipart/multipart.py",
+       "line_start": 476,
+       "line_end": 478,
+       "shows": "open(path, \"w+b\") 直接创建/截断该路径"
+      },
+      {
+       "file": "tests/test_multipart.py",
+       "line_start": 186,
+       "line_end": 198,
+       "shows": "配置 UPLOAD_DIR + UPLOAD_KEEP_FILENAME 正是这条路径的常规用法，测试也只用了无目录的 b\"foo\"，删除 tests/test_file.py 后没有任何用例再覆盖目录型 filename"
+      }
+     ],
+     "explanation": "filename 是攻击者完全可控的值。改动后 base 位中保留了 `../` 或绝对路径：当 filename 为 `/etc/cron.d/x` 时 os.path.join 会丢弃 UPLOAD_DIR 直接返回该绝对路径；当为 `../../x` 时可逃出 UPLOAD_DIR。随后 open(path, \"w+b\") 会在该位置创建或截断文件，形成任意文件写入。原代码的 os.path.basename 正是为阻断这一点而存在，本次改动把它删掉并连带删除了唯一守护此行为的测试。",
+     "check": {
+      "status": "ok",
+      "problem": null
+     }
+    }
+   ],
+   "verdict": "{\"holds\": true, \"reason\": \"\\u4ee3\\u7801\\u8bc1\\u5b9e filename \\u6765\\u81ea\\u8bf7\\u6c42\\u5934\\u4e14\\u672a\\u6e05\\u6d17\\uff0csplitext \\u4e0d\\u5265\\u79bb\\u76ee\\u5f55\\u6210\\u5206\\uff0c\\u843d\\u76d8\\u8def\\u5f84\\u7531\\u5b83\\u62fc\\u63a5\\u540e\\u76f4\\u63a5 open\\uff0c\\u56e0\\u6b64\\u672c\\u6539\\u52a8\\u786e\\u5b9e\\u91cd\\u65b0\\u5f00\\u542f\\u4e86\\u53ef\\u5199\\u5230 UPLOAD_DIR \\u4e4b\\u5916\\u7684\\u8def\\u5f84\\u7a7f\\u8d8a/\\u7edd\\u5bf9\\u8def\\u5f84\\u5199\\u5165\\uff1b\\u8fd9\\u5c5e\\u4e8e\\u7531\\u4e0d\\u53d7\\u4fe1\\u4efb\\u8f93\\u5165\\u89e6\\u53d1\\u3001\\u5728\\u6587\\u6863\\u5316\\u914d\\u7f6e\\u4e0b\\u5373\\u53ef\\u8fbe\\u7684\\u5b89\\u5168\\u98ce\\u9669\\uff0c\\u5e94\\u4fdd\\u6301 blocking\\u3002\", \"basis\": [{\"kind\": \"path\", \"source\": null, \"quote\": null, \"places\": [{\"file\": \"python_multipart/multipart.py\", \"line_start\": 1685, \"line_end\": 1698, \"shows\": \"filename \\u76f4\\u63a5\\u53d6\\u81ea Content-Disposition \\u5934\\u5e76\\u901a\\u8fc7 `FileClass(file_name, field_name, config=...)` \\u4f20\\u5165 File\\uff0c\\u6ca1\\u6709\\u4efb\\u4f55\\u6e05\\u6d17\\u3002\"}, {\"file\": \"python_multipart/multipart.py\", \"line_start\": 200, \"line_end\": 205, \"shows\": \"\\u552f\\u4e00\\u7684\\u6587\\u4ef6\\u540d\\u5904\\u7406\\u53ea\\u9488\\u5bf9 IE6 \\u98ce\\u683c\\u7684\\u53cd\\u659c\\u6760 Windows \\u8def\\u5f84\\uff0c`../` \\u6216\\u7edd\\u5bf9\\u8def\\u5f84\\u8fd9\\u7c7b\\u6b63\\u659c\\u6760\\u8def\\u5f84\\u539f\\u6837\\u4fdd\\u7559\\u3002\"}, {\"file\": \"python_multipart/multipart.py\", \"line_start\": 377, \"line_end\": 380, \"shows\": \"\\u6539\\u6210 `base, ext = os.path.splitext(file_name)`\\uff0c`os.path.splitext` \\u53ea\\u5207\\u6269\\u5c55\\u540d\\uff0c\\u76ee\\u5f55\\u90e8\\u5206\\u5b8c\\u6574\\u7559\\u5728 `_file_base` \\u4e2d\\uff08\\u539f\\u6765\\u7531 `os.path.basename` \\u53bb\\u6389\\uff09\\u3002\"}, {\"file\": \"python_multipart/multipart.py\", \"line_start\": 471, \"line_end\": 478, \"shows\": \"`fname = self._file_base + self._ext` \\u540e `path = os.path.join(file_dir, fname)`\\uff0c\\u518d `open(path, \\\"w+b\\\")` \\u521b\\u5efa/\\u622a\\u65ad\\u6587\\u4ef6\\uff1b\\u7edd\\u5bf9 fname \\u4f1a\\u8ba9 os.path.join \\u4e22\\u5f03 file_dir\\uff0c`../` \\u5219\\u9003\\u51fa UPLOAD_DIR\\u3002\"}, {\"file\": \"tests/test_multipart.py\", \"line_start\": 186, \"line_end\": 198, \"shows\": \"`UPLOAD_DIR` + `UPLOAD_KEEP_FILENAME` \\u662f\\u6587\\u6863\\u5316\\u7684\\u5e38\\u89c4\\u7528\\u6cd5\\uff0c\\u4f46\\u6b8b\\u7559\\u7528\\u4f8b\\u7684 filename \\u4e3a\\u65e0\\u76ee\\u5f55\\u7684 `b\\\"foo\\\"`\\uff1b\\u5220\\u9664\\u7684 tests/test_file.py \\u662f\\u552f\\u4e00\\u8986\\u76d6\\u5e26\\u76ee\\u5f55 filename \\u7684\\u7528\\u4f8b\\u3002\"}], \"explanation\": \"\\u653b\\u51fb\\u8005\\u53ef\\u63a7\\u7684 filename \\u5728\\u53ea\\u505a splitext \\u540e\\u4fdd\\u7559 `../` \\u6216\\u524d\\u5bfc `/`\\uff0c\\u914d\\u5408\\u6587\\u6863\\u5316\\u7684 UPLOAD_DIR + UPLOAD_KEEP_FILENAME\\uff08FileConfig \\u5141\\u8bb8 bytes\\uff0c\\u88ab\\u5220\\u6d4b\\u8bd5\\u5373\\u7528 bytes\\uff09\\u5728\\u8d85\\u8fc7\\u9ed8\\u8ba4 1 MiB \\u9608\\u503c\\u843d\\u76d8\\u65f6\\uff0c`open(path, \\\"w+b\\\")` \\u4f1a\\u5199\\u5230 UPLOAD_DIR \\u4e4b\\u5916\\u751a\\u81f3\\u8986\\u76d6\\u4efb\\u610f\\u53ef\\u5199\\u6587\\u4ef6\\u3002\\u539f\\u6765\\u6b63\\u662f os.path.basename \\u963b\\u6b62\\u4e86\\u8fd9\\u4e00\\u70b9\\uff0c\\u672c PR \\u540c\\u65f6\\u79fb\\u9664\\u4e86\\u8be5\\u4fdd\\u62a4\\u4e0e\\u5b88\\u62a4\\u6d4b\\u8bd5\\u3002\", \"check\": {\"status\": \"ok\", \"problem\": null}}]}",
+   "status": "open"
+  },
+  {
+   "fingerprint": "70d84c0e05993e6c93a682ab04082c530a2cd068f8fa63bb1790f5f780f53f10",
+   "primary_dimension": "spec_drift",
+   "dimensions": [
+    "spec_drift",
+    "verifiability"
+   ],
+   "severity": "important",
+   "preexisting": false,
+   "file": "python_multipart/multipart.py",
+   "line_start": 349,
+   "line_end": 349,
+   "title": "UPLOAD_KEEP_FILENAME 的文档仍承诺会去掉非法路径片段，与新代码不符",
+   "body": "按文档启用 UPLOAD_KEEP_FILENAME 的使用者会得到与说明相反的行为（未清洗的文件名），且不会收到任何告警。",
+   "basis": [
+    {
+     "kind": "spec",
+     "source": "python_multipart/multipart.py:349",
+     "quote": "Whether or not to keep the filename of the uploaded file. If True, then the filename will be converted to a safe representation (e.g. by removing any invalid path segments), and then saved with the same name).",
+     "places": [
+      {
+       "file": "python_multipart/multipart.py",
+       "line_start": 377,
+       "line_end": 380,
+       "shows": "实现只剩 os.path.splitext(file_name)，不再移除任何路径片段"
+      }
+     ],
+     "explanation": "类是公开 API，docstring 是用户看到的唯一配置说明。代码不再做“remove any invalid path segments”，文档描述的保证已不成立，读者会以为目录穿越被防护。",
+     "check": {
+      "status": "ok",
+      "problem": null
+     }
+    },
+    {
+     "kind": "spec",
+     "source": "pr",
+     "quote": "along with the test that only exercised it.",
+     "places": [
+      {
+       "file": "python_multipart/multipart.py",
+       "line_start": 378,
+       "line_end": 380,
+       "shows": "被删掉的那一步恰恰是文档承诺的路径清洗行为，而非纯粹多余的一步"
+      }
+     ],
+     "explanation": "PR 把这次改动描述为去掉多余步骤，但同时保留了宣称会清洗路径的文档，二者不能同时成立。",
+     "check": {
+      "status": "ok",
+      "problem": null
+     }
+    }
+   ],
+   "verdict": "{\"holds\": true, \"reason\": \"\\u4ee3\\u7801\\u786e\\u8ba4\\uff1a\\u6539\\u52a8\\u540e File.__init__ \\u4e0e _get_disk_file \\u90fd\\u4e0d\\u518d\\u505a\\u4efb\\u4f55\\u8def\\u5f84\\u6e05\\u6d17\\uff0c\\u800c line 349 \\u7684 docstring \\u4ecd\\u58f0\\u660e UPLOAD_KEEP_FILENAME \\u4f1a\\u628a\\u6587\\u4ef6\\u540d\\u8f6c\\u6210\\u5b89\\u5168\\u8868\\u793a\\u5e76\\u53bb\\u6389\\u975e\\u6cd5\\u8def\\u5f84\\u7247\\u6bb5\\uff0c\\u6587\\u6863\\u4e0e\\u5b9e\\u73b0\\u4e0d\\u4e00\\u81f4\\uff0c\\u4e14\\u8fd9\\u662f\\u672c\\u6b21 PR \\u5f15\\u5165\\u7684\\uff08\\u539f\\u6765 os.path.basename \\u81f3\\u5c11\\u5265\\u6389\\u76ee\\u5f55\\u90e8\\u5206\\uff09\\uff0c\\u6545\\u8be5 spec drift \\u6210\\u7acb\\uff0c\\u4fdd\\u6301 important\\u3002\", \"basis\": [{\"kind\": \"spec\", \"source\": \"python_multipart/multipart.py:349\", \"quote\": \"Whether or not to keep the filename of the uploaded file. If True, then the filename will be converted to a safe representation (e.g. by removing any invalid path segments), and then saved with the same name).\", \"places\": [{\"file\": \"python_multipart/multipart.py\", \"line_start\": 377, \"line_end\": 380, \"shows\": \"\\u65b0\\u7684 __init__ \\u53ea\\u505a os.path.splitext(file_name) \\u5e76\\u76f4\\u63a5\\u4fdd\\u5b58 base/ext\\uff0c\\u4e0d\\u518d\\u79fb\\u9664\\u4efb\\u4f55\\u8def\\u5f84\\u7247\\u6bb5\"}, {\"file\": \"python_multipart/multipart.py\", \"line_start\": 471, \"line_end\": 478, \"shows\": \"_get_disk_file \\u628a _file_base(+_ext) \\u539f\\u6837 os.path.join \\u5230 UPLOAD_DIR \\u540e open\\uff0c\\u6ca1\\u6709\\u4efb\\u4f55\\u6e05\\u6d17\\u6b65\\u9aa4\"}], \"explanation\": \"docstring \\u662f File \\u8fd9\\u4e2a\\u516c\\u5f00\\u7c7b\\u5bf9 UPLOAD_KEEP_FILENAME \\u7684\\u552f\\u4e00\\u8bf4\\u660e\\uff0c\\u5b83\\u627f\\u8bfa\\u6587\\u4ef6\\u540d\\u4f1a\\u88ab\\u8f6c\\u6210\\u5b89\\u5168\\u8868\\u793a\\uff08\\u4f8b\\u5982\\u53bb\\u6389\\u975e\\u6cd5\\u8def\\u5f84\\u7247\\u6bb5\\uff09\\uff1b\\u6539\\u52a8\\u540e\\u4ee3\\u7801\\u5b8c\\u5168\\u6ca1\\u6709\\u8fd9\\u4e00\\u6b65\\uff0c\\u6587\\u6863\\u6240\\u8bf4\\u7684\\u4fdd\\u8bc1\\u5df2\\u4e0d\\u6210\\u7acb\\uff0c\\u800c\\u6539\\u52a8\\u524d\\u81f3\\u5c11 os.path.basename \\u4f1a\\u5265\\u6389\\u76ee\\u5f55\\u90e8\\u5206\\u3002\", \"check\": {\"status\": \"ok\", \"problem\": null}}, {\"kind\": \"path\", \"source\": null, \"quote\": null, \"places\": [{\"file\": \"python_multipart/multipart.py\", \"line_start\": 360, \"line_end\": 360, \"shows\": \"File.__init__ \\u63a5\\u6536\\u8c03\\u7528\\u65b9\\u4f20\\u5165\\u7684 file_name\\uff08\\u6765\\u81ea multipart \\u7684 filename \\u53c2\\u6570\\uff09\"}, {\"file\": \"python_multipart/multipart.py\", \"line_start\": 378, \"line_end\": 380, \"shows\": \"file_name=b\\\"../../etc/passwd\\\" \\u7ecf splitext \\u540e\\uff0c_file_base \\u4ecd\\u662f b\\\"../../etc/passwd\\\"\"}, {\"file\": \"python_multipart/multipart.py\", \"line_start\": 473, \"line_end\": 478, \"shows\": \"\\u914d\\u5408 UPLOAD_KEEP_FILENAME/UPLOAD_KEEP_EXTENSIONS\\uff0cos.path.join(UPLOAD_DIR, fname) \\u5f97\\u5230\\u5e26 .. \\u7684\\u8def\\u5f84\\u5e76\\u76f4\\u63a5 open\"}], \"explanation\": \"\\u5e26\\u76ee\\u5f55\\u5206\\u9694\\u7b26\\u6216 .. \\u7684\\u6587\\u4ef6\\u540d\\u4f1a\\u539f\\u6837\\u8fdb\\u5165\\u843d\\u76d8\\u8def\\u5f84\\uff0c\\u8fd9\\u4e0e\\u6587\\u6863\\u5ba3\\u79f0\\u7684\\u201cremoving any invalid path segments\\u201d\\u76f4\\u63a5\\u77db\\u76fe\\uff0c\\u542f\\u7528\\u8be5\\u9009\\u9879\\u7684\\u7528\\u6237\\u5f97\\u4e0d\\u5230\\u6587\\u6863\\u6240\\u8bf4\\u7684\\u5b89\\u5168\\u6587\\u4ef6\\u540d\\u3002\", \"check\": {\"status\": \"ok\", \"problem\": null}}]}",
+   "status": "open"
+  },
+  {
+   "fingerprint": "f4fb621b7f43a15505daf496ffaedef4b64a084b5764de8f272be7c1e3039a88",
+   "primary_dimension": "edge_cases",
+   "dimensions": [
+    "edge_cases"
+   ],
+   "severity": "important",
+   "preexisting": false,
+   "file": "python_multipart/multipart.py",
+   "line_start": 471,
+   "line_end": 483,
+   "title": "普通但含目录分隔符的 filename 会抛 FileError 或落到意料之外的子目录",
+   "body": "同一份代码在升级后会拒收原本能成功的上传，或把文件保存到运维没有预期的位置，且现象只在 filename 含分隔符时出现，很难排查。",
+   "basis": [
+    {
+     "kind": "path",
+     "source": null,
+     "quote": null,
+     "places": [
+      {
+       "file": "python_multipart/multipart.py",
+       "line_start": 378,
+       "line_end": 378,
+       "shows": "filename=b\"uploads/report.txt\" 经 splitext 得到 base=b\"uploads/report\", ext=b\".txt\""
+      },
+      {
+       "file": "python_multipart/multipart.py",
+       "line_start": 473,
+       "line_end": 475,
+       "shows": "fname=b\"uploads/report.txt\"，os.path.join(upload_dir, fname) 得到 upload_dir/uploads/report.txt"
+      },
+      {
+       "file": "python_multipart/multipart.py",
+       "line_start": 476,
+       "line_end": 483,
+       "shows": "该子目录不存在时 open 抛 FileNotFoundError（OSError 子类），被捕获后抛出 FileError，整个请求失败"
+      }
+     ],
+     "explanation": "改动前 basename 会把 b\"uploads/report.txt\" 规约为 b\"report.txt\"，写入永远成功；改动后只要 filename 带目录前缀（某些客户端/旧浏览器会发送本地完整路径，如 `dir/file.txt`）且该子目录在 UPLOAD_DIR 下不存在，上传就会以 FileError 失败；若子目录恰好存在，文件会悄悄落到用户看不到的子目录里，actual_file_name 也不再是 UPLOAD_DIR 下的直接子项。",
+     "check": {
+      "status": "ok",
+      "problem": null
+     }
+    }
+   ],
+   "verdict": "{\"holds\": true, \"reason\": \"\\u8def\\u5f84\\u7684\\u6bcf\\u4e00\\u6b65\\u90fd\\u80fd\\u5728\\u4ee3\\u7801\\u4e2d\\u6838\\u5b9e\\uff1a\\u5ba2\\u6237\\u7aef filename \\u4ec5\\u5bf9 Windows \\u5f62\\u5f0f\\u505a\\u4e86\\u672b\\u7aef\\u6bb5\\u63d0\\u53d6\\uff0c\\u6539\\u52a8\\u540e splitext \\u4e0d\\u518d\\u5265\\u79bb\\u76ee\\u5f55\\u90e8\\u5206\\uff0c\\u542b\\u5206\\u9694\\u7b26\\u7684\\u540d\\u5b57\\u88ab os.path.join \\u62fc\\u6210\\u5b50\\u76ee\\u5f55\\u8def\\u5f84\\uff0c\\u5b50\\u76ee\\u5f55\\u4e0d\\u5b58\\u5728\\u65f6 open \\u629b OSError \\u5e76\\u8f6c\\u4e3a FileError\\uff0c\\u5b58\\u5728\\u65f6\\u6587\\u4ef6\\u88ab\\u6084\\u6084\\u5199\\u5165\\u5b50\\u76ee\\u5f55\\u3002\\u8fd9\\u6761\\u56de\\u5f52\\u53ea\\u5728 filename \\u542b\\u76ee\\u5f55\\u5206\\u9694\\u7b26\\u65f6\\u89e6\\u53d1\\uff0c\\u5c5e\\u4e8e\\u73b0\\u5b9e\\u53ef\\u8fbe\\u4f46\\u975e\\u9ed8\\u8ba4\\u573a\\u666f\\uff0c\\u6545\\u7ef4\\u6301 important\\u3002\", \"basis\": [{\"kind\": \"path\", \"source\": null, \"quote\": null, \"places\": [{\"file\": \"python_multipart/multipart.py\", \"line_start\": 200, \"line_end\": 205, \"shows\": \"parse_options_header \\u53ea\\u5bf9 Windows \\u5f62\\u5f0f\\u7684 filename\\uff08`C:\\\\` \\u6216 `\\\\\\\\`\\uff09\\u53d6\\u672b\\u7aef\\u6bb5\\uff0cPosix \\u98ce\\u683c\\u7684 `dir/report.txt` \\u539f\\u6837\\u4fdd\\u7559\\u5e76\\u8fdb\\u5165 options[b\\\"filename\\\"]\\u3002\"}, {\"file\": \"python_multipart/multipart.py\", \"line_start\": 1689, \"line_end\": 1697, \"shows\": \"caller \\u628a options \\u91cc\\u7684 filename \\u539f\\u6837\\u4ea4\\u7ed9 FileClass/File \\u6784\\u9020\\uff0cFile._file_name \\u5373\\u542b\\u5206\\u9694\\u7b26\\u7684\\u8def\\u5f84\\u3002\"}, {\"file\": \"python_multipart/multipart.py\", \"line_start\": 377, \"line_end\": 380, \"shows\": \"\\u6539\\u52a8\\u540e\\u53ea\\u7528 os.path.splitext \\u5904\\u7406\\u6574\\u4e2a file_name\\uff0c\\u4e0d\\u518d\\u53d6 basename\\uff0c\\u4e8e\\u662f base=b\\\"uploads/report\\\"\\u3001ext=b\\\".txt\\\"\\uff08\\u6539\\u52a8\\u524d basename \\u4f1a\\u5f97\\u5230 b\\\"report\\\"\\uff09\\u3002\"}, {\"file\": \"python_multipart/multipart.py\", \"line_start\": 471, \"line_end\": 478, \"shows\": \"fname = base+ext \\u4ecd\\u542b\\u76ee\\u5f55\\u6bb5\\uff0cos.path.join(upload_dir, b\\\"uploads/report.txt\\\") \\u5f97\\u5230 upload_dir/uploads/report.txt\\uff08\\u82e5 fname \\u4e3a\\u7edd\\u5bf9\\u8def\\u5f84\\u5219 join \\u76f4\\u63a5\\u8fd4\\u56de\\u8be5\\u7edd\\u5bf9\\u8def\\u5f84\\uff09\\uff0c\\u968f\\u540e open \\u8be5\\u8def\\u5f84\\u3002\"}, {\"file\": \"python_multipart/multipart.py\", \"line_start\": 476, \"line_end\": 483, \"shows\": \"\\u5b50\\u76ee\\u5f55\\u4e0d\\u5b58\\u5728\\u65f6 open \\u629b FileNotFoundError\\uff08OSError \\u5b50\\u7c7b\\uff09\\uff0c\\u88ab except OSError \\u6355\\u83b7\\u540e\\u91cd\\u65b0\\u629b\\u51fa FileError\\uff0c\\u6574\\u4e2a\\u4e0a\\u4f20\\u5931\\u8d25\\uff1b\\u82e5\\u5b50\\u76ee\\u5f55\\u5b58\\u5728\\u5219\\u6587\\u4ef6\\u88ab\\u9759\\u9ed8\\u5199\\u5165\\u5b50\\u76ee\\u5f55\\u3002\"}], \"explanation\": \"filename \\u6765\\u81ea\\u5ba2\\u6237\\u7aef Content-Disposition\\uff0c\\u53ea\\u6709 Windows \\u76d8\\u7b26\\u5f62\\u5f0f\\u88ab\\u88c1\\u526a\\uff0c\\u542b `/` \\u7684\\u76f8\\u5bf9\\u6216\\u7edd\\u5bf9\\u8def\\u5f84\\u4f1a\\u4e00\\u8def\\u4f20\\u5230 _get_disk_file\\uff1b\\u7531\\u4e8e\\u57fa\\u540d\\u6b65\\u9aa4\\u88ab\\u5220\\u9664\\uff0c\\u8fd9\\u4e9b\\u8def\\u5f84\\u73b0\\u5728\\u4f1a\\u53c2\\u4e0e\\u76ee\\u5f55\\u62fc\\u63a5\\uff0c\\u5bfc\\u81f4\\u539f\\u672c\\u80fd\\u6210\\u529f\\u7684\\u4e0a\\u4f20\\u629b\\u51fa FileError \\u6216\\u843d\\u5230 UPLOAD_DIR \\u4e0b\\u672a\\u88ab\\u9884\\u671f\\u7684\\u5b50\\u76ee\\u5f55\\u3002\\u6539\\u52a8\\u524d os.path.basename \\u4f1a\\u5148\\u628a\\u8def\\u5f84\\u538b\\u5e73\\uff0c\\u4e0d\\u4f1a\\u51fa\\u73b0\\u8fd9\\u4e24\\u79cd\\u7ed3\\u679c\\u3002\", \"check\": {\"status\": \"ok\", \"problem\": null}}]}",
+   "status": "open"
+  }
+ ],
+ "seconds": 165.1
+}

@@ -1,0 +1,150 @@
+py-mr-pipeline-run-001 baseline 1: 7 findings
+Traceback (most recent call last):
+  File "/root/.local/share/uv/python/cpython-3.12.13-linux-x86_64-gnu/lib/python3.12/http/client.py", line 584, in _get_chunk_left
+    chunk_left = self._read_next_chunk_size()
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/root/.local/share/uv/python/cpython-3.12.13-linux-x86_64-gnu/lib/python3.12/http/client.py", line 551, in _read_next_chunk_size
+    return int(line, 16)
+           ^^^^^^^^^^^^^
+ValueError: invalid literal for int() with base 16: b''
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "/root/.local/share/uv/python/cpython-3.12.13-linux-x86_64-gnu/lib/python3.12/http/client.py", line 602, in _read_chunked
+    while (chunk_left := self._get_chunk_left()) is not None:
+                         ^^^^^^^^^^^^^^^^^^^^^^
+  File "/root/.local/share/uv/python/cpython-3.12.13-linux-x86_64-gnu/lib/python3.12/http/client.py", line 586, in _get_chunk_left
+    raise IncompleteRead(b'')
+http.client.IncompleteRead: IncompleteRead(0 bytes read)
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "/home/user/review-lab-wt/eval/eval/baseline.py", line 109, in <module>
+    path = args.out / case_id / f"baseline-{n}.json"
+     ^^^^^^
+  File "/home/user/review-lab-wt/eval/eval/baseline.py", line 86, in main
+    reply: dict[str, Any] = {}
+            ^^^^^^^^^^^^^^^^^^^
+  File "/home/user/review-lab-wt/eval/eval/baseline.py", line 66, in call
+    reply: dict[str, Any] = json.loads(response.read())
+                                       ^^^^^^^^^^^^^^^
+  File "/root/.local/share/uv/python/cpython-3.12.13-linux-x86_64-gnu/lib/python3.12/http/client.py", line 478, in read
+    return self._read_chunked(amt)
+           ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/root/.local/share/uv/python/cpython-3.12.13-linux-x86_64-gnu/lib/python3.12/http/client.py", line 614, in _read_chunked
+    raise IncompleteRead(b''.join(value)) from exc
+http.client.IncompleteRead: IncompleteRead(2 bytes read)
+py-mr-strategy-room-001 baseline 1: 5 findings
+py-mr-strategy-room-001 baseline 2: 0 findings
+Traceback (most recent call last):
+  File "/root/.local/share/uv/python/cpython-3.12.13-linux-x86_64-gnu/lib/python3.12/http/client.py", line 584, in _get_chunk_left
+    chunk_left = self._read_next_chunk_size()
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/root/.local/share/uv/python/cpython-3.12.13-linux-x86_64-gnu/lib/python3.12/http/client.py", line 551, in _read_next_chunk_size
+    return int(line, 16)
+           ^^^^^^^^^^^^^
+ValueError: invalid literal for int() with base 16: b''
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "/root/.local/share/uv/python/cpython-3.12.13-linux-x86_64-gnu/lib/python3.12/http/client.py", line 602, in _read_chunked
+    while (chunk_left := self._get_chunk_left()) is not None:
+                         ^^^^^^^^^^^^^^^^^^^^^^
+  File "/root/.local/share/uv/python/cpython-3.12.13-linux-x86_64-gnu/lib/python3.12/http/client.py", line 586, in _get_chunk_left
+    raise IncompleteRead(b'')
+http.client.IncompleteRead: IncompleteRead(0 bytes read)
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "/home/user/review-lab-wt/eval/eval/baseline.py", line 109, in <module>
+    path = args.out / case_id / f"baseline-{n}.json"
+     ^^^^^^
+  File "/home/user/review-lab-wt/eval/eval/baseline.py", line 86, in main
+    reply: dict[str, Any] = {}
+            ^^^^^^^^^^^^^^^^^^^
+  File "/home/user/review-lab-wt/eval/eval/baseline.py", line 66, in call
+    reply: dict[str, Any] = json.loads(response.read())
+                                       ^^^^^^^^^^^^^^^
+  File "/root/.local/share/uv/python/cpython-3.12.13-linux-x86_64-gnu/lib/python3.12/http/client.py", line 478, in read
+    return self._read_chunked(amt)
+           ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/root/.local/share/uv/python/cpython-3.12.13-linux-x86_64-gnu/lib/python3.12/http/client.py", line 614, in _read_chunked
+    raise IncompleteRead(b''.join(value)) from exc
+http.client.IncompleteRead: IncompleteRead(1 bytes read)
+py-mr-context-markup-001 baseline 1: 7 findings
+py-mr-context-markup-001 baseline 2: 7 findings
+py-mr-context-markup-001 baseline 3: 7 findings
+py-mr-verify-schedule-001 baseline 1: 0 findings
+py-mr-verify-schedule-001 baseline 2: 6 findings
+Traceback (most recent call last):
+  File "/root/.local/share/uv/python/cpython-3.12.13-linux-x86_64-gnu/lib/python3.12/http/client.py", line 584, in _get_chunk_left
+    chunk_left = self._read_next_chunk_size()
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/root/.local/share/uv/python/cpython-3.12.13-linux-x86_64-gnu/lib/python3.12/http/client.py", line 551, in _read_next_chunk_size
+    return int(line, 16)
+           ^^^^^^^^^^^^^
+ValueError: invalid literal for int() with base 16: b''
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "/root/.local/share/uv/python/cpython-3.12.13-linux-x86_64-gnu/lib/python3.12/http/client.py", line 602, in _read_chunked
+    while (chunk_left := self._get_chunk_left()) is not None:
+                         ^^^^^^^^^^^^^^^^^^^^^^
+  File "/root/.local/share/uv/python/cpython-3.12.13-linux-x86_64-gnu/lib/python3.12/http/client.py", line 586, in _get_chunk_left
+    raise IncompleteRead(b'')
+http.client.IncompleteRead: IncompleteRead(0 bytes read)
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "/home/user/review-lab-wt/eval/eval/baseline.py", line 109, in <module>
+    path = args.out / case_id / f"baseline-{n}.json"
+     ^^^^^^
+  File "/home/user/review-lab-wt/eval/eval/baseline.py", line 86, in main
+    reply: dict[str, Any] = {}
+            ^^^^^^^^^^^^^^^^^^^
+  File "/home/user/review-lab-wt/eval/eval/baseline.py", line 66, in call
+    reply: dict[str, Any] = json.loads(response.read())
+                                       ^^^^^^^^^^^^^^^
+  File "/root/.local/share/uv/python/cpython-3.12.13-linux-x86_64-gnu/lib/python3.12/http/client.py", line 478, in read
+    return self._read_chunked(amt)
+           ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/root/.local/share/uv/python/cpython-3.12.13-linux-x86_64-gnu/lib/python3.12/http/client.py", line 614, in _read_chunked
+    raise IncompleteRead(b''.join(value)) from exc
+http.client.IncompleteRead: IncompleteRead(1 bytes read)
+py-mr-agent-window-001 baseline 1: 4 findings
+py-mr-agent-window-001 baseline 2: 4 findings
+py-mr-agent-window-001 baseline 3: 6 findings
+[1]   Done                    uv run --with pyyaml python eval/baseline.py --eval-repo /home/user/morgan-eval --out $O $id 2>&1 | grep -v UV_NATIVE
+[3]   Done                    uv run --with pyyaml python eval/baseline.py --eval-repo /home/user/morgan-eval --out $O $id 2>&1 | grep -v UV_NATIVE
+[7]   Done                    uv run --with pyyaml python eval/baseline.py --eval-repo /home/user/morgan-eval --out $O $id 2>&1 | grep -v UV_NATIVE
+[8]   Done                    uv run --with pyyaml python eval/baseline.py --eval-repo /home/user/morgan-eval --out $O $id 2>&1 | grep -v UV_NATIVE
+[9]-  Done                    uv run --with pyyaml python eval/baseline.py --eval-repo /home/user/morgan-eval --out $O $id 2>&1 | grep -v UV_NATIVE
+py-mr-basis-001 baseline 1: 4 findings
+py-mr-basis-001 baseline 2: 0 findings
+py-mr-basis-001 baseline 3: 3 findings
+[2]   Done                    uv run --with pyyaml python eval/baseline.py --eval-repo /home/user/morgan-eval --out $O $id 2>&1 | grep -v UV_NATIVE
+py-mr-model-stream-001 baseline 1: 4 findings
+py-mr-model-stream-001 baseline 2: 4 findings
+py-mr-model-stream-001 baseline 3: 4 findings
+yaml-mr-ci-template-001 baseline 1: 9 findings
+yaml-mr-ci-template-001 baseline 2: 5 findings
+yaml-mr-ci-template-001 baseline 3: 7 findings
+py-mr-mirror-tools-001 baseline 1: 9 findings
+py-mr-mirror-tools-001 baseline 2: 6 findings
+py-mr-mirror-tools-001 baseline 3: 9 findings
+py-mr-increment-001 baseline 1: 5 findings
+py-mr-increment-001 baseline 2: 5 findings
+py-mr-increment-001 baseline 3: 0 findings
+[4]   Done                    uv run --with pyyaml python eval/baseline.py --eval-repo /home/user/morgan-eval --out $O $id 2>&1 | grep -v UV_NATIVE
+[5]   Done                    uv run --with pyyaml python eval/baseline.py --eval-repo /home/user/morgan-eval --out $O $id 2>&1 | grep -v UV_NATIVE
+[6]-  Done                    uv run --with pyyaml python eval/baseline.py --eval-repo /home/user/morgan-eval --out $O $id 2>&1 | grep -v UV_NATIVE
+[10]+  Done                    uv run --with pyyaml python eval/baseline.py --eval-repo /home/user/morgan-eval --out $O $id 2>&1 | grep -v UV_NATIVE
+45
+
+[exited with code 0]

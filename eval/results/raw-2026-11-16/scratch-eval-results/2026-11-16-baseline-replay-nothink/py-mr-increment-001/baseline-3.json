@@ -1,0 +1,29 @@
+{
+ "case": "py-mr-increment-001",
+ "run": 3,
+ "model": "deepseek-flash",
+ "thinking": "disabled",
+ "seconds": 2.6,
+ "usage": {
+  "prompt_tokens": 3814,
+  "completion_tokens": 265,
+  "total_tokens": 4079,
+  "prompt_tokens_details": {
+   "cached_tokens": 3584
+  },
+  "prompt_cache_hit_tokens": 3584,
+  "prompt_cache_miss_tokens": 230
+ },
+ "findings": [
+  {
+   "file": "src/review_agents/context/increment.py",
+   "line_start": 45,
+   "line_end": 45,
+   "severity": "important",
+   "title": "Hunk header with count 1 and explicit ,1 vs omitted differ; but count parsing treats '0' correctly—however line 46/47 wrong for new_count=0",
+   "why": "For a pure-deletion hunk `@@ -5,2 +4,0 @@`, new_count is 0 and `new_start` is the new-side line where the deletion sits. The code sets `added=None` (correct) and `at=max(new_start,1)`. But for a hunk like `@@ -5,0 +6,2 @@` (pure addition), old_count is 0 → `removed=None`, fine. The real issue: git's `-U0 -M` output can emit `@@ -a,0 +b @@` meaning `new_count` defaults to 1 only when omitted; when explicitly `+b,0` it is a deletion. The defaulting `int(match.group(4) or 1)` is correct. No bug here—strike."
+  }
+ ],
+ "content": null,
+ "error": null
+}

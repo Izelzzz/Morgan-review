@@ -1,0 +1,70 @@
+{
+ "case": "py-mr-agent-window-001",
+ "run": 3,
+ "model": "deepseek-flash",
+ "seconds": 305.4,
+ "usage": {
+  "prompt_tokens": 6496,
+  "completion_tokens": 59564,
+  "total_tokens": 66060,
+  "prompt_tokens_details": {
+   "cached_tokens": 6272
+  },
+  "completion_tokens_details": {
+   "reasoning_tokens": 58712
+  },
+  "prompt_cache_hit_tokens": 6272,
+  "prompt_cache_miss_tokens": 224
+ },
+ "findings": [
+  {
+   "file": "src/review_agents/pipeline/agent.py",
+   "line_start": 260,
+   "line_end": 269,
+   "severity": "important",
+   "title": "Failing tool calls bypass the repeat reminder and shortening",
+   "why": "Both the missing-tool branch and the exception branch append a ToolMessage and return before `conversation.answer` runs. `Conversation._calls` is never incremented and the message is not stored in `_results`, so an agent stuck repeating the same invalid call never gets the third-call reminder, and a large exception message cannot be shortened by `fit`. The loop and window guards only cover successful tool results."
+  },
+  {
+   "file": "src/review_agents/pipeline/conversation.py",
+   "line_start": 130,
+   "line_end": 141,
+   "severity": "important",
+   "title": "fit can leave the conversation over the window",
+   "why": "`fit` shortens each result at most once to `shortened_tokens` and then returns when it reaches the end of `_results`. If the remaining messages still exceed `room` (for example, 25 shortened results at about 1k tokens each already exceed the roughly 21k left by a 4/5 context pack and a 4k reserve, or a large model reply/context pack), `run_dimension` still calls the model. There is no second stage to drop/replace oldest results or a clear failure, so the overflow this change aims to prevent can still happen."
+  },
+  {
+   "file": "src/review_agents/pipeline/conversation.py",
+   "line_start": 129,
+   "line_end": 129,
+   "severity": "important",
+   "title": "Window budget ignores bound tool schemas",
+   "why": "`conversation_tokens(messages)` only counts message content and tool calls. The actual model request also contains the JSON schemas of the tools passed to `bind_tools`, which consume window tokens. `room` therefore overstates the available space, so `fit` can leave the request over the window when tool definitions are large."
+  },
+  {
+   "file": "src/review_agents/pipeline/conversation.py",
+   "line_start": 71,
+   "line_end": 80,
+   "severity": "robustness",
+   "title": "keep_tokens=0 returns the whole text",
+   "why": "`Conversation.answer` passes `result_tokens // 2` as `keep_tokens`. `tool_result_tokens` is allowed to be 1, so `keep_tokens` is 0. In the character fallback `chars` is 0, the while loop is skipped, and `text[-chars:]` is `text[-0:]`, which is the entire string. The “shortened” result is the full original text plus a note, so the per-result cap is not enforced. Guard `chars == 0` or require `tool_result_tokens >= 2`."
+  },
+  {
+   "file": "src/review_agents/pipeline/conversation.py",
+   "line_start": 64,
+   "line_end": 80,
+   "severity": "robustness",
+   "title": "Shortening near the threshold can increase token count",
+   "why": "The note and the middle marker are not charged against the `keep_tokens` budget. For text just over `2 * keep_tokens`, the returned head+tail+note can contain more estimated tokens than the input. `fit` then adds a positive delta to `total` and marks the result shortened, so it can make the conversation larger and leave it over the window. Return the original when the generated text is not smaller, or include the note/marker in the budget."
+  },
+  {
+   "file": "src/review_agents/pipeline/conversation.py",
+   "line_start": 76,
+   "line_end": 80,
+   "severity": "nit",
+   "title": "Character fallback note still refers to kept lines",
+   "why": "In the line-based cut the note says the kept lines show their numbers. In the character fallback for long/minified lines the kept text is character slices, not whole lines, but the same `how` text is used. The model can be told line numbers are present when they are not, making the suggested `start_line`/`end_line` recovery less reliable."
+  }
+ ],
+ "content": null
+}

@@ -1,0 +1,55 @@
+{
+ "case": "py-mr-strategy-room-001",
+ "run": 2,
+ "model": "deepseek-flash",
+ "seconds": 286.0,
+ "usage": {
+  "prompt_tokens": 9605,
+  "completion_tokens": 55797,
+  "total_tokens": 65402,
+  "prompt_tokens_details": {
+   "cached_tokens": 9471
+  },
+  "completion_tokens_details": {
+   "reasoning_tokens": 55001
+  },
+  "prompt_cache_hit_tokens": 9471,
+  "prompt_cache_miss_tokens": 134
+ },
+ "findings": [
+  {
+   "file": "src/review_agents/pipeline/strategy.py",
+   "line_start": 55,
+   "line_end": 58,
+   "severity": "important",
+   "title": "general/walkthrough_first with no enabled dimension builds an agent that holds no rules and crashes on SKILLS[\"general\"]",
+   "why": "`plan` only special-cases `len(dimensions) == 1`; when the repo config disables every dimension (a state the old `mode_plan` explicitly tolerated with `or enabled[:1]`), the else-branch still creates `Author(GENERAL, ())`. `plan_jobs` then passes `dimensions=()`, which `run_dimension` turns back into `(dimension,)` via `dimensions or (dimension,)`, i.e. `(\"general\",)`; `task()` takes the single-dimension branch and evaluates `SKILLS[\"general\"]`, which does not exist. Before this change that config simply produced no dimension jobs; now the review raises KeyError while building the prompt."
+  },
+  {
+   "file": "src/review_agents/pipeline/agent.py",
+   "line_start": 321,
+   "line_end": 324,
+   "severity": "robustness",
+   "title": "walkthrough conversation is prepended without any context/budget accounting",
+   "why": "`opening` is spliced directly in front of the finder task, so the finder's prompt is (whole walkthrough conversation + task) while `ConversationLimits`/`fixed_tokens` only cover the pack's fixed part. The walkthrough is allowed to spend nearly the model window reading code, so a finder that carries on from it can start already at (or past) `context_tokens`/the model window, and the first model call is then rejected or immediately forced to an empty answer — walkthrough_first's only finder is the one at risk."
+  },
+  {
+   "file": "src/review_agents/context/pack.py",
+   "line_start": 101,
+   "line_end": 102,
+   "severity": "robustness",
+   "title": "fixed_tokens now reserves the general agent's task for every review, changing the default strategy's packing",
+   "why": "`fixed_tokens` is strategy-agnostic and is used to size groups and the room left for code, but it now takes the max over the per-dimension tasks *and* `task(GENERAL, DIMENSIONS)` (all five skills plus headers). Packs are built before `plan()` runs, so even the default `dimensions` strategy reserves that much larger fixed part on every review, shrinking the code budget and potentially splitting small windows into more groups (more agents, more cost) — the opposite of the claimed \"default unchanged\"."
+  },
+  {
+   "file": "src/review_agents/pipeline/agent.py",
+   "line_start": 350,
+   "line_end": 352,
+   "severity": "robustness",
+   "title": "a rejected tag makes the agent's own name the finding's dimension",
+   "why": "For a general agent `dimension` is `GENERAL`, so any tag outside `held` (a disabled dimension, a typo, or a missing field) is rewritten to `general`. That value is neither in `DIMENSIONS` nor in `Plan.dimensions` (which is what `run_review` uses as \"the dimensions reviewed\" and what the report summary is built from), so such findings fall outside every listed dimension and any downstream logic keyed on the planned dimensions (per-dimension counts, verify priority ordering) never sees them; only the raw label lookup in `_TEXT` renders them."
+  }
+ ],
+ "content": null,
+ "error": null
+}

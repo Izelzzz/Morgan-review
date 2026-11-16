@@ -1,0 +1,93 @@
+{
+ "case": "py-mr-basis-001",
+ "run": 1,
+ "model": "deepseek-flash",
+ "thinking": "disabled",
+ "seconds": 11.5,
+ "usage": {
+  "prompt_tokens": 14967,
+  "completion_tokens": 1774,
+  "total_tokens": 16741,
+  "prompt_tokens_details": {
+   "cached_tokens": 0
+  },
+  "prompt_cache_hit_tokens": 0,
+  "prompt_cache_miss_tokens": 14967
+ },
+ "findings": [
+  {
+   "file": "src/review_agents/pipeline/merge.py",
+   "line_start": 272,
+   "line_end": 276,
+   "severity": "important",
+   "title": "_describe now prints f.why instead of the finding's basis",
+   "why": "The merge judge is shown candidates via _describe and used to weigh `evidence`, which was the concrete path from caller to failure. It now gets `why` (a one-line consequence), so the judge decides same-problem with far less information about what each candidate actually claims. The basis text is not shown at all, so two candidates that differ only in how they're traced will look identical to the judge."
+  },
+  {
+   "file": "src/review_agents/pipeline/basis.py",
+   "line_start": 175,
+   "line_end": 189,
+   "severity": "important",
+   "title": "A quote found at other lines rewrites source but drops the given line range silently",
+   "why": "When a spec/contract/convention basis quotes a source with an explicit line range and the quote is found within the given range, the check returns (None, None) and the status is ok. But when the quote is found outside the given range, source is rewritten and status is corrected. If the model gave a range that merely *contains* the real quote among extra wrong lines, this passes as ok without any narrowing. More importantly, _find returns the *first* occurrence of the quote; if the quote text appears in a comment or doc example earlier in the file, the basis gets 'corrected' to the wrong location and is then accepted as ok by the verifier (checked_out counts 'corrected'), so the verifier is told the files/lines/quote check out when the actual cited code is elsewhere. No disambiguation of multiple matches is done."
+  },
+  {
+   "file": "src/review_agents/pipeline/agent.py",
+   "line_start": 343,
+   "line_end": 343,
+   "severity": "blocking",
+   "title": "Basis checks are run outside the ToolTimeoutError guard that wraps check()",
+   "why": "run_dimension now does `item.basis = [check_basis(b, sources) for b in item.basis]` before the `try: problem = check(item, line_count) except ToolTimeoutError` block. check_basis calls sources.text (a git call) and re-raises ToolTimeoutError only after catching it internally (it catches ToolTimeoutError and returns 'unchecked'), so that path is fine. However, that call happens per basis, sequentially, with no bound on how many bases the model submitted; a slow-git path will cost one timeout per basis per finding with no cache across the run for failing files. The functools.cache on tools.text only caches successful returns; a ToolTimeoutError is noted 'never remembered', so a file that times out is retried for every basis and every finding, multiplying the 30s timeout. There is no cap on len(basis), so a model emitting many bases can blow the run's time budget."
+  },
+  {
+   "file": "src/review_agents/pipeline/run.py",
+   "line_start": 530,
+   "line_end": 532,
+   "severity": "important",
+   "title": "Quick-mode drop counts the finding as suppressed but adds no event/telemetry consistency",
+   "why": "In the loop, when `not verifying and not self._publishable_unverified(candidate)` the candidate is `continue`d before `published.reported`/accepted is updated. But the merge already ran (the candidate may have been the lead of a merged group whose other members would have passed). Dropping only the lead silently discards the entire merged finding, including dimensions/bases from other candidates that did check out. The check should run against the merged finding's aggregate bases, and the drop should be surfaced in the review result, not only as a step note."
+  },
+  {
+   "file": "src/review_agents/migrations/0008_basis.sql",
+   "line_start": 3,
+   "line_end": 4,
+   "severity": "important",
+   "title": "Migration drops evidence without migrating existing rows",
+   "why": "The migration adds `basis` with default '[]' then `DROP COLUMN evidence`. Existing findings lose their evidence text and have an empty basis. api.py then does `json.loads(f['basis'])`, which works (default '[]'), but any historical finding that had evidence is now unsupported and unreviewable, and downstream consumers (e.g. reported findings from earlier rounds in context_pr) see no basis. A data-preserving migration (copy evidence into a 'path' basis or keep evidence) is needed; otherwise this silently rewrites history."
+  },
+  {
+   "file": "src/review_agents/api.py",
+   "line_start": 232,
+   "line_end": 232,
+   "severity": "robustness",
+   "title": "json.loads(f['basis']) will raise on any malformed basis row",
+   "why": "Basis is written by _insert_finding via json.dumps, but the migration leaves '[]' for pre-existing rows and the API has no defensive decoding. A row inserted by any other path (or corrupt) will 500 the whole review-findings listing. The previous field was a plain string, so this is a new failure mode on read."
+  },
+  {
+   "file": "src/review_agents/pipeline/basis.py",
+   "line_start": 113,
+   "line_end": 131,
+   "severity": "robustness",
+   "title": "_find computes at + len(...) - 1 without guarding empty quotes",
+   "why": "Basis.quote has no min_length; the model validator only requires `self.quote.strip()` for non-path kinds, but a path basis can carry an empty/whitespace quote, and a non-path basis with `quote=' '` (strips to empty) is rejected — okay. However, a quote that is present but non-empty yet `_squash(quote)` is empty cannot happen. The real issue: for a spec basis with a quote whose squashed form is non-empty but `at + len - 1` indexing assumes at>=0 and length>=1; safe. Not a bug. Skip."
+  },
+  {
+   "file": "src/review_agents/pipeline/basis.py",
+   "line_start": 50,
+   "line_end": 50,
+   "severity": "important",
+   "title": "check field is writable by the model from incoming JSON",
+   "why": "Basis has `check: SkipJsonSchema[Check | None] = None`. SkipJsonSchema only affects JSON schema exposure; it does not prevent pydantic from accepting `check` in model_validate_json input. The test `test_a_model_cannot_mark_its_own_basis_as_checked` expects the model's value to be *replaced* — and it is, in run_dimension because check_basis model_copies over it. But run_dimension runs check_basis on every basis, so this is covered there. However, if any other code path constructs a Finding from model output without calling check_basis (e.g. verifier output, or merge reading persisted rows), a model-supplied `check: {status: ok}` is trusted. Confirmed by the merge tests constructing Basis with check directly. The invariant 'never written by a model' is not enforced at the model layer."
+  },
+  {
+   "file": "src/review_agents/pipeline/basis.py",
+   "line_start": 152,
+   "line_end": 160,
+   "severity": "robustness",
+   "title": "source_problem assumes source/quote not None but only non-path is guarded",
+   "why": "The assert `basis.source is not None and basis.quote is not None` relies on the model validator. But basis.model_copy or construction paths (e.g. tests, merge) could build a Basis with kind='path' but source set — that goes through the else branch? No: check_basis skips _source_problem for kind=='path'. For non-path, model validator guarantees source+quote. Still, `basis.source.strip()` could differ from `source` used in _LINES match due to trailing whitespace; the `pr`/issue regex are run on stripped source but `lines_given` is matched on stripped source too. Fine. Not a real bug."
+  }
+ ],
+ "content": null,
+ "error": null
+}
