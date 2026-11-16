@@ -75,13 +75,14 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--base-url", default="https://api.deepseek.com")
     parser.add_argument("--model", default="deepseek-flash")
     parser.add_argument("--runs", type=int, default=RUNS)
+    parser.add_argument("--first", type=int, default=1, help="number of the first run")
     args = parser.parse_args(argv)
     for case_id in args.cases:
         case = yaml.safe_load((CASES / f"{case_id}.yaml").read_text(encoding="utf-8"))
         prompt = PROMPT.format(
             title=case["pr"]["title"], body=case["pr"]["body"], diff=diff(args.eval_repo, case_id)
         )
-        for n in range(1, args.runs + 1):
+        for n in range(args.first, args.first + args.runs):
             started = time.monotonic()
             reply: dict[str, Any] = {}
             content: str | None = None
@@ -93,6 +94,8 @@ def main(argv: list[str] | None = None) -> int:
                 parsed = json.loads(content or "")
                 if isinstance(parsed, dict) and isinstance(parsed.get("findings"), list):
                     findings = parsed["findings"]
+                else:
+                    error = "the reply is not a findings object"
             except (OSError, ValueError, KeyError, IndexError) as exc:
                 # A failed run is written down, and the case's other runs still go ahead.
                 error = f"{type(exc).__name__}: {exc}"
