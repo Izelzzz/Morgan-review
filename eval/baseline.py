@@ -50,7 +50,9 @@ def diff(eval_repo: Path, case: str) -> str:
     return subprocess.run(args, check=True, capture_output=True, text=True).stdout  # noqa: S603
 
 
-def call(base_url: str, model: str, prompt: str, thinking: str) -> dict[str, Any]:
+def call(
+    base_url: str, model: str, prompt: str, thinking: str, max_tokens: int | None
+) -> dict[str, Any]:
     body: dict[str, Any] = {
         "model": model,
         "messages": [{"role": "user", "content": prompt}],
@@ -58,6 +60,8 @@ def call(base_url: str, model: str, prompt: str, thinking: str) -> dict[str, Any
     }
     if thinking != "default":  # as the service sends it (issue #93)
         body["thinking"] = {"type": thinking}
+    if max_tokens is not None:  # unset, the service's own limit applies (8192 without thinking)
+        body["max_tokens"] = max_tokens
     request = urllib.request.Request(  # noqa: S310 - fixed https endpoint
         base_url.rstrip("/") + "/chat/completions",
         data=json.dumps(body).encode(),
@@ -79,6 +83,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--model", default="deepseek-flash")
     parser.add_argument("--runs", type=int, default=RUNS)
     parser.add_argument("--thinking", choices=["default", "enabled", "disabled"], default="default")
+    parser.add_argument("--max-tokens", type=int, help="output limit, thinking included")
     parser.add_argument("--first", type=int, default=1, help="number of the first run")
     args = parser.parse_args(argv)
     for case_id in args.cases:
@@ -93,7 +98,7 @@ def main(argv: list[str] | None = None) -> int:
             findings: list[Any] | None = None
             error: str | None = None
             try:
-                reply = call(args.base_url, args.model, prompt, args.thinking)
+                reply = call(args.base_url, args.model, prompt, args.thinking, args.max_tokens)
                 content = reply["choices"][0]["message"]["content"]
                 parsed = json.loads(content or "")
                 if isinstance(parsed, dict) and isinstance(parsed.get("findings"), list):
@@ -108,6 +113,7 @@ def main(argv: list[str] | None = None) -> int:
                 "run": n,
                 "model": args.model,
                 "thinking": args.thinking,
+                "max_tokens": args.max_tokens,
                 "seconds": round(time.monotonic() - started, 1),
                 "usage": reply.get("usage"),
                 "findings": findings,
