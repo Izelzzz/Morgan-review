@@ -13,8 +13,9 @@ unverified at the end is not published. Only verified findings, and nits, which 
 verified, are merged and written.
 
 A dimension or a verification that fails or runs out of time ends alone and is recorded
-in `steps`; only a failure to get the code, a superseded review, a failed write, or no
-finding that needed verifying getting a verdict ends the review.
+in `steps`; only a failure to get the code, a superseded review, a failed write, no
+agent handing in its findings, or no finding that needed verifying getting a verdict
+ends the review.
 """
 
 import hashlib
@@ -463,6 +464,13 @@ def run_review(
     )
     # A newer push makes this review superseded, whatever else went wrong in it.
     _check_not_superseded(conn, review_id)
+    # No agent that writes findings handed them in, so nothing was reviewed: a `done`
+    # with no findings would pass CI while the model service is down (issue #91). An
+    # agent the deadline told to submit early did hand in (status "done"); one the
+    # deadline cut off before it submitted did not. The walkthrough writes no findings.
+    if runs and not any(r.status == "done" for r in runs):
+        first = next((r.reason for r in runs if r.reason), "incomplete")
+        raise RuntimeError(f"no agent handed in its findings ({len(runs)} agents): {first}")
     # D-004 as D-027 has it: findings that needed a verifier, none of which got a verdict,
     # mean the verification itself failed; publishing the nits alone would hide that.
     if checks and not any(c.run is not None and c.run.verdict is not None for c in checks):

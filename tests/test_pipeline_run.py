@@ -30,7 +30,7 @@ from review_agents.pipeline.run import ReviewSuperseded, run_review, wait_for_su
 from review_agents.pipeline.verify import VERIFY_TOOL
 from review_agents.repo_config import MAX_REVIEW_MINUTES
 from review_agents.walkthrough import MARKER, WALKTHROUGH_TASK, WALKTHROUGH_TOOL
-from review_agents.worker import claim_next, recover_interrupted
+from review_agents.worker import claim_next, recover_interrupted, run_once
 
 DIMENSION = re.compile(r"^name: (\w+)$", re.MULTILINE)
 VERIFIER = "You are now a verifier"
@@ -151,6 +151,8 @@ class ByDimension(BaseChatModel):
             self.sent.append(list(messages))
             script = self.scripts.get(dimension) or [submit()]
             reply = script.pop(0) if len(script) > 1 else script[0]
+        if callable(reply):  # something happening while the agent works
+            reply = reply()
         if isinstance(reply, Exception):
             raise reply
         return ChatResult(generations=[ChatGeneration(message=reply)])
@@ -376,7 +378,7 @@ def test_a_dimension_still_running_at_its_deadline_is_left_behind(setup: Setup) 
 
 def test_a_spent_token_budget_is_recorded_on_the_review(setup: Setup) -> None:
     review_id = setup.queue()
-    model = ByDimension(scripts={d: [BudgetExceededError("budget used up")] for d in ALL})
+    model = ByDimension(scripts={d: [BudgetExceededError("budget used up")] for d in ALL[1:]})
 
     setup.run(review_id, model)
 
@@ -1221,6 +1223,128 @@ def test_walkthrough_first_still_finds_problems_when_the_walkthrough_fails(setup
     assert not any(WALKTHROUGH_TASK in str(m.content) for m in sent)  # a fresh opening
     status, error = setup.steps(review_id)["walkthrough"]
     assert status == "error" and error is not None
+
+
+# --- every writer failing (issue #91) --------------------------------------------
+
+TWO = "dimensions:\n  spec_drift: false\n  maintainability: false\n  verifiability: false\n"
+
+
+def test_a_review_whose_writers_all_failed_fails_and_says_why(setup: Setup) -> None:
+    review_id = setup.queue()
+    model = ByDimension(
+        scripts={d: [RuntimeError("402 Insufficient Balance")] for d in ALL},
+        walkthrough=[walkthrough_answer()],  # written, but it finds nothing
+    )
+
+    with pytest.raises(RuntimeError, match="no agent handed in its findings") as raised:
+        setup.run(review_id, model)
+
+    assert "402 Insufficient Balance" in str(raised.value)
+    assert setup.findings(review_id) == [] and setup.review(review_id)["report"] is None
+
+
+def test_the_general_agent_failing_with_the_walkthrough_fails_the_review(setup: Setup) -> None:
+    # The run issue #91 reports: walkthrough 402, dimension.general 402, review done.
+    with_strategy(setup, "general")
+    review_id = setup.queue()
+    model = ByDimension(
+        scripts={GENERAL: [RuntimeError("402 Insufficient Balance")]},
+        walkthrough=[RuntimeError("402 Insufficient Balance")],
+    )
+
+    with pytest.raises(RuntimeError, match="no agent handed in its findings"):
+        setup.run(review_id, model)
+
+
+def test_a_review_whose_writers_all_failed_is_stored_failed_with_its_reason_masked(
+    setup: Setup,
+) -> None:
+    review_id = setup.queue()
+    model = ByDimension(scripts={d: [RuntimeError(f"401 for token {LEAKED}")] for d in ALL})
+    with closing(connect(setup.settings.db_path)) as conn:
+        conn.execute("UPDATE reviews SET status = 'queued' WHERE id = ?", (review_id,))
+
+    def handler(conn: Any, claimed: int) -> None:
+        run_review(
+            conn,
+            claimed,
+            settings=setup.settings,
+            vault=setup.vault,
+            store=setup.store,
+            model_for=lambda timeout: model,
+        )
+
+    assert run_once(setup.settings.db_path, handler) == review_id
+
+    stored = setup.review(review_id)
+    error = stored["error"]
+    assert stored["status"] == "failed"
+    assert "no agent handed in its findings" in error and "401 for token" in error
+    assert LEAKED not in error and "***" in error
+
+
+def test_one_writer_failing_while_another_hands_in_nothing_is_done(setup: Setup) -> None:
+    review_id = setup.queue(TWO)
+    model = ByDimension(
+        scripts={"security": [RuntimeError("402 Insufficient Balance")], "edge_cases": [submit()]}
+    )
+
+    setup.run(review_id, model)
+
+    assert setup.review(review_id)["status"] == "done" and setup.findings(review_id) == []
+
+
+def test_the_walkthrough_failing_alone_does_not_fail_the_review(setup: Setup) -> None:
+    with_strategy(setup, "general")
+    review_id = setup.queue()
+    model = ByDimension(
+        scripts={GENERAL: [submit(finding("security"))]},
+        walkthrough=[RuntimeError("402 Insufficient Balance")],
+    )
+
+    setup.run(review_id, model)
+
+    assert setup.review(review_id)["status"] == "done" and len(setup.findings(review_id)) == 1
+
+
+def test_a_superseded_review_whose_writers_all_failed_is_superseded_not_failed(
+    setup: Setup,
+) -> None:
+    review_id = setup.queue(TWO)
+    newer = setup.queue(head="c" * 40)
+
+    def pushed_then_failed() -> Any:
+        with closing(connect(setup.settings.db_path)) as conn:
+            conn.execute("UPDATE reviews SET superseded_by = ? WHERE id = ?", (newer, review_id))
+        return RuntimeError("402 Insufficient Balance")
+
+    model = ByDimension(scripts={d: [pushed_then_failed] for d in ("edge_cases", "security")})
+
+    with pytest.raises(ReviewSuperseded):
+        setup.run(review_id, model)
+
+
+def test_writers_cut_off_by_the_deadline_with_nothing_handed_in_fail_the_review(
+    setup: Setup,
+) -> None:
+    review_id = setup.queue(TWO)
+    model = ByDimension(scripts={}, delay={"edge_cases": 3.0, "security": 3.0})
+
+    with pytest.raises(RuntimeError, match="no agent handed in its findings"):
+        setup.run(review_id, model, review_seconds=2.5, after_submit_seconds=1.0)
+
+
+def test_writers_told_to_hand_in_early_by_the_deadline_count_as_handing_in(setup: Setup) -> None:
+    review_id = setup.queue(TWO)
+    model = ByDimension(scripts={"edge_cases": [submit(finding("edge_cases"))]})
+
+    # Under a minute in all: every agent is told to submit at once (SUBMIT_MARGIN_SECONDS).
+    setup.run(review_id, model, review_seconds=40.0)
+
+    stored = setup.review(review_id)
+    assert stored["status"] == "done" and stored["limit_hit"] == "time"
+    assert [f["primary_dimension"] for f in setup.findings(review_id)] == ["edge_cases"]
 
 
 # --- rounds (issue #12, D-039) ---------------------------------------------------
