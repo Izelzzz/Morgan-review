@@ -23,6 +23,10 @@ class ModelEndpoint(BaseModel):
     idle_seconds: float = Field(default=300.0, gt=0)
     # Retries of a rate limit, server error, stall, broken connection or empty reply.
     max_retries: int = Field(default=4, ge=0)
+    # Whether the model thinks before it answers (issue #93): `default` sends nothing and
+    # keeps the service's own choice; otherwise requests say so as DeepSeek spells it.
+    # Thinking is billed as output, so it can cost more than the reply itself.
+    thinking: Literal["default", "enabled", "disabled"] = "default"
 
 
 class Observability(BaseModel):

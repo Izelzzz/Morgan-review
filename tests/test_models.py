@@ -11,7 +11,7 @@ from pathlib import Path
 
 import openai
 import pytest
-from pydantic import SecretStr
+from pydantic import SecretStr, ValidationError
 
 from review_agents import models
 from review_agents.config import ModelEndpoint
@@ -290,6 +290,26 @@ def test_calls_stream_by_default_and_still_record_their_usage(
     assert reply.content == "no findings"
     assert service.bodies[0]["stream"] is True
     assert usage_rows(db[0]) == [("security", "finder-model", 11, 0, 7)]
+
+
+def test_a_model_keeps_the_services_own_thinking_by_default(service: FakeService) -> None:
+    chat_model(endpoint(service)).invoke("review")
+
+    assert "thinking" not in service.bodies[0]
+
+
+@pytest.mark.parametrize("choice", ["enabled", "disabled"])
+def test_a_model_can_turn_thinking_on_or_off(service: FakeService, choice: str) -> None:
+    chat_model(endpoint(service, thinking=choice)).invoke("review")
+
+    assert service.bodies[0]["thinking"] == {"type": choice}
+
+
+def test_a_thinking_choice_the_service_cannot_take_is_refused() -> None:
+    with pytest.raises(ValidationError):
+        ModelEndpoint.model_validate(
+            {"base_url": "http://127.0.0.1/v1", "model": "m", "thinking": "sometimes"}
+        )
 
 
 def test_a_model_with_streaming_off_waits_for_the_whole_reply(service: FakeService) -> None:

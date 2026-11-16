@@ -304,6 +304,9 @@ def chat_model(
         max_retries=0,
         stream_usage=True,
         stream_replies=endpoint.stream,
+        extra_body=None
+        if endpoint.thinking == "default"
+        else {"thinking": {"type": endpoint.thinking}},
         retries=endpoint.max_retries,
         deadline=clock() + time_left,
         sleep_for=sleep,
