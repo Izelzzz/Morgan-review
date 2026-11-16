@@ -34,4 +34,13 @@ expected:
       Windows.
     evidence: https://github.com/honojs/hono/pull/4962
     same_as: [{file: deno_dist/utils/filepath.ts, lines: [24, 27]}]   # the generated copy
-allowed: []
+allowed:
+  - file: src/utils/filepath.ts
+    root_cause: >-
+      On POSIX a backslash is a legal file-name character and is now treated as a
+      separator; the PR does not mention this behaviour change.
+  - file: src/utils/filepath.test.ts
+    lines: [31, 31]
+    root_cause: >-
+      slashToBackslash('foo..bar.txt') has no slash to convert, so the case repeats
+      line 22 and tests nothing about backslashes (nit).

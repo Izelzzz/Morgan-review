@@ -1,0 +1,30 @@
+{
+ "id": 12,
+ "repo": "izelcompany/morgan-eval",
+ "pr": 1,
+ "base_sha": "c1e0d15d8d0c5ccff5029b2e4ce9fbe87bafd785",
+ "head_sha": "d67d8478a0f7a98a938fe4254e269f8f7c8829f0",
+ "round": 4,
+ "mode": "standard",
+ "status": "done",
+ "error": null,
+ "limit_hit": null,
+ "superseded_by": null,
+ "created_at": "2026-11-16T07:17:00.311Z",
+ "started_at": "2026-11-16T07:17:02.267Z",
+ "finished_at": "2026-11-16T07:18:33.118Z",
+ "report": {
+  "summary": "<!-- review-agents:summary -->\n## 审查结论：未发现阻断问题\n\n### 本次审查的范围\n- 审了：规格漂移、边界问题、安全、可维护性、可验证性（各 1 次）· 2 个改动文件\n- 没审：改动文件都看了，各维度都交了卷\n- 能证明：发布的每条 🔴 / 🟡 都有程序核对过的依据，并经验证审查员重新读代码确认；引用的规则原文确实在所写的位置。\n- 不能证明：没有运行代码和测试；没有发现问题不代表没有问题；规格只来自 PR 描述、关联的 issue 和配置的规格文档；没验完的发现没有发布，不代表它们不成立。\n\n### 本次审查\nStandard 模式 · 356,346 token · 1 分 31 秒 · 审查 #12\n\n<!-- review-agents:counts {\"blocking\": 0, \"important\": 0, \"robustness\": 0, \"nit\": 0, \"complete\": true} -->\n",
+  "comments": [],
+  "counts": {
+   "blocking": 0,
+   "important": 0,
+   "robustness": 0,
+   "nit": 0,
+   "complete": true
+  },
+  "walkthrough": "<!-- review-agents:walkthrough -->\n## 📖 改动说明\n\nPR #1 · 2 个文件 · **+22 −1** · 1 次提交\n\n**一句话：** 现在 `FormParser` 在判断 multipart 各部分的 `Content-Transfer-Encoding` 之前先把头部值转成小写，因此 `Base64`、`BASE64` 这类写法也会被正确解码，并补了三个大小写组合的回归测试。\n\n#### 为什么改 — 头部字段名早就做了大小写归一，但字段值没有，导致非小写写法的编码声明被当成未知编码。\n- `on_header_end` 只把头部**字段名**转小写后再存入 `headers`（`python_multipart/multipart.py:1640`），值是按原样保存的。\n- `FormParser` 之前直接用原值与 `b\"base64\"`、`b\"quoted-printable\"` 等小写字面量比较（`python_multipart/multipart.py:1672-1679`），`Base64` 匹配不上。\n- 匹配失败会走未知编码分支（`python_multipart/multipart.py:1681-1688`）：记一条 warning，然后要么抛 `FormParserError`，要么把数据当作未编码直接写进文件。\n- 这正是 PR 描述要修的：RFC 2045 第 6.1 节规定这些值**大小写不敏感**。\n\n#### 改了什么 — 改动只有一处取值时加 `.lower()`，外加一个参数化回归测试。\n- `python_multipart/multipart.py:1670`：取不到头部时的默认值仍是 `b\"7bit\"`，取到之后统一 `.lower()`。\n- 下游的三段比较与分支（`python_multipart/multipart.py:1672-1679`）完全没动，仍是小写字面量。\n- 新增测试 `test_content_transfer_encoding_is_case_insensitive`（`tests/test_multipart.py:749-765`），参数化为 `b\"base64\"`、`b\"BASE64\"`、`b\"Base64\"`，断言解出的文件内容是 `b\"Test\"`。\n- 日志与异常消息里打印的仍是同一个变量（`python_multipart/multipart.py:1682-1684`），所以现在显示的是小写化之后的值。\n\n#### 有什么影响 — 只影响 multipart 解析时对 CTE 值的判定，对外 API、配置项和已有测试夹具都不变。\n- 经由 `FormParser`、`create_form_parser`（`python_multipart/multipart.py:1748`）和 `parse_form`（`python_multipart/multipart.py:1786`）到达这段逻辑的调用方，会看到原来报错或拿到 base64 原文的文件变成正确解码的内容。\n- 失败行为仍由 `UPLOAD_ERROR_ON_BAD_CTE` 决定（`python_multipart/multipart.py:1481-1482`）：真正未知的值照旧抛 `FormParserError` 或记 warning。\n- 只做小写化，不做去空白：解析器只跳过值的前导空格（`python_multipart/multipart.py:1199-1203`），行尾空格会留在值里。\n- 现有的 HTTP 夹具用的都是小写值（如 `tests/test_data/http/base64_encoding.http:4`），字段名大小写混排的 `tests/test_data/http/mixed_case_headers.http:10` 里值也是小写，因此夹具结果不受影响。\n\n```mermaid\nflowchart LR\n    A[\"header value<br/>原样保存\"] --> B[\"transfer_encoding =<br/>get(..., b'7bit').lower()\"]\n    B --> C{\"比较\"}\n    C -->|\"binary / 8bit / 7bit\"| D[\"writer = f_multi\"]\n    C -->|\"base64\"| E[\"writer = Base64Decoder(f_multi)\"]\n    C -->|\"quoted-printable\"| F[\"writer = QuotedPrintableDecoder(f_multi)\"]\n    C -->|\"其他\"| G[\"warning + 按 UPLOAD_ERROR_ON_BAD_CTE 决定抛错或原样写入\"]\n```\n\n<details>\n<summary><b>01　为什么要改</b>（3 个问题）</summary>\n\n1. **CTE 值的大小写不同就无法识别** — 头部值按客户端原样保存，而比较用的都是小写字面量，所以 `Content-Transfer-Encoding: Base64` 或 `BASE64` 不会进入 `Base64Decoder` 分支。RFC 2045 第 6.1 节明确这些值是大小写不敏感的，符合规范的请求被当成不认识的编码。\n2. **误判后的两种结果都会让调用方拿到错的数据或意外的异常** — 走到未知编码分支时，默认配置（`UPLOAD_ERROR_ON_BAD_CTE` 为 `False`，见 `python_multipart/multipart.py:1481-1482`）会把 base64 文本原样写进上传文件，用户拿到的是编码后的字节而不是文件内容；打开该配置则直接抛 `FormParserError`，整个请求失败。\n3. **缺少覆盖该行为的回归测试** — 原有测试只用到小写 `base64` 的夹具（`tests/test_data/http/base64_encoding.http:4`），以及字段名大小写混排、但值仍为小写的 `tests/test_data/http/mixed_case_headers.http:10`；未知编码测试（`tests/test_multipart.py:1220-1250`）用的也是小写值。因此值的大小写问题此前没有任何用例可以捕获。\n\n</details>\n\n<details>\n<summary><b>02　怎么改的</b>（2 处改动）</summary>\n\n**1. `FormParser` 中按小写匹配 CTE 值**\n\n`on_headers_finished` 里取出头部值后立刻小写化，随后保持原来的 if/elif 链：\n\n```python\ntransfer_encoding = headers.get(b\"content-transfer-encoding\", b\"7bit\").lower()\n```\n\n| 请求里的值 | 改动前 | 改动后 |\n|---|---|---|\n| `base64` | `Base64Decoder` | `Base64Decoder` |\n| `Base64` / `BASE64` | 未知编码分支 | `Base64Decoder` |\n| `quoted-printable` | `QuotedPrintableDecoder` | `QuotedPrintableDecoder` |\n| `Quoted-Printable` | 未知编码分支 | `QuotedPrintableDecoder` |\n| 无该头部 | `b\"7bit\"`，原样写入 | `b\"7bit\"`，原样写入 |\n| 其他值 | warning，按 `UPLOAD_ERROR_ON_BAD_CTE` 抛错或原样写入 | 同左，但消息里的值是**小写形式** |\n\n字段名的查找本来就不区分大小写，因为 `on_header_end` 在存入 `headers` 前已经 `.lower()`（`python_multipart/multipart.py:1640`）。改动只发生在值这一侧。\n\n**2. 新增大小写回归测试**\n\n`tests/test_multipart.py:749-765` 用 `pytest.mark.parametrize` 跑 `b\"base64\"`、`b\"BASE64\"`、`b\"Base64\"` 三种写法：\n\n1. 拼一个带文件 part 的 multipart 请求体，正文是 `VGVzdA==`（`Test` 的 base64）。\n2. 用 `FormParser(\"multipart/form-data\", None, files.append, boundary=\"--boundary\")` 解析并 `finalize()`。\n3. 断言第一个回调到的 `File` 的 `file_object` 读出来是 `b\"Test\"`。\n\n这条断言同时区分了两种修复结果：如果值没被识别成 base64，文件里会是 `VGVzdA==` 原文，测试就会失败。\n\n</details>\n\n#### 有什么影响\n\n| 方面 | 影响 |\n| --- | --- |\n| 用户看到的结果 | 声明了 `Base64`、`BASE64`、`Quoted-Printable` 等写法的上传文件会被真正解码，而不是把编码文本写进文件。 |\n| 失败行为 | 真正未知的 CTE 值行为不变：由 `UPLOAD_ERROR_ON_BAD_CTE` 决定抛 `FormParserError` 还是记 warning 后原样写入。 |\n| 问题排查 | 未知编码时 warning 和异常消息打印的是小写化后的值（`python_multipart/multipart.py:1682-1684`），不再保留客户端原始大小写。 |\n| 兼容性 | 函数签名、配置项、`File`/`Field` 的类型都没有变化；这是纯粹的解析行为放宽，没有需要调用方适配的地方。 |\n\n<details>\n<summary><b>取舍</b>（2 条）</summary>\n\n| 情况 | 这次的做法 | 理由 |\n| --- | --- | --- |\n| 头部值除了大小写，还可能带额外的空白（解析器只跳过前导空格，见 `python_multipart/multipart.py:1199-1203`）。 | 只调 `.lower()`，不额外 `strip()` 或做更完整的值规范化。 | PR 描述把改动范围限定在 RFC 2045 第 6.1 节的大小写不敏感上，空白处理不在本次改动内。 |\n| 未知编码分支要记录警告或抛异常，消息里需要带上这个值。 | 继续复用已小写化的 `transfer_encoding` 变量，而不是保留一份原始值专门用于报错。 | PR 描述没有提到要保留原始写法，改动因此只碰了一行。 |\n\n</details>\n\n<details>\n<summary><b>改动分布</b>（2 个文件）</summary>\n\n| 文件 | 增 | 删 |\n| --- | ---: | ---: |\n| `tests/test_multipart.py` | 19 | 0 |\n| `python_multipart/multipart.py` | 3 | 1 |\n\n</details>\n"
+ },
+ "findings": [],
+ "seconds": 105.0
+}

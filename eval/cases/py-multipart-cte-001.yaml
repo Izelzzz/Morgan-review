@@ -18,4 +18,12 @@ pr:
     Adds parametrized regression tests for lowercase, uppercase and mixed-case base64.
 tags: {language: python, stack: library, dimension: spec_drift}
 expected: []                 # no 🔴 in any run
-allowed: []
+allowed:                     # valid findings beyond the answer key; neither a hit nor a false positive
+  - file: python_multipart/multipart.py
+    root_cause: >-
+      The value is lowercased but not stripped, so a CTE with surrounding whitespace
+      still falls to the unknown-encoding branch (upstream fixed exactly this later, PR #366).
+  - file: tests/test_multipart.py
+    root_cause: Only the base64 branch has a case-insensitivity test.
+  - file: python_multipart/multipart.py
+    root_cause: Logs and errors show the lowercased value instead of what the client sent (nit).

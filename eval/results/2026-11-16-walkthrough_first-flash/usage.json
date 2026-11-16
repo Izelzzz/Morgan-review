@@ -1,0 +1,123 @@
+[
+ {
+  "case": "py-multipart-cte-001",
+  "run": 1,
+  "calls": 34,
+  "input": 548246,
+  "cached": 494336,
+  "output": 25432,
+  "charged": 128776,
+  "models": "deepseek-flash",
+  "seconds": 165.1
+ },
+ {
+  "case": "py-multipart-cte-001",
+  "run": 2,
+  "calls": 39,
+  "input": 620447,
+  "cached": 587008,
+  "output": 23142,
+  "charged": 115282,
+  "models": "deepseek-flash",
+  "seconds": 165.1
+ },
+ {
+  "case": "py-multipart-cte-001",
+  "run": 3,
+  "calls": 18,
+  "input": 343318,
+  "cached": 313984,
+  "output": 13028,
+  "charged": 73761,
+  "models": "deepseek-flash",
+  "seconds": 105.0
+ },
+ {
+  "case": "py-multipart-traversal-001",
+  "run": 1,
+  "calls": 25,
+  "input": 337666,
+  "cached": 280960,
+  "output": 19631,
+  "charged": 104433,
+  "models": "deepseek-flash",
+  "seconds": 120.1
+ },
+ {
+  "case": "py-multipart-traversal-001",
+  "run": 2,
+  "calls": 34,
+  "input": 559546,
+  "cached": 488448,
+  "output": 29479,
+  "charged": 149422,
+  "models": "deepseek-flash",
+  "seconds": 165.1
+ },
+ {
+  "case": "py-multipart-traversal-001",
+  "run": 3,
+  "calls": 47,
+  "input": 632417,
+  "cached": 585472,
+  "output": 30789,
+  "charged": 136282,
+  "models": "deepseek-flash",
+  "seconds": 165.1
+ },
+ {
+  "case": "py-multipart-traversal-001",
+  "run": 4,
+  "calls": 47,
+  "input": 646517,
+  "cached": 589312,
+  "output": 32924,
+  "charged": 149061,
+  "models": "deepseek-flash",
+  "seconds": 150.1
+ },
+ {
+  "case": "py-multipart-traversal-001",
+  "run": 5,
+  "calls": 35,
+  "input": 493947,
+  "cached": 443136,
+  "output": 22553,
+  "charged": 117678,
+  "models": "deepseek-flash",
+  "seconds": 150.0
+ },
+ {
+  "case": "ts-hono-backslash-001",
+  "run": 1,
+  "calls": 26,
+  "input": 479329,
+  "cached": 388480,
+  "output": 38154,
+  "charged": 167851,
+  "models": "deepseek-flash",
+  "seconds": 195.1
+ },
+ {
+  "case": "ts-hono-backslash-001",
+  "run": 2,
+  "calls": 19,
+  "input": 423125,
+  "cached": 363008,
+  "output": 25004,
+  "charged": 121422,
+  "models": "deepseek-flash",
+  "seconds": 150.0
+ },
+ {
+  "case": "ts-hono-backslash-001",
+  "run": 3,
+  "calls": 19,
+  "input": 422860,
+  "cached": 385664,
+  "output": 29811,
+  "charged": 105574,
+  "models": "deepseek-flash",
+  "seconds": 150.0
+ }
+]

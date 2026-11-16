@@ -34,4 +34,16 @@ expected:
     file: tests/test_file.py
     lines: [1, 60]
     root_cause: The regression test for the traversal is deleted, so nothing guards it.
-allowed: []
+allowed:
+  - file: python_multipart/multipart.py
+    lines: [344, 352]
+    root_cause: >-
+      The UPLOAD_KEEP_FILENAME docs still promise invalid path segments are removed.
+  - file: python_multipart/multipart.py
+    root_cause: >-
+      A name with ordinary subdirectories now raises FileError or lands in an
+      unexpected subdirectory (another consequence of e1).
+  - file: python_multipart/multipart.py
+    root_cause: The PR describes a behaviour change as an equivalent simplification.
+  - file: python_multipart/multipart.py
+    root_cause: The comment and the name _file_base still suggest only the base name (nit).

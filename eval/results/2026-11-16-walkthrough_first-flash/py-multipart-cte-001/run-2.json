@@ -1,0 +1,163 @@
+{
+ "id": 11,
+ "repo": "izelcompany/morgan-eval",
+ "pr": 1,
+ "base_sha": "c1e0d15d8d0c5ccff5029b2e4ce9fbe87bafd785",
+ "head_sha": "d67d8478a0f7a98a938fe4254e269f8f7c8829f0",
+ "round": 3,
+ "mode": "standard",
+ "status": "done",
+ "error": null,
+ "limit_hit": null,
+ "superseded_by": null,
+ "created_at": "2026-11-16T07:14:15.248Z",
+ "started_at": "2026-11-16T07:14:15.628Z",
+ "finished_at": "2026-11-16T07:16:46.237Z",
+ "report": {
+  "summary": "<!-- review-agents:summary -->\n## 审查结论：未发现阻断问题\n\n### 🔵 健壮性建议（2）\n- 只做了大小写归一化，没有去掉值两端的空白，带空白的合法 CTE 仍落到未知编码分支（已存在） — `python_multipart/multipart.py:1670-1688`\n  原因：发送 `Content-Transfer-Encoding: base64 `（尾部空格）的客户端在开启 UPLOAD_ERROR_ON_BAD_CTE 时会收到解析错误，否则得到一个未被解码的坏文件，而 PR 声称的“按 RFC 2045 处理”在这类输入上不成立。\n  - 依据 · 路径\n    1. `python_multipart/multipart.py:1199-1218`：HEADER_VALUE_START 只跳过前导 SPACE（不跳过 TAB），HEADER_VALUE 状态一直消费到 CR 才回调 header_value，尾部空白被包含在值内。\n    2. `python_multipart/multipart.py:1646-1648`：on_header_value 把原始字节切片直接 append，on_header_end 用 b\"\".join(...) 存入 headers，未做 strip。\n    3. `python_multipart/multipart.py:1670`：归一化只做 .lower()，`Content-Transfer-Encoding: base64 ` 得到 b\"base64 \"。\n    4. `python_multipart/multipart.py:1672-1688`：b\"base64 \" 不匹配任何分支，进入未知编码逻辑：记 warning，UPLOAD_ERROR_ON_BAD_CTE=True 时抛 FormParserError，否则按未编码处理，附件不被解码。\n    为什么：解析器把 header 值尾部的空格保留进值里，而 PR 只做大小写归一化，因此带尾随空白的合法 CTE 仍被当作未知编码，可能在开启严格模式时直接报错或产出未解码的坏文件。\n  建议：归一化时在比较前先去掉两端空白，例如 `transfer_encoding = headers.get(b\"content-transfer-encoding\", b\"7bit\").lower().strip()`，并补一个带尾随空白的用例。\n- 回归测试只覆盖 base64 分支，其余支持编码的大小写归一化没有任何验证 — `tests/test_multipart.py:749-765`\n  原因：quoted-printable 与 7bit/8bit/binary 的大小写处理一旦回归，现有测试与 100% 覆盖率门槛都发现不了，只能靠用户上传出错才暴露。\n  - 依据 · 规格 PR 描述\n    > Normalize the Content-Transfer-Encoding value before comparing it with the supported encodings: RFC 2045 section 6.1 says these values are case-insensitive.\n    - `tests/test_multipart.py:749-765`：新增的参数化只有 b\"base64\"/b\"BASE64\"/b\"Base64\" 三种写法，断言的是 base64 解码出 b\"Test\"，没有任何其他编码分支的用例。\n    - `python_multipart/multipart.py:1670-1679`：lower() 作用在整条 header 值上，随后同时服务于 binary/8bit/7bit 与 quoted-printable 分支，因此这些分支同样依赖大小写归一化，却没有对应的大小写用例。\n    为什么：PR 声明的归一化适用于所有受支持编码，但新测试仅以 base64 证明该行为；quoted-printable 与 binary/8bit/7bit 分支的大写/混合大小写输入未被验证。\n  建议：把该参数化扩展到 `b\"quoted-printable\"/b\"QUOTED-PRINTABLE\"` 以及 `b\"7bit\"/b\"8BIT\"/b\"Binary\"`（可复用现有 `test_bad_content_transfer_encoding` 的消息构造方式），或直接对同一个数据构造做多编码参数化。\n\n### ⚪ 细节（1）\n- 日志与异常信息打印的是小写化后的 CTE 值，不再反映客户端原始写法 — `python_multipart/multipart.py:1682-1684`\n  原因：排障时看到的小写值与客户端实际发送的头值不一致，让“未知编码”类报障更难定位到具体发信方。\n  - 依据 · 路径\n    1. `python_multipart/multipart.py:1670`：把 header 值就地转成小写后写入 transfer_encoding，原始写法在此丢失。\n    2. `python_multipart/multipart.py:1682-1684`：warning 与 FormParserError 都用这个已小写化的值来输出，遇到 b\"BADSTUFF\" 时日志/异常只会显示 b'badstuff'。\n    为什么：本 PR 只需要在比较前归一化，但归一化结果同时被用于诊断输出，运维和报障时无法再对照客户端实际发送的头值。\n  建议：保留原始值用于日志与异常（例如 `raw = headers.get(..., b\"7bit\")`，仅用 `raw.lower()` 参与 if/elif 比较，日志与报错里输出 `raw`）。\n\n### 本次审查的范围\n- 审了：规格漂移、边界问题、安全、可维护性、可验证性（各 1 次）· 2 个改动文件\n- 没审：改动文件都看了，各维度都交了卷\n- 能证明：发布的每条 🔴 / 🟡 都有程序核对过的依据，并经验证审查员重新读代码确认；引用的规则原文确实在所写的位置。\n- 不能证明：没有运行代码和测试；没有发现问题不代表没有问题；规格只来自 PR 描述、关联的 issue 和配置的规格文档；没验完的发现没有发布，不代表它们不成立。\n\n### 本次审查\nStandard 模式 · 643,589 token · 2 分 31 秒 · 审查 #11\n\n<!-- review-agents:counts {\"blocking\": 0, \"important\": 0, \"robustness\": 2, \"nit\": 1, \"complete\": true} -->\n",
+  "comments": [],
+  "counts": {
+   "blocking": 0,
+   "important": 0,
+   "robustness": 2,
+   "nit": 1,
+   "complete": true
+  },
+  "walkthrough": "<!-- review-agents:walkthrough -->\n## 📖 改动说明\n\n改动说明没能生成：the walkthrough was not in the expected format twice\n"
+ },
+ "findings": [
+  {
+   "fingerprint": "6fec66a224b2ec0ded5ea4fe6b17fe8e42d1ae910e783748b1cee48d9dad649a",
+   "primary_dimension": "edge_cases",
+   "dimensions": [
+    "edge_cases"
+   ],
+   "severity": "robustness",
+   "preexisting": true,
+   "file": "python_multipart/multipart.py",
+   "line_start": 1670,
+   "line_end": 1688,
+   "title": "只做了大小写归一化，没有去掉值两端的空白，带空白的合法 CTE 仍落到未知编码分支",
+   "body": "发送 `Content-Transfer-Encoding: base64 `（尾部空格）的客户端在开启 UPLOAD_ERROR_ON_BAD_CTE 时会收到解析错误，否则得到一个未被解码的坏文件，而 PR 声称的“按 RFC 2045 处理”在这类输入上不成立。",
+   "basis": [
+    {
+     "kind": "path",
+     "source": null,
+     "quote": null,
+     "places": [
+      {
+       "file": "python_multipart/multipart.py",
+       "line_start": 1212,
+       "line_end": 1218,
+       "shows": "header 值一直取到 CR 之前为止，尾部的空格（以及 HEADER_VALUE_START 未跳过的 TAB）都会被包含进值里。"
+      },
+      {
+       "file": "python_multipart/multipart.py",
+       "line_start": 1670,
+       "line_end": 1670,
+       "shows": "归一化只调用 .lower()，`Content-Transfer-Encoding: base64 ` 得到 b\"base64 \"。"
+      },
+      {
+       "file": "python_multipart/multipart.py",
+       "line_start": 1681,
+       "line_end": 1688,
+       "shows": "b\"base64 \" 不匹配任何分支，走未知编码逻辑：记录 warning，且 UPLOAD_ERROR_ON_BAD_CTE=True 时直接抛 FormParserError，附件不再被解码。"
+      }
+     ],
+     "explanation": "RFC 2045 的值是 token，尾随空白不属于值；但解析器把空白带入值中，PR 只解决大小写不解决空白，因此“base64 ”这类真实客户端常见的写法仍然被当成未知编码，且可能直接报错。",
+     "check": {
+      "status": "ok",
+      "problem": null
+     }
+    }
+   ],
+   "verdict": "{\"holds\": true, \"reason\": \"\\u4ee3\\u7801\\u786e\\u8ba4 header \\u503c\\u4e00\\u76f4\\u53d6\\u5230 CR \\u524d\\uff08HEADER_VALUE_START \\u53ea\\u8df3\\u8fc7\\u524d\\u5bfc SPACE\\uff0c\\u4e0d\\u8df3\\u8fc7 TAB\\uff0c\\u5c3e\\u90e8\\u7a7a\\u767d\\u5168\\u90e8\\u4fdd\\u7559\\uff09\\uff0con_header_value \\u76f4\\u63a5 append \\u539f\\u59cb\\u5207\\u7247\\uff0c\\u56e0\\u6b64 `base64 ` \\u7ecf .lower() \\u540e\\u4ecd\\u662f b\\\"base64 \\\"\\uff0c\\u843d\\u5165\\u672a\\u77e5\\u7f16\\u7801\\u5206\\u652f\\uff0c\\u914d\\u7f6e UPLOAD_ERROR_ON_BAD_CTE=True \\u65f6\\u629b FormParserError\\u3002\\u8be5\\u7a7a\\u767d\\u95ee\\u9898\\u5728\\u672c PR \\u4e4b\\u524d\\u5c31\\u5b58\\u5728\\uff0c\\u5c5e\\u4e8e\\u8fb9\\u754c\\u8f93\\u5165\\uff0c\\u7ef4\\u6301 robustness \\u7ea7\\u3002\", \"basis\": [{\"kind\": \"path\", \"source\": null, \"quote\": null, \"places\": [{\"file\": \"python_multipart/multipart.py\", \"line_start\": 1199, \"line_end\": 1218, \"shows\": \"HEADER_VALUE_START \\u53ea\\u8df3\\u8fc7\\u524d\\u5bfc SPACE\\uff08\\u4e0d\\u8df3\\u8fc7 TAB\\uff09\\uff0cHEADER_VALUE \\u72b6\\u6001\\u4e00\\u76f4\\u6d88\\u8d39\\u5230 CR \\u624d\\u56de\\u8c03 header_value\\uff0c\\u5c3e\\u90e8\\u7a7a\\u767d\\u88ab\\u5305\\u542b\\u5728\\u503c\\u5185\\u3002\"}, {\"file\": \"python_multipart/multipart.py\", \"line_start\": 1646, \"line_end\": 1648, \"shows\": \"on_header_value \\u628a\\u539f\\u59cb\\u5b57\\u8282\\u5207\\u7247\\u76f4\\u63a5 append\\uff0con_header_end \\u7528 b\\\"\\\".join(...) \\u5b58\\u5165 headers\\uff0c\\u672a\\u505a strip\\u3002\"}, {\"file\": \"python_multipart/multipart.py\", \"line_start\": 1670, \"line_end\": 1670, \"shows\": \"\\u5f52\\u4e00\\u5316\\u53ea\\u505a .lower()\\uff0c`Content-Transfer-Encoding: base64 ` \\u5f97\\u5230 b\\\"base64 \\\"\\u3002\"}, {\"file\": \"python_multipart/multipart.py\", \"line_start\": 1672, \"line_end\": 1688, \"shows\": \"b\\\"base64 \\\" \\u4e0d\\u5339\\u914d\\u4efb\\u4f55\\u5206\\u652f\\uff0c\\u8fdb\\u5165\\u672a\\u77e5\\u7f16\\u7801\\u903b\\u8f91\\uff1a\\u8bb0 warning\\uff0cUPLOAD_ERROR_ON_BAD_CTE=True \\u65f6\\u629b FormParserError\\uff0c\\u5426\\u5219\\u6309\\u672a\\u7f16\\u7801\\u5904\\u7406\\uff0c\\u9644\\u4ef6\\u4e0d\\u88ab\\u89e3\\u7801\\u3002\"}], \"explanation\": \"\\u89e3\\u6790\\u5668\\u628a header \\u503c\\u5c3e\\u90e8\\u7684\\u7a7a\\u683c\\u4fdd\\u7559\\u8fdb\\u503c\\u91cc\\uff0c\\u800c PR \\u53ea\\u505a\\u5927\\u5c0f\\u5199\\u5f52\\u4e00\\u5316\\uff0c\\u56e0\\u6b64\\u5e26\\u5c3e\\u968f\\u7a7a\\u767d\\u7684\\u5408\\u6cd5 CTE \\u4ecd\\u88ab\\u5f53\\u4f5c\\u672a\\u77e5\\u7f16\\u7801\\uff0c\\u53ef\\u80fd\\u5728\\u5f00\\u542f\\u4e25\\u683c\\u6a21\\u5f0f\\u65f6\\u76f4\\u63a5\\u62a5\\u9519\\u6216\\u4ea7\\u51fa\\u672a\\u89e3\\u7801\\u7684\\u574f\\u6587\\u4ef6\\u3002\", \"check\": {\"status\": \"ok\", \"problem\": null}}]}",
+   "status": "open"
+  },
+  {
+   "fingerprint": "c89526d06fa52de2f05155f7968c3ede3906e7b8366aa3797348e85944d60855",
+   "primary_dimension": "verifiability",
+   "dimensions": [
+    "verifiability"
+   ],
+   "severity": "robustness",
+   "preexisting": false,
+   "file": "tests/test_multipart.py",
+   "line_start": 749,
+   "line_end": 765,
+   "title": "回归测试只覆盖 base64 分支，其余支持编码的大小写归一化没有任何验证",
+   "body": "quoted-printable 与 7bit/8bit/binary 的大小写处理一旦回归，现有测试与 100% 覆盖率门槛都发现不了，只能靠用户上传出错才暴露。",
+   "basis": [
+    {
+     "kind": "spec",
+     "source": "pr",
+     "quote": "Normalize the Content-Transfer-Encoding value before comparing it with the supported encodings: RFC 2045 section 6.1 says these values are case-insensitive.",
+     "places": [
+      {
+       "file": "tests/test_multipart.py",
+       "line_start": 749,
+       "line_end": 765,
+       "shows": "参数化只给了 b\"base64\"/b\"BASE64\"/b\"Base64\"，断言的是 base64 解码结果。"
+      },
+      {
+       "file": "python_multipart/multipart.py",
+       "line_start": 1672,
+       "line_end": 1679,
+       "shows": "被归一化影响的还有 binary/8bit/7bit 与 quoted-printable 分支，这些分支没有对应用例。"
+      }
+     ],
+     "explanation": "PR 的要求是对所有受支持编码做大小写无关比较，但只有 base64 被证明；若以后有人把归一化改成只针对 base64 的硬编码比较，quoted-printable 与 7bit/8bit/binary 的大小写行为会静默回退而测试仍全绿。",
+     "check": {
+      "status": "ok",
+      "problem": null
+     }
+    }
+   ],
+   "verdict": "{\"holds\": true, \"reason\": \"\\u4ee3\\u7801\\u4e0e\\u6d4b\\u8bd5\\u5747\\u5df2\\u786e\\u8ba4\\uff1a\\u5f52\\u4e00\\u5316\\u7528\\u7edf\\u4e00\\u7684 .lower() \\u4f5c\\u7528\\u4e8e\\u6240\\u6709\\u5206\\u652f\\uff08multipart.py:1670, 1672-1679\\uff09\\uff0c\\u800c\\u65b0\\u53c2\\u6570\\u5316\\u6d4b\\u8bd5\\u53ea\\u7ed9\\u51fa base64 \\u7684\\u4e09\\u79cd\\u5927\\u5c0f\\u5199\\uff08test_multipart.py:749-765\\uff09\\uff0c\\u5176\\u4f59\\u53d7\\u652f\\u6301\\u7f16\\u7801\\u7684\\u5927\\u5c0f\\u5199\\u884c\\u4e3a\\u65e0\\u65ad\\u8a00\\uff0c\\u5c5e\\u4e8e\\u6d4b\\u8bd5\\u8986\\u76d6\\u7f3a\\u53e3\\uff0c\\u6309\\u89c4\\u5219\\u81f3\\u591a\\u4e3a robustness\\u3002\", \"basis\": [{\"kind\": \"spec\", \"source\": \"pr\", \"quote\": \"Normalize the Content-Transfer-Encoding value before comparing it with the supported encodings: RFC 2045 section 6.1 says these values are case-insensitive.\", \"places\": [{\"file\": \"tests/test_multipart.py\", \"line_start\": 749, \"line_end\": 765, \"shows\": \"\\u65b0\\u589e\\u7684\\u53c2\\u6570\\u5316\\u53ea\\u6709 b\\\"base64\\\"/b\\\"BASE64\\\"/b\\\"Base64\\\" \\u4e09\\u79cd\\u5199\\u6cd5\\uff0c\\u65ad\\u8a00\\u7684\\u662f base64 \\u89e3\\u7801\\u51fa b\\\"Test\\\"\\uff0c\\u6ca1\\u6709\\u4efb\\u4f55\\u5176\\u4ed6\\u7f16\\u7801\\u5206\\u652f\\u7684\\u7528\\u4f8b\\u3002\"}, {\"file\": \"python_multipart/multipart.py\", \"line_start\": 1670, \"line_end\": 1679, \"shows\": \"lower() \\u4f5c\\u7528\\u5728\\u6574\\u6761 header \\u503c\\u4e0a\\uff0c\\u968f\\u540e\\u540c\\u65f6\\u670d\\u52a1\\u4e8e binary/8bit/7bit \\u4e0e quoted-printable \\u5206\\u652f\\uff0c\\u56e0\\u6b64\\u8fd9\\u4e9b\\u5206\\u652f\\u540c\\u6837\\u4f9d\\u8d56\\u5927\\u5c0f\\u5199\\u5f52\\u4e00\\u5316\\uff0c\\u5374\\u6ca1\\u6709\\u5bf9\\u5e94\\u7684\\u5927\\u5c0f\\u5199\\u7528\\u4f8b\\u3002\"}], \"explanation\": \"PR \\u58f0\\u660e\\u7684\\u5f52\\u4e00\\u5316\\u9002\\u7528\\u4e8e\\u6240\\u6709\\u53d7\\u652f\\u6301\\u7f16\\u7801\\uff0c\\u4f46\\u65b0\\u6d4b\\u8bd5\\u4ec5\\u4ee5 base64 \\u8bc1\\u660e\\u8be5\\u884c\\u4e3a\\uff1bquoted-printable \\u4e0e binary/8bit/7bit \\u5206\\u652f\\u7684\\u5927\\u5199/\\u6df7\\u5408\\u5927\\u5c0f\\u5199\\u8f93\\u5165\\u672a\\u88ab\\u9a8c\\u8bc1\\u3002\", \"check\": {\"status\": \"ok\", \"problem\": null}}]}",
+   "status": "open"
+  },
+  {
+   "fingerprint": "73bd301ef80a90f098eda957e6d00984661f885ce7381e7f4fec0be07cee8d07",
+   "primary_dimension": "maintainability",
+   "dimensions": [
+    "maintainability"
+   ],
+   "severity": "nit",
+   "preexisting": false,
+   "file": "python_multipart/multipart.py",
+   "line_start": 1682,
+   "line_end": 1684,
+   "title": "日志与异常信息打印的是小写化后的 CTE 值，不再反映客户端原始写法",
+   "body": "排障时看到的小写值与客户端实际发送的头值不一致，让“未知编码”类报障更难定位到具体发信方。",
+   "basis": [
+    {
+     "kind": "path",
+     "source": null,
+     "quote": null,
+     "places": [
+      {
+       "file": "python_multipart/multipart.py",
+       "line_start": 1670,
+       "line_end": 1670,
+       "shows": "把 header 值就地转成小写后写入 transfer_encoding，原始写法在此丢失。"
+      },
+      {
+       "file": "python_multipart/multipart.py",
+       "line_start": 1682,
+       "line_end": 1684,
+       "shows": "warning 与 FormParserError 都用这个已小写化的值来输出，遇到 b\"BADSTUFF\" 时日志/异常只会显示 b'badstuff'。"
+      }
+     ],
+     "explanation": "本 PR 只需要在比较前归一化，但归一化结果同时被用于诊断输出，运维和报障时无法再对照客户端实际发送的头值。",
+     "check": {
+      "status": "ok",
+      "problem": null
+     }
+    }
+   ],
+   "verdict": null,
+   "status": "open"
+  }
+ ],
+ "seconds": 165.1
+}
