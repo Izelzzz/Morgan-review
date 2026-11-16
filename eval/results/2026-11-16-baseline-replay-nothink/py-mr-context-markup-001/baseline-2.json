@@ -1,0 +1,165 @@
+{
+ "case": "py-mr-context-markup-001",
+ "run": 2,
+ "model": "deepseek-flash",
+ "thinking": "disabled",
+ "seconds": 19.9,
+ "usage": {
+  "prompt_tokens": 11722,
+  "completion_tokens": 3263,
+  "total_tokens": 14985,
+  "prompt_tokens_details": {
+   "cached_tokens": 11520
+  },
+  "prompt_cache_hit_tokens": 11520,
+  "prompt_cache_miss_tokens": 202
+ },
+ "findings": [
+  {
+   "file": "src/review_agents/context/git.py",
+   "line_start": 65,
+   "line_end": 75,
+   "title": "Entry.size trusted from ls-tree but content read without re-checking size after skip filters",
+   "why": "read_text() looks up entry by linear scan and checks size > MAX_FILE_BYTES before cat-file, but files() returns entries from ls-tree including submodules/regular blobs with sizes from -l. Because the skip filter is applied in files(), an entry with a recorded size <= MAX_FILE_BYTES can still be large if git reports size differently, but more importantly the code reads the entire blob into memory with cat-file without streaming; a file that is just under MAX_FILE_BYTES is fine, but the binary probe only inspects the first 8000 bytes. A file that is text in the first 8000 bytes but turns binary later is decoded with replacement characters, which is acceptable. Not a blocking bug.",
+   "severity": "nit"
+  },
+  {
+   "file": "src/review_agents/context/markup.py",
+   "line_start": 7,
+   "line_end": 9,
+   "title": "Closing-tag defusing is incomplete: opening-tag-like text and case/whitespace variants adjacent to end-of-input allow tag confusion",
+   "why": "The regex defuses '</' followed by whitespace and 'untrusted', but does not escape things like '&lt;/untrusted' properly (it inserts the literal text '&lt;/untrusted' which is good), however an attacker can embed '</untrusted' with a null byte or use a nested '<untrusted source=\"x\">' which the parser may treat as ending the outer block ambiguously. More concretely, if the model or downstream parser strips HTML entities, '&lt;/untrusted' becomes '</untrusted' after decoding, re-enabling the forgery. The mitigation claims the closing tag cannot be forged but entity-decoding by the consumer defeats it.",
+   "severity": "important"
+  },
+  {
+   "file": "src/review_agents/context/modules.py",
+   "line_start": 128,
+   "line_end": 145,
+   "title": "Summary cache key collides across versions of module content when files are added without changing existing blobs",
+   "why": "_cache_key hashes only 'path=blob' for files currently in the module. If a module grows or shrinks such that the file set changes but the joined string equals another module's joined string (unlikely) or, more realistically, if the module path changes but content stays, the path is part of the key so that is fine. However a rename that produces the same {path=blob} set is impossible. The real issue: SUMMARY_VERSION is fixed and never bumped when INSTRUCTIONS change, so prompt changes silently reuse stale summaries. That violates the contract that summaries reflect current code.",
+   "severity": "important"
+  },
+  {
+   "file": "src/review_agents/context/modules.py",
+   "line_start": 155,
+   "line_end": 175,
+   "title": "Summary generation does not commit and budget exhaustion is sticky only for the current call, not persisted",
+   "why": "On success the INSERT is executed but no commit is made in module_summaries; the caller (build_repo_layer) also does not commit. connect() likely opens with isolation default; when the connection closes without commit, the summary INSERTs are rolled back and lost. On the next build, every module is re-summarised, defeating the cache and burning budget. Also the budget-exceeded branch sets summarize=None for the rest of the loop but the cache writes for modules already summarised in this run will be lost too.",
+   "severity": "blocking"
+  },
+  {
+   "file": "src/review_agents/context/repo_layer.py",
+   "line_start": 120,
+   "line_end": 145,
+   "title": "Layer cache write is not committed; same connection used across calls with no explicit commit",
+   "why": "build_repo_layer executes INSERT OR REPLACE into context_cache but never commits. If the caller relies on connect() autocommit being off (typical), the cached layer row is discarded when the connection closes, so the README-edit cache invalidation works but the cache never actually persists, and cache_hit tests would still pass within one connection lifetime because SQLite sees uncommitted rows within the same connection — but across connections the cache is empty. tests use a new connection per layer() call, so cache_hit would be False always; the test asserts True, meaning connect() must autocommit. If connect() does not autocommit the production path breaks; this depends on connect() internals not shown. Flagging as risk because the same pattern exists for summary_usage and usage() inserts.",
+   "severity": "important"
+  },
+  {
+   "file": "src/review_agents/context/repo_layer.py",
+   "line_start": 120,
+   "line_end": 151,
+   "title": "Cache hit path skips regenerating missing module summaries when summarize is provided after tree unchanged",
+   "why": "When the layer cache row is found, conventions and tree are restored but module_summaries is still called with the current summarize, so missing module summaries are generated. That is correct. However, if a previous build failed to summarise modules due to budget, those summaries remain None and are cached only when successful, so they are retried each build — consuming budget each time. Combined with the sticky budget only within one build, a repo where budget is exhausted mid-build retries the same modules every build forever, burning remaining budget each time before stopping at the same point. This is a robustness/cost issue.",
+   "severity": "important"
+  },
+  {
+   "file": "src/review_agents/context/tokens.py",
+   "line_start": 5,
+   "line_end": 8,
+   "title": "estimate_tokens is O(n) Python loop over every character; used for every rendered layer and module on every build",
+   "why": "The function iterates character-by-character to count ASCII. For the full rendered repo layer (conventions + tree + module map) and for sample truncation this is called repeatedly, and sample_module also re-estimates excerpts, so large repos incur significant CPU. Not a correctness bug but a robustness/perf concern given the per-call estimates.",
+   "severity": "robustness"
+  },
+  {
+   "file": "src/review_agents/context/git.py",
+   "line_start": 60,
+   "line_end": 65,
+   "title": "ls-tree record parsing breaks on paths containing tab characters",
+   "why": "record.split('\\t', 1) assumes the path has no tab; git allows tabs in filenames. A path containing a tab will be mis-split or, for -z output, the tab separating meta and path is the only tab so split('\\t',1) is actually correct for -z. However the meta fields parse uses meta.split() which splits on generic whitespace; sizes and ids are fine. For -z the record terminator is NUL, so paths with tabs are preserved. Minor.",
+   "severity": "nit"
+  },
+  {
+   "file": "src/review_agents/context/modules.py",
+   "line_start": 96,
+   "line_end": 118,
+   "title": "split_modules subtree children indexing may add empty-string parent keys incorrectly",
+   "why": "For a root file 'README.md', PurePosixPath('README.md').parent is '.', converted to ''; parts of PurePosixPath('') is empty, so the for loop range(0) does nothing — root file contributes to by_dir[''] but not to children. That's fine. For 'a/x.py', parent='a', parts=('a',), depth=0 → above='', children[''].add('a'). Correct. But the marked_below check at root: root is always visited with is_root=True so it does not check marked_below, meaning a root-level package marker does not force split the whole repo — the docstring says a package marker always starts a module, which is honored because visit children will hit it. Acceptable.",
+   "severity": "nit"
+  },
+  {
+   "file": "src/review_agents/models.py",
+   "line_start": 73,
+   "line_end": 103,
+   "title": "review_usage and summary_usage open a fresh connection per record but never commit, risking lost usage rows",
+   "why": "record() uses connect(db_path, create=False) inside closing() and executes INSERT, but no explicit commit. If connect() does not set isolation_level=None or autocommit, the insert is rolled back on close. The comment says callbacks run on the model call's thread so each record opens its own connection, but a fresh connection that closes without commit loses the row. The old code had the same pattern, so if it worked before connect() must autocommit; but the refactor preserved the risk and also removed the ability to call it once per review. Confirm connect() semantics.",
+   "severity": "important"
+  },
+  {
+   "file": "src/review_agents/config.py",
+   "line_start": 59,
+   "line_end": 62,
+   "title": "summary_tokens_per_build setting is defined but never referenced; budget enforcement is not wired",
+   "why": "Settings gains summary_tokens_per_build (default 3M) but the diff never uses it. module_summaries relies on summarize raising BudgetExceededError. The model_summarizer fixture uses TokenBudget(1000) manually in tests, but production code does not construct a TokenBudget from this setting and does not pass a UsageMeter with this limit. The described behavior 'a used-up summary budget stops further summaries' is therefore not enforced by this change.",
+   "severity": "blocking"
+  },
+  {
+   "file": "src/review_agents/context/repo_layer.py",
+   "line_start": 145,
+   "line_end": 151,
+   "title": "RepoLayer.tokens property re-renders and re-estimates on every access",
+   "why": "render() concatenates all conventions, tree, and module map, then tokens calls estimate_tokens over the full result. Each access re-runs the O(n) scan and re-renders strings. Since RepoLayer is frozen but tokens is a property computing on demand, repeated access (e.g., in sizing/diagnostics) multiplies cost. Cache the value or compute once.",
+   "severity": "robustness"
+  },
+  {
+   "file": "src/review_agents/context/modules.py",
+   "line_start": 196,
+   "line_end": 205,
+   "title": "Cached summary loaded without validating JSON schema; malformed cache row crashes build",
+   "why": "json.loads(row['content'])['summary'] will raise KeyError/TypeError if the cached JSON shape differs (older SUMMARY_VERSION, partial write). Since cache rows are keyed by SUMMARY_VERSION and module path, a schema change without bumping SUMMARY_VERSION produces a mismatch. The exception propagates out of module_summaries and aborts the whole layer build rather than falling back to stats, breaking the documented 'a failed summary falls back to git stats' contract for cache reads.",
+   "severity": "important"
+  },
+  {
+   "file": "src/review_agents/context/git.py",
+   "line_start": 47,
+   "line_end": 55,
+   "title": "tree_id recomputes rev-parse on every access; used inside _key each build",
+   "why": "tree_id runs a git subprocess each time. build_repo_layer calls _key(snapshot, ...) which calls snapshot.tree_id, and the Snapshot caches _files but not tree_id. Minor cost per build, but combined with files() also being called in directory_tree, convention_paths, split_modules, sample_module — each of those may call snapshot.files() (cached) but tree_id is not cached. Not a correctness bug.",
+   "severity": "nit"
+  },
+  {
+   "file": "tests/test_db.py",
+   "line_start": 8,
+   "line_end": 24,
+   "title": "Tests import private _migrations and assert migrate()==LATEST, weakening the migration test",
+   "why": "Using max(version for version, _ in _migrations()) couples the test to internal implementation and no longer pins the migration count, so a future migration that silently fails to bump schema_version would still pass because LATEST is derived from the same function under test. The test no longer verifies that a specific migration produced the expected schema_version, reducing its value in catching migration regressions.",
+   "severity": "robustness"
+  },
+  {
+   "file": "tests/test_context_repo.py",
+   "line_start": 101,
+   "line_end": 119,
+   "title": "Test asserts max(git stats) but does not verify HTML escaping of forged closing tags in memoized content",
+   "why": "test_a_closing_tag_in_content_cannot_end_the_data_block only checks '</ UNTRUSTED>' and '</untrusted>', but the markup regex allows whitespace between '</' and 'untrusted' and is case-insensitive, so a form like '</untrusted\\n>' is covered, yet a form like '< /untrusted>' is not matched and also would not be a valid closing tag for a consumer. Not a bug in production, but the test gives false confidence about arbitrary variants (e.g., '</untrustedfoo>' would be matched incorrectly? Regex has no word boundary after 'untrusted', so '</untrustedfoo' matches and is defused unnecessarily — minor over-defusing; conversely '</untrus ted' is not a real closing tag so fine).",
+   "severity": "nit"
+  },
+  {
+   "file": "src/review_agents/context/markup.py",
+   "line_start": 7,
+   "line_end": 11,
+   "title": "Regex matches closing-tag prefix without a word boundary, over-defusing '</untrustedx>'",
+   "why": "The pattern r'</\\s*untrusted' matches '</untrustedfoo>' which is not a closing tag, replacing it with a defused literal unrelated to the intended closing tag. This is only cosmetic over-defusing of data and does not enable forgery, but conversely a genuine '</untrusted' followed by attributes (which is not valid closing syntax) is also defused. The important missing case is that '&lt;/untrusted' literal in source is not further escaped, so a consumer that HTML-decodes the data block can re-form a closing tag and escape the data boundary; the defusing relies on the model never decoding entities.",
+   "severity": "important"
+  },
+  {
+   "file": "src/review_agents/context/modules.py",
+   "line_start": 170,
+   "line_end": 175,
+   "title": "excerpt = text[: remaining * 4] can split a multi-byte character, but decode already replaced invalid sequences",
+   "why": "text is already a str decoded with replacement, so slicing at arbitrary character index cannot split a code point. However estimate_tokens treats any char >=128 as one token, so a CJK-heavy excerpt of remaining*4 characters can vastly exceed the remaining token budget (each char is one token, not one quarter). sample_module can therefore blow past _SAMPLE_TOKENS for non-ASCII modules, sending an oversized prompt and potentially exceeding context windows.",
+   "severity": "important"
+  }
+ ],
+ "content": null,
+ "error": null
+}

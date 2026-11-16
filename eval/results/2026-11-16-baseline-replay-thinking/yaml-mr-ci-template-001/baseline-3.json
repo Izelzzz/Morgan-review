@@ -1,0 +1,78 @@
+{
+ "case": "yaml-mr-ci-template-001",
+ "run": 3,
+ "model": "deepseek-flash",
+ "seconds": 344.3,
+ "usage": {
+  "prompt_tokens": 14746,
+  "completion_tokens": 62621,
+  "total_tokens": 77367,
+  "prompt_tokens_details": {
+   "cached_tokens": 14592
+  },
+  "completion_tokens_details": {
+   "reasoning_tokens": 61684
+  },
+  "prompt_cache_hit_tokens": 14592,
+  "prompt_cache_miss_tokens": 154
+ },
+ "findings": [
+  {
+   "file": "ci/review-agents.yml",
+   "line_start": 15,
+   "line_end": 18,
+   "severity": "blocking",
+   "title": "Required post check is attached to the base branch, not the PR head",
+   "why": "The workflow uses `pull_request_target`, which runs in the base-branch context (`GITHUB_SHA` is the base branch commit). The `post` job's check run therefore is not created for the PR head SHA, so making `post` required in branch protection cannot gate the PR as the README claims; it can instead leave PRs waiting for a check that will never match the head commit."
+  },
+  {
+   "file": "ci/review-agents.yml",
+   "line_start": 29,
+   "line_end": 37,
+   "severity": "blocking",
+   "title": "Any user can cancel an in-progress review with `/review`",
+   "why": "The job condition only checks that the comment is on a PR and starts with `/review`; the collaborator check happens inside the action after the job has already entered the concurrency group. Because `cancel-in-progress` is true, a non-collaborator can post `/review` repeatedly to cancel legitimate reviews (and consume runner time with the secret-bearing job)."
+  },
+  {
+   "file": "ci/review-agents.yml",
+   "line_start": 35,
+   "line_end": 37,
+   "severity": "important",
+   "title": "Only the review job is serialized; stale post jobs can race and overwrite newer results",
+   "why": "Concurrency is job-level on `review`, not on `post` and not workflow-level. Once a review has finished, a later push does not cancel the already-running `post` job. That old post job can post inline comments for the old head and overwrite the summary/walkthrough after the newer run, or two post jobs can both see no summary and create duplicates. The post script never re-checks `result.head_sha` against the current PR head."
+  },
+  {
+   "file": "ci/review_agents_ci.py",
+   "line_start": 230,
+   "line_end": 236,
+   "severity": "important",
+   "title": "Gate passes when the blocking count is missing or null",
+   "why": "`counts.get('blocking')` is falsey for absent, null, or empty values. A malformed or older report with `counts = {'complete': True}` (or `blocking: null`) is treated as having no blockers and goes green, even though there is no evidence of zero 🔴. The gate should fail closed unless `blocking` is explicitly zero."
+  },
+  {
+   "file": "ci/review_agents_ci.py",
+   "line_start": 337,
+   "line_end": 338,
+   "severity": "important",
+   "title": "Rejected inline comments are silently dropped if the summary lacks the counts marker",
+   "why": "When `rpartition('\\n<!-- review-agents:counts')` finds no separator, `updated` is just the original `summary`; the rejected comments are never appended. A report summary without that hidden counts line loses exactly the inline comments GitHub rejected, violating D-033's promise that none are lost."
+  },
+  {
+   "file": "ci/review_agents_ci.py",
+   "line_start": 158,
+   "line_end": 169,
+   "severity": "robustness",
+   "title": "GitHub API failures abort before writing the result artifact",
+   "why": "The `github.ok(...)` calls that fetch the PR and check the head are outside the later `try/except Failure` block. A transient GitHub error raises, the review action exits before `_write` and upload, and the post job then fails at artifact download. In that case the last summary stays up instead of being replaced with a failure, contrary to the stated behavior."
+  },
+  {
+   "file": "ci/review_agents_ci.py",
+   "line_start": 58,
+   "line_end": 62,
+   "severity": "important",
+   "title": "HTTPS-only guard does not cover redirects",
+   "why": "The code checks only the initial URL, but `urllib.request.urlopen` follows redirects by default, including redirects to plain `http`. A 3xx response from the service or GitHub API can therefore forward the Authorization header or request body over plaintext despite the explicit HTTPS-only guarantee."
+  }
+ ],
+ "content": null
+}

@@ -1,0 +1,117 @@
+{
+ "case": "py-mr-agent-window-001",
+ "run": 2,
+ "model": "deepseek-flash",
+ "thinking": "disabled",
+ "seconds": 15.6,
+ "usage": {
+  "prompt_tokens": 6472,
+  "completion_tokens": 2341,
+  "total_tokens": 8813,
+  "prompt_tokens_details": {
+   "cached_tokens": 6272
+  },
+  "prompt_cache_hit_tokens": 6272,
+  "prompt_cache_miss_tokens": 200
+ },
+ "findings": [
+  {
+   "file": "src/review_agents/pipeline/agent.py",
+   "line_start": 158,
+   "line_end": 158,
+   "severity": "important",
+   "title": "Conversation.fit may cut the very ToolMessage the model is about to answer, but never resets on retry",
+   "why": "fit() iterates _results in append order and shrinks the oldest results still marked unshortened. That is correct on the first model call, but the loop at run_dimension() may invoke the model repeatedly; on a second invocation after a reasoning retry (text_retry_used path appends a HumanMessage that is not counted by _results), fit() re-scans and only shortens results not already shortened. This part is fine. However the real problem is that shorten() is called on result.text, which for read_file's result already contains the untrusted wrapper text added by the tool? No—text here is the raw tool result. The bug: _take and shorten compute over the raw text but the note is prepended only inside the data block via _message; that is fine. The bug in fit is that total is adjusted with the delta of the new vs old message content only, but the untrusted wrapper overhead and the suffix are identical, so delta is accurate. Not a bug."
+  },
+  {
+   "file": "src/review_agents/pipeline/conversation.py",
+   "line_start": 59,
+   "line_end": 78,
+   "severity": "important",
+   "title": "shorten's character fallback can still exceed the limit and leaves no bounded guarantee",
+   "why": "The while loop halves chars until both text[:chars] and text[-chars:] are within keep_tokens. If the head or tail cannot be reduced (e.g. text is shorter than chars but still over keep_tokens because it is a single line of multi-byte chars, or text[:chars] contains a long run that estimate_tokens says is over the limit but halving hits 1 while still over), the loop exits with chars == 1 while the slices still exceed the limit. The note is always added on top. Result: the returned string can exceed keep_tokens, so a single tool result may still overflow the window—the exact failure this change is meant to prevent."
+  },
+  {
+   "file": "src/review_agents/pipeline/conversation.py",
+   "line_start": 60,
+   "line_end": 63,
+   "severity": "important",
+   "title": "Reversed-line tail selection can include the same lines as the head and double-count them",
+   "why": "head takes lines from the start; tail takes lines from the end of the reversed list. If the text fits in fewer lines than 2*keep_tokens worth (e.g. many short lines totalling just over 2*keep_tokens where head and tail overlap), head and tail can overlap, left_out becomes negative, the `left_out > 0` branch is skipped, and it falls into the character-cut branch. But more importantly, when head+tail cover the whole input but the token check said total > 2*keep_tokens, the character branch is used even for line-structured code, contradicting the documented 'whole lines' contract and producing a worse cut. Also when left_out <= 0 the note is in the character branch and mislabels characters left out."
+  },
+  {
+   "file": "src/review_agents/pipeline/conversation.py",
+   "line_start": 40,
+   "line_end": 40,
+   "severity": "important",
+   "title": "_take ignores that a single line can exceed the budget, so head can be empty",
+   "why": "If the first line alone costs more than `tokens`, _take returns []. Then head is empty, the `head and tail and left_out > 0` guard falls through to the character path. For a result that is one very long first line balanced by many short lines, this is fine, but for a normal result whose first line is huge the whole file is cut by characters rather than lines, losing line numbers—contradicting the note about read_file start_line/end_line which refers to line numbers that are no longer present."
+  },
+  {
+   "file": "src/review_agents/pipeline/conversation.py",
+   "line_start": 110,
+   "line_end": 122,
+   "severity": "important",
+   "title": "answer() stores result.text before wrapping and reuses it for re-wrapping, but the reminder is appended outside the data block",
+   "why": "answer() passes shorten(result, ...) as text, then _message wraps it in untrusted and appends suffix. On fit(), _message is rebuilt with result.text and result.suffix. The suffix (repeat reminder) is placed after the closing untrusted tag, which is fine for the data-block invariant, but the reminder text is model-visible and can be confused with instructions—the same untrusted-content concern. More concretely: shorten applies a tool-specific hint ('read_file with start_line and end_line') but the result was already wrapped; re-wrapping is consistent. No bug beyond the earlier shorten. Skipping."
+  },
+  {
+   "file": "src/review_agents/pipeline/agent.py",
+   "line_start": 155,
+   "line_end": 160,
+   "severity": "blocking",
+   "title": "fit() runs before every model call but conversation_tokens counts messages already large; per-result cap of 10k does not bound total when many results exist",
+   "why": "fit() only shortens each result once (to shortened_tokens), never drops them. If the conversation after shortening all results still exceeds room—e.g. window small relative to the number of tool messages and fixed overhead (system prompt, pack, tool schemas not counted), or shortened_tokens is large—fit returns after the loop with total still over room and the next model call still overflows. There is no final check that total <= room; it only returns early when it fits. So the guarantee 'conversation stays inside the window' is not enforced when even all-shortened results do not fit, and the model call overflows and fails."
+  },
+  {
+   "file": "src/review_agents/pipeline/conversation.py",
+   "line_start": 100,
+   "line_end": 105,
+   "severity": "important",
+   "title": "conversation_tokens ignores the message overhead and the untrusted wrapper, undercounting real tokens",
+   "why": "conversation_tokens sums estimate_tokens(content) and tool_calls, but the untrusted() data block wrapper and role metadata add tokens per message, and the estimate itself is rough. More importantly it excludes the system prompt and the context pack, which are part of the model input. The window budget is compared against only the conversation messages, so the real request can exceed the window even when fit() believes it fits—defeating the protection."
+  },
+  {
+   "file": "src/review_agents/pipeline/agent.py",
+   "line_start": 186,
+   "line_end": 186,
+   "severity": "important",
+   "title": "_answer appends to messages itself, but the SUBMIT_ONLY path also appends; ordering with fit relies on len(messages) captured before append",
+   "why": "In answer(), _Result(len(messages), ...) records the index, then messages.append(_message(...)). That is consistent because the new message lands exactly at that index. But in the final/no-tool-call paths elsewhere messages may be appended (e.g. SUBMIT_ONLY, retry HumanMessage, AIMessage from reply) between calls, shifting indices? No—indices recorded at answer() time point at the ToolMessage that answer() just appended; those positions never move because messages is append-only. So index is stable. Not a bug. Also _answer now returns None; any caller relying on the return value would break, but the only caller was updated. Skipping."
+  },
+  {
+   "file": "src/review_agents/pipeline/agent.py",
+   "line_start": 124,
+   "line_end": 128,
+   "severity": "robustness",
+   "title": "ConversationLimits default window=10**9 means fit() never cuts when callers omit limits",
+   "why": "run_dimension has a default ConversationLimits() whose window is 10**9, so any caller that does not pass limits (tests, other entry points, or a future path) gets no conversation fitting at all—only the per-result shorten. The feature silently does nothing outside _run_dimensions. That is acceptable only if run_dimension is exclusively called from run.py; it is exported and used in tests, so this is a latent gap but the real production path passes limits. Robustness."
+  },
+  {
+   "file": "src/review_agents/pipeline/run.py",
+   "line_start": 336,
+   "line_end": 344,
+   "severity": "important",
+   "title": "Limits are built once per review and shared across concurrent jobs, but ConversationLimits is frozen so safe; however window uses finder_model.context_tokens for all agents",
+   "why": "All dimension agents use the finder model? confirm: run_dimension is used for dimension finders. If different agents (verifier, judge) use different models with smaller windows, sharing finder_model.context_tokens is wrong, but this function only runs dimensions. However output_reserve is not added to the per-result cap: a single result is capped at result_tokens (10k) regardless of window, so if window < result_tokens + output_reserve + overhead, the very first result already overflows and fit()'s first iteration only shortens after append; fit is called before the model call with that message present, so it will shorten it. But shorten to shortened_tokens may still exceed a tiny window; see the no-final-check finding."
+  },
+  {
+   "file": "Dockerfile",
+   "line_start": 24,
+   "line_end": 25,
+   "severity": "important",
+   "title": "Installing 'apt' as a package is not how you get apt security fixes and can pull in unintended dependencies",
+   "why": "The comment claims naming apt installs a security fix for CVE-2026-109518, but `apt-get install apt` installs the apt package binary; the fix would come from the pinned base image's apt already, and forcing reinstall may not upgrade to a fixed version (apt itself is already present). More importantly, apt-get install inside a RUN with `apt` listed may trigger dpkg reconfiguration and is not a supported upgrade path; the correct fix is `apt-get upgrade` or a newer base image. The change does not reliably address the CVE and adds build fragility."
+  },
+  {
+   "file": "tests/test_pipeline_agent.py",
+   "line_start": 505,
+   "line_end": 520,
+   "severity": "nit",
+   "title": "test asserts first result shortened but does not verify the suffix reminder is preserved or data block intact after re-wrap",
+   "why": "Test-only gap; not a production bug. Skipping detailed finding."
+  }
+ ],
+ "content": null,
+ "error": null
+}

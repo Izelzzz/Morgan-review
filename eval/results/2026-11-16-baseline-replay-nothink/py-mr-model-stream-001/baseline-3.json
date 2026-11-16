@@ -1,0 +1,141 @@
+{
+ "case": "py-mr-model-stream-001",
+ "run": 3,
+ "model": "deepseek-flash",
+ "thinking": "disabled",
+ "seconds": 20.4,
+ "usage": {
+  "prompt_tokens": 9806,
+  "completion_tokens": 3507,
+  "total_tokens": 13313,
+  "prompt_tokens_details": {
+   "cached_tokens": 9600
+  },
+  "prompt_cache_hit_tokens": 9600,
+  "prompt_cache_miss_tokens": 206
+ },
+ "findings": [
+  {
+   "file": "src/review_agents/models.py",
+   "line_start": 213,
+   "line_end": 232,
+   "severity": "blocking",
+   "title": "Streaming attempt leaks a daemon thread and never stops it after deadline",
+   "why": "_within_deadline sets `cancelled` and raises, but does not join the worker. The worker's `until_cancelled` only checks `cancelled` between pieces received, so if the stream is blocked in a read (or the SDK is retrying internally, or waiting on a slow first byte longer than the read timeout with heartbeats), the abandoned daemon thread keeps running and keeps an HTTP connection open into the next attempt. Multiple attempts can pile up overlapping requests against the service, exceeding the retry count/concurrency the service sees, and the opened connection/socket isn't closed. Worse, the run continues while the orphan may still write usage/callback side effects; there is no guarantee it stops."
+  },
+  {
+   "file": "src/review_agents/models.py",
+   "line_start": 189,
+   "line_end": 196,
+   "severity": "blocking",
+   "title": "Deadline thread wrapper cannot interrupt `_generate`/`_stream`; cancellation is advisory only",
+   "why": "The docstring claims the attempt 'stops reading at its next piece of data, or at its read timeout', but `cancelled` is only consulted inside the chunk iterator. A model reply that is non-streaming (`stream=False`) runs `super()._generate` entirely and cannot be cancelled at all; the deadline only causes a raise while the underlying HTTP call continues until its own timeout. For streaming, if the server sends a piece then continues, the request is closed eventually — but if it never sends another piece the worker blocks. This makes the hard deadline unreliable and leaves orphaned in-flight requests (and their billing) beyond the deadline, contradicting D-029/D-030."
+  },
+  {
+   "file": "src/review_agents/models.py",
+   "line_start": 128,
+   "line_end": 152,
+   "severity": "important",
+   "title": "retry_wait treats 408/409 as retryable? and misses httpx2 errors from streamed bodies",
+   "why": "The new code retries only 429 and >=500. Server 408/409 (which the old client retried) are now not retried; and more importantly, an error raised while iterating a stream body can surface as a raw `httpx2.ReadTimeout`/`ReadError` or `openai.APIError` wrapping a non-APIStatusError. `httpx2.TransportError` covers some but `openai.APIConnectionError` branches don't handle `openai.APIError` variants like `APIResponseValidationError`, so some transient stream failures (e.g. `RemoteProtocolError` -> `openai.APIConnectionError`? depends) may be dropped. Also `_retry_after` parses `retry-after` as a number only; HTTP-date form silently falls back to backoff, which is acceptable but can massively under-wait compared to what the server asked."
+  },
+  {
+   "file": "src/review_agents/models.py",
+   "line_start": 156,
+   "line_end": 168,
+   "severity": "important",
+   "title": "Empty-reply detection only checks first generation; a tool-call-only or refusal-only reply may retry forever/incorrectly",
+   "why": "`_check_not_empty` only inspects `result.generations`; if the provider returns multiple generations or content stored under non-str types (e.g. a list of content blocks) `not message.content` may be truthy-but-empty or a list. Also an AIMessage with `tool_calls` is fine, but a streamed message that has only `additional_kwargs`/function_call (older tool-call shape) is considered empty and retried indefinitely, potentially hitting the retry cap and surfacing `EmptyReplyError` for a valid function-call reply."
+  },
+  {
+   "file": "src/review_agents/models.py",
+   "line_start": 174,
+   "line_end": 180,
+   "severity": "important",
+   "title": "ReviewChatModel is not a pydantic model but defines pydantic-style fields; rng not frozen and ignored by stream replies",
+   "why": "`ReviewChatModel` subclasses `ChatOpenAI` which is a pydantic model; adding `rng: random.Random = Field(...)` is fine, but a `random.Random` is mutable and per-instance. More crucially, callers (`chat_model`) build `.bind_tools(...)` bound runnables that share state? No. The deeper issue: `deadline` and `clock` are pydantic fields; passing `deadline=math.inf` and `clock=...` as pydantic fields means `math.inf` and callables get serialized into the model's `.dict()`/config, which LangChain may include in repr/serialization. Not fatal, but `clock`/`sleep_for`/`rng` fields make the model unpicklable and break any tracing/serialization of the runnable (e.g. `to_json`)."
+  },
+  {
+   "file": "src/review_agents/models.py",
+   "line_start": 199,
+   "line_end": 200,
+   "severity": "important",
+   "title": "model_name reported from streamed response metadata may be None -> falls back to self.model_name, losing actual served model",
+   "why": "Only the first choice's `model_name` is read. `generate_from_stream` aggregation sets `response_metadata` from chunks; if the provider omits `model` in chunks (many do, sending it only once), `reported` is None and the usage row attributes tokens to the configured model rather than the actual served model. When a router (OpenRouter) routes to a different backend, usage attribution is wrong. Minor but a silent data-quality regression from the non-streamed path that captured llm_output."
+  },
+  {
+   "file": "src/review_agents/models.py",
+   "line_start": 213,
+   "line_end": 218,
+   "severity": "blocking",
+   "title": "Raising from the main thread while worker holds outcome dict is fine, but DeadlinePassedError is not retried even though stale, and `_generate` re-raises",
+   "why": "The design: `DeadlinePassedError` is re-raised immediately. But `_within_deadline` raises it when *remaining* time runs out — that can happen because retries/backoff consumed time. The spec says a hard per-call deadline gives up an attempt running when time is up, and no wait runs past the deadline. That's consistent. However, `chat_model` computes `deadline = clock() + time_left` once at construction; the caller `run_dimension` constructs per turn from `deadline - now`, fine. But `pipeline/run.py` for the judge and summarizer pass `math.inf` and `deadline - clock()` — the summarizer has no deadline (inf), fine; but `model_judge(judge_for(deadline - clock()))` builds `deadline = clock() + (deadline - clock())` in `chat_model`, so any time spent in `chat_model` construction eats into it — negligible. The real problem: `DeadlinePassedError` subclasses `TimeoutError`, and callers (e.g. `run_dimension`) catch broad exceptions; a deadline-exceeded is treated as failure and retried at the agent level? Need to confirm. In `agent.py`, `except` handlers catch specific exceptions then `raise` for others; DeadlinePassedError likely propagates and aborts the dimension instead of recording a graceful 'ran out of time', which is what the old timeout path did (APITimeoutError fell into a generic handler). This is a behavioral regression: agents now crash on deadline rather than recording a stop reason."
+  },
+  {
+   "file": "src/review_agents/pipeline/run.py",
+   "line_start": 280,
+   "line_end": 283,
+   "severity": "robustness",
+   "title": "judge gets `deadline - clock()` which can be <= 0",
+   "why": "If earlier work consumed the review deadline, `deadline - clock()` is zero/negative. `chat_model` then computes `wait = min(idle, time_left)` then `max(wait, 0.001)` and `deadline = clock() + time_left` (past). The first `_within_deadline` computes `left = deadline - clock() <= 0` and raises `DeadlinePassedError` immediately — okay, but `model_judge` wrapping will surface it as an unexpected exception type the pipeline may not handle (same class as above). Previously `max(1.0, ...)` guaranteed at least a minimal attempt. Also for the summarizer, `model_for(math.inf)` sets `deadline = clock() + inf = inf`, and `timeout` uses `min(endpoint.idle_seconds, inf)` — fine."
+  },
+  {
+   "file": "src/review_agents/pipeline/run.py",
+   "line_start": 222,
+   "line_end": 230,
+   "severity": "robustness",
+   "title": "Summarizer model uses math.inf time_left, disabling the hard deadline, but the read/idle timeout still applies per attempt; unbounded total retries across many calls",
+   "why": "Summaries 'belong to no review and have no deadline', so a summarizer can now block for `idle_seconds` (default 300s) per attempt times (max_retries+1)=5 attempts = up to ~25 minutes per module, with no overall bound. Previously it had a fixed 120s timeout with 2 retries. This is a large latency/DoS regression for background summary threads, which are daemon threads stored in `_summaries` and joined elsewhere."
+  },
+  {
+   "file": "src/review_agents/models.py",
+   "line_start": 168,
+   "line_end": 179,
+   "severity": "important",
+   "title": "ReviewChatModel overrides `_generate` but not `_stream`; direct `.stream()` callers bypass retry/deadline rules",
+   "why": "LangChain may call `_stream` directly (e.g. when `.stream()` is used, or when `stream_usage`/callbacks trigger streaming, or when the caller invokes `.stream()` on the bound runnable). The new retry/empty-reply/deadline logic lives only in `_generate`, so any streaming path not going through `_generate` gets the client's `max_retries=0` and no deadline enforcement. This is an incomplete contract: D-030 rules are not enforced for streamed invocations."
+  },
+  {
+   "file": "src/review_agents/models.py",
+   "line_start": 130,
+   "line_end": 136,
+   "severity": "important",
+   "title": "`stream_usage=True` combined with the stream wrapper drops `usage_metadata` from the final chunk?",
+   "why": "`generate_from_stream` aggregates chunks into a ChatResult; `stream_usage=True` adds usage to the last chunk's `message.usage_metadata`. But then `_attempt` overwrites `result.llm_output = {'model_name': ...}`, replacing whatever `llm_output` the aggregation produced (which may include `token_usage`). If `ChatOpenAI`'s aggregation puts usage into `llm_output` rather than per-message metadata, the usage meter (which reads `llm_output`?) would see no tokens. Test asserts usage is recorded via `stream_usage`, but the overwrite may regress the non-streaming path (`super()._generate` returns llm_output with token_usage) — because the overwrite runs only in the streaming branch. Still, `result.llm_output` clobbering is risky: if aggregation placed curated data there, it's lost. The usage meter must be verified to read `message.usage_metadata`, not `llm_output`."
+  },
+  {
+   "file": "src/review_agents/models.py",
+   "line_start": 140,
+   "line_end": 172,
+   "severity": "important",
+   "title": "Retry loop retries `APIStatusError` with 429/5xx indefinitely but propagates `retry_wait` `None` from `ValueError`-on-retry-after incorrectly",
+   "why": "In `retry_wait`, for `APIStatusError`, if `_retry_after` returns a parsed value, it returns it. If `_retry_after` returns None (bad header/date), it falls out of the `elif isinstance(error, APIStatusError)` block — but the code structure: the `if asked is not None: return ...` then falls through to the backoff computation at the bottom, good. Not a bug. However `_retry_after` catches only `ValueError`; `float(str(value))` on 'NaN'/'inf' returns nan/inf, `max(0.0, nan)` = 0.0? Actually `max(0.0, nan)` returns nan in some Python versions ordering (nan comparisons false -> max returns first arg 0.0). Inf returns inf, then `min(inf, 30)` = 30, okay. Not fatal."
+  },
+  {
+   "file": "src/review_agents/models.py",
+   "line_start": 129,
+   "line_end": 138,
+   "severity": "nit",
+   "title": "`openai.APIConnectionError` includes `APITimeoutError`; treating all as retryable is fine, but `openai.APIStatusError` branch ordering shadows `APIConnectionError` only if status error isn't a connection error — okay",
+   "why": "No bug; noted for completeness."
+  },
+  {
+   "file": "Dockerfile",
+   "line_start": 24,
+   "line_end": 27,
+   "severity": "important",
+   "title": "Installing `apt` as a runtime package pulls in extra attack surface and may downgrade/upgrade in unpredictable ways",
+   "why": "Naming `apt` explicitly in `apt-get install` requests the `apt` package. The comment claims it installs a security fix (CVE-2026-109518) released after the base image. But `apt-get upgrade` is the proper way to get a newer `apt`; `apt-get install apt` will install/keep whatever version is in the current index, which after `apt-get update` is the latest — actually this does upgrade apt. However, pulling in `apt` (already present in base) is fine, but the comment's CVE rationale: if the fix is in `apt`, this works; if it's in a dependency (`libapt-pkg`), installing `apt` upgrades deps too. The real risk: this Dockerfile now depends on a specific CVE fix being present in the Debian index at build time, and `--no-install-recommends` doesn't prevent dependency upgrades. Not a bug per se, but the check performed is fragile. Also hadolint DL3008 ignore is now broader: it suppresses pinning warnings for `git` too. Minor."
+  },
+  {
+   "file": "tests/test_models.py",
+   "line_start": 337,
+   "line_end": 351,
+   "severity": "nit",
+   "title": "Test asserts exact number of requests with a real server thread; race-y under load",
+   "why": "Timing-based tests (silence=1.0, idle=0.3) are flaky on slow CI: the fake service writes to a socket whose peer (client) may have timed out; BrokenPipe handling is present. Not a product bug; skip per instructions (style/test flake is not requested)."
+  }
+ ],
+ "content": null,
+ "error": null
+}

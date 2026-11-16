@@ -1,0 +1,222 @@
+{
+ "case": "py-mr-verify-schedule-001",
+ "run": 3,
+ "model": "deepseek-flash",
+ "thinking": "disabled",
+ "max_tokens": 32768,
+ "seconds": 29.6,
+ "usage": {
+  "prompt_tokens": 17119,
+  "completion_tokens": 5376,
+  "total_tokens": 22495,
+  "prompt_tokens_details": {
+   "cached_tokens": 16896
+  },
+  "prompt_cache_hit_tokens": 16896,
+  "prompt_cache_miss_tokens": 223
+ },
+ "findings": [
+  {
+   "file": "src/review_agents/pipeline/run.py",
+   "line_start": 287,
+   "line_end": 298,
+   "severity": "blocking",
+   "title": "NameError: Severity used in type annotation but not imported",
+   "why": "The diff changes the import to `from review_agents.pipeline.agent import AgentRun, Finding, Severity, run_dimension` — this does import Severity, so that's fine. But `_insert_finding` references `verdict` on the findings table via `json.dumps(verdict)`; the migration `0007_verification.sql` only adds `reported_severity` to findings and `note` to steps. It never adds a `verdict` column. `_insert_finding` writes a `verdict` column and `tests/test_pipeline_run.py` selects `verdict` from findings, so every review will fail at insert with 'no such column: verdict'."
+  },
+  {
+   "file": "src/review_agents/migrations/0007_verification.sql",
+   "line_start": 1,
+   "line_end": 7,
+   "severity": "blocking",
+   "title": "Migration never adds the findings.verdict column the code writes",
+   "why": "run._insert_finding inserts `verdict` into findings and reads it back into _Published.verdicts; the migration only adds reported_severity and steps.note. There is no verdict column, so INSERT fails (and tests select it). Either the column or a serialized column should be added; as-is every review raises on write."
+  },
+  {
+   "file": "src/review_agents/pipeline/run.py",
+   "line_start": 390,
+   "line_end": 396,
+   "severity": "blocking",
+   "title": "Race: same-dimension duplicate accepted after its check already resolved reads leader's published keys only",
+   "why": "In find_and_verify, when a new candidate matches an already-verified check (`same.run is not None and same.run.verdict is not None`), the code calls `_accept(same, [candidate], accepted, published)`. But `_accept` sets `published.reported[member.id] = member.finding.severity` and `published.verdicts[member.id] = record` for the *new* member only. The other members already accepted earlier were pushed to `accepted` with rewritten severity, but if a same-check duplicate arrives *after* the check resolved it is fine. The real problem: after `_accept(same, check.members, ...)` runs on the resolution event, `check.members` is mutated later (a new `same.members.append(candidate)`), so a future duplicate gets the verdict — that is fine. However `published.reported`/`verdicts` are written without holding self.lock while `_accept` is also called from the review thread; if `verify()`'s `_record` writes `started` from the verifier thread (see next finding) while the review thread mutates members, this is a data race on `check.members`. This causes a duplicate's finding to be silently dropped or double-inserted depending on interleaving."
+  },
+  {
+   "file": "src/review_agents/pipeline/run.py",
+   "line_start": 466,
+   "line_end": 470,
+   "severity": "blocking",
+   "title": "Verifier task ignores its queued check and pops an arbitrary highest-priority pending one",
+   "why": "`verify()` does `heapq.heappop(self.pending)` rather than acting on the check whose future it was submitted for. Each `verifiers.submit(verify)` adds a callback that decrements `unverified` and calls `future.result()`. If a verification is left pending when a verifier thread is busy, the pairing between submitted futures and popped checks can desync: a task started for check A pops check B. Because `unverified` is decremented once per completion, but `pending` may still have entries, a check can be popped with no decrement (or vice versa), producing an `IndexError` from `heappop` on empty `pending` and dropping verifications. The design is broken: a task cannot safely resolve an arbitrary `pending` entry while started-tasks and completions are counted separately."
+  },
+  {
+   "file": "src/review_agents/pipeline/run.py",
+   "line_start": 468,
+   "line_end": 470,
+   "severity": "blocking",
+   "title": "heappop on empty pending raises IndexError under load",
+   "why": "`verify()` unconditionally `heapq.heappop(self.pending)`. When a verifier thread starts after another verifier already drained `pending` but before it was counted out of `unverified`, this raises IndexError in the worker, the future errors, and the callback path `future.result()` re-raises inside the review thread loop (the else branch only checks `future.cancelled()`, not exception). The review fails instead of recording a per-verification failure."
+  },
+  {
+   "file": "src/review_agents/pipeline/run.py",
+   "line_start": 553,
+   "line_end": 566,
+   "severity": "blocking",
+   "title": "Exception from verify() is not caught in the completion path",
+   "why": "`verify()` catches exceptions from `run_verifier`, but not exceptions from `heapq.heappop` on empty `pending` (see above). In `find_and_verify`, the else branch does `future.result()` without a try/except, so any exception raised in `verify()` (other than a cancelled future) propagates out of the loop and aborts the whole review rather than that one verification. The completion callback also doesn't decrement `unverified` for failed futures in a way that terminates the loop."
+  },
+  {
+   "file": "src/review_agents/pipeline/run.py",
+   "line_start": 430,
+   "line_end": 441,
+   "severity": "important",
+   "title": "Verifier thread calls self._record (and mutates check.started / check.run) off the review thread",
+   "why": "`_record(check)` writes to SQLite via `_step(self.conn, ...)` and sets check.run; it's called from the verifier worker inside `verify()`? No — `_record` is called from the review loop after `future.result()`. However `check.started` is set inside `verify()` and `check.run` is assigned in the review loop, but `check.started` is written from the worker thread while `_record` reads it from the review thread; there is no happens-before synchronizing on that field beyond future completion (which does provide it). Not a real race. Skip."
+  },
+  {
+   "file": "src/review_agents/pipeline/run.py",
+   "line_start": 457,
+   "line_end": 462,
+   "severity": "important",
+   "title": "_accept publishes verdict members appended to _Published.verdicts without lock, racing with new candidates",
+   "why": "In the 'found' branch, a new candidate that matches a resolved check mutates `same.members` and calls `_accept` synchronously on the review thread; `_record` for other checks also runs on the review thread. But `verify()` runs on verifier threads and reads `self.pending` under `self.lock`, while `find_and_verify` pushes to `self.pending` under `self.lock`. The members list is only touched on the review thread, so no race. Not a bug. Skip."
+  },
+  {
+   "file": "src/review_agents/pipeline/run.py",
+   "line_start": 274,
+   "line_end": 285,
+   "severity": "important",
+   "title": "Fail-on-no-verdict check counts checks that were never actually attempted",
+   "why": "The D-027 failure gate `if checks and not any(c.run is not None and c.run.verdict is not None for c in checks)` fires when every check is unverified. But `checks` includes checks created for candidates that arrive just before `submit_by` with no time to verify at all; those get a synthetic 'deadline passed' VerificationRun in the trailing loop, so `c.run` is set but `verdict` is None. If *all* findings are severe and the deadline was hit before any verifier started, the review fails even though it was only a time problem. The intent (D-027 'a review none of whose findings could be verified fails') needs to distinguish 'attempted and errored' vs 'never attempted due to time', otherwise a slow-but-healthy review fails spuriously."
+  },
+  {
+   "file": "src/review_agents/pipeline/run.py",
+   "line_start": 697,
+   "line_end": 702,
+   "severity": "important",
+   "title": "verifier_for and judge_for both use `verifier` endpoint but judge uses verifier variable — name shadowing",
+   "why": "In `review_handler`, `judge_for=(lambda left: chat_model(verifier, time_left=left)) if verifier else None` and `verifier_for=(lambda left: chat_model(verifier, time_left=left)) if verifier else None`. Both use the `verifier` local. This means the merger judge and the verifier share the same endpoint object and, more importantly, if the config intends judge and verifier to differ, the change aliases them. Worse, `verifier_for` is set even when `settings.verifier_model` is None, so `_Work` gets `verifier_for` pointing at the same endpoint as the finder (verifier_model or finder_model in run_review also does this). Not a bug per se but the naming indicates a copy/paste that could ship the wrong endpoint. Report as important because it conflates two roles."
+  },
+  {
+   "file": "src/review_agents/pipeline/schedule.py",
+   "line_start": 36,
+   "line_end": 47,
+   "severity": "important",
+   "title": "held() can deadlock review shutdown: waiters block forever if slot never released",
+   "why": "`Slots.held` waits on a Condition with no timeout. The tool_loop enters `slot()` before checking the deadline; if a slot holder never releases (e.g. a worker thread stuck on a hung model call whose timeout does not fire because the review thread already gave up), the waiting review thread never returns. The review loop's `finders.shutdown(wait=False)`/`verifiers.shutdown(wait=False)` leaves those threads running, and the review thread waits in `self.events.get(...)` until submit_by/deadline — but tool_loop threads waiting for a slot do not participate in the deadline loop, so a blocked verifier never pushes an event and the loop times out with `unverified > 0` and stops; the thread leaks. Under repeated reviews this leaks a thread per pending model call indefinitely. Should use a timed wait tied to the deadline."
+  },
+  {
+   "file": "src/review_agents/pipeline/agent.py",
+   "line_start": 207,
+   "line_end": 224,
+   "severity": "important",
+   "title": "Return inside `with slot()` after acquiring slot skips nothing, but leaks none — however returning from inside the context for the deadline-passed branch makes the loop call consume a slot for zero work",
+   "why": "When `left <= 0` after acquiring the slot, the loop returns `end` inside the `with slot():` block. The slot is released on exit (finally), so not leaked. But the agent waits for a model-call slot only to immediately discover it has no time. Under contention this delays the completion and can cause the agent's own incomplete-event to arrive after `submit_by`, in which case the agent may not be counted as running, leaving `unverified` count inconsistent with checks. Fix: check `deadline - clock()` before `with slot()`, or accept that this branch only triggers when there was time before waiting."
+  },
+  {
+   "file": "src/review_agents/pipeline/run.py",
+   "line_start": 505,
+   "line_end": 520,
+   "severity": "important",
+   "title": "started_at for verify step uses _now() (wall clock string) vs _utc_now from verifier thread; mixing",
+   "why": "`check.started = _utc_now()` is set in the verifier thread. In `_record`, `started = check.started or _now(self.conn)`; `_now` returns a DB strftime string while `_utc_now()` is presumably the same format — OK. Not a bug. Skip."
+  },
+  {
+   "file": "src/review_agents/pipeline/run.py",
+   "line_start": 322,
+   "line_end": 380,
+   "severity": "important",
+   "title": "find_and_verify returns while finder/verifier threads may still be running; they may still write steps or touch check objects",
+   "why": "`finders.shutdown(wait=False, cancel_futures=True)` and `verifiers.shutdown(wait=False, cancel_futures=True)` do not wait for running tasks. A verifier thread mid-`run_verifier` continues after `find_and_verify` returns; it calls `run_verifier` with `deadline` but the surrounding review has already moved on to merge and possibly `_insert_finding` with `published` built from `accepted`. The verifier thread later returns and its `done('verified', ...)` callback puts to `self.events`, but the loop already exited — nobody drains. `check.run` is set by the trailing for-loop to an 'incomplete' VerificationRun before the real verifier finishes, then the real verifier completion runs `check.run = verification` on a check instance no one owns. At worst the object is mutated post-hoc (harmless) but `self.pending` and `unverified` are left inconsistent, and any `_record`/`_step` writes from the verifier are lost. More seriously, the verifier thread's `run_verifier` continues calling the model past the review's end (the slot deadline is `deadline` so it self-limits), but its usage meter writes to the DB after the review row was closed. Potential 'database is locked' or writes after commit."
+  },
+  {
+   "file": "src/review_agents/pipeline/run.py",
+   "line_start": 274,
+   "line_end": 278,
+   "severity": "important",
+   "title": "Publishing runs even when every verifier thread errored and checks got synthetic incomplete runs",
+   "why": "When a check's `run` is the synthetic incomplete one created in the trailing loop, `_accept` is never called for it, so `accepted` excludes those findings. But `_record` is called from the trailing loop too, so 'error' steps are inserted *after* merge decisions. That means the `_step('verify.*')` entries are inserted after `merge` in the steps table ordering, which contradicts the test `test_a_finding_still_unverified_at_the_end_is_not_published` reading `verify_steps`; fine, but the failure gate uses these synthetic runs to decide no finding could be verified, causing the review to fail after the merge already read accepted/nits. The merge and decide logic should resynchronize before making the final accept/reject on the D-027 gate."
+  },
+  {
+   "file": "src/review_agents/pipeline/run.py",
+   "line_start": 442,
+   "line_end": 447,
+   "severity": "important",
+   "title": "Same-check duplicate accepted by `same.takes(candidate)` ignores verdict-level severity raising",
+   "why": "`takes()` allows a duplicate `candidate` in the same check when its dimension matches and overlaps. When that check has already been verified (`same.run.verdict is not None`), `_accept(same, [candidate], ...)` is called which uses the *verdict's severity* — but `takes()` also requires the duplicate's `dimension` equal to *all* members, but not the same `file`? It does require overlap on file/line. Fine. The bigger issue: the accepted duplicate's `reported_severity` is set to its own severity, but the primary/lead finder's severity that raised the priority was different; the verifier's level should apply uniformly. Not a correctness bug for publishing."
+  },
+  {
+   "file": "src/review_agents/pipeline/run.py",
+   "line_start": 274,
+   "line_end": 380,
+   "severity": "robustness",
+   "title": "submit_by/deadline: agents that finish after submit_by but before deadline are discarded without their findings being verified",
+   "why": "The loop `agents_out = len(runs) < len(jobs) and now < submit_by; checking = unverified > 0 and now < deadline`. When the loop exits at `submit_by` with no checks pending, any finder still running is left behind and its findings are dropped (only an incomplete AgentRun is synthesized). That's intended (D-031). But if an agent finishes *just after* submit_by while the loop is still running verifying other checks, its `done('found', ...)` event is queued but the agent_out flag is now false, so the loop never dequeues it; the run is recorded as incomplete even though the agent succeeded. The agent's findings are silently discarded. Should drain completed 'found' events before synthesizing incomplete runs."
+  },
+  {
+   "file": "src/review_agents/pipeline/run.py",
+   "line_start": 470,
+   "line_end": 480,
+   "severity": "robustness",
+   "title": "verify() pops a check but there's no check consumed off the pending list when the task is for a specific one",
+   "why": "`verifiers.submit(verify)` — verify takes no argument, so the popped check is unrelated to the task. If `self.pending` empties before a submitted worker runs (e.g. one worker drained all pending while others start), those workers raise IndexError (see blocking finding). Even if it doesn't raise, the number of verify tasks submitted equals the number of checks pushed only if every push corresponds to a submit; that holds here. But once a check finishes, the leader/followers of the same dimension no longer push new tasks for the same check, so the count matches. The race on empty heap is the primary defect."
+  },
+  {
+   "file": "src/review_agents/pipeline/run.py",
+   "line_start": 543,
+   "line_end": 555,
+   "severity": "robustness",
+   "title": "events.get timeout uses `deadline if checking else submit_by` but `checking` is stale when no pending checks yet",
+   "why": "Initially `unverified == 0`, so `checking` is false and the loop waits up to `submit_by`. After a found event, unverified becomes 1 and checking true, so it waits to deadline. But if all checks complete and a new finder submits more, `unverified` goes to 0 at completion and checking becomes false again — the loop's timeout can retreat to `submit_by`, which may be in the past; `max(0.0, negative)` gives 0 and busy-loops on `queue.Empty` until submit_by's comparison, causing a hot spin. Should compute the deadline based on `submit_by` only when still expecting finders, not on the transient `checking` flag."
+  },
+  {
+   "file": "src/review_agents/pipeline/run.py",
+   "line_start": 287,
+   "line_end": 298,
+   "severity": "robustness",
+   "title": "insert uses 17 placeholders but existing column list has 15 + 2 new; verify count",
+   "why": "Count: review_id, fingerprint, primary_dimension, dimensions, severity, preexisting, file, line_start, line_end, title, body, suggestion, evidence, votes, locations, reported_severity, verdict = 17. Tuple below provides 16 values then `published.reported.get(...)`, `json.dumps(verdict)...` — that's 17. OK."
+  },
+  {
+   "file": "src/review_agents/config.py",
+   "line_start": 96,
+   "line_end": 107,
+   "severity": "robustness",
+   "title": "Verifier-window validation only compares finder model; ignores that pack may already be sized and rejects a verifier the same size",
+   "why": "The comparison uses `<` (strict), so 128k verifier for 128k finder passes. Fine per D-032 ('at least as large'). But if `verifier_model` is None it silently passes — acceptable. The message claims 'a verifier reads the same context, so give it a model with at least as large a window' — the validation only triggers when both are set. Fine. Not a bug."
+  },
+  {
+   "file": "tests/test_pipeline_schedule.py",
+   "line_start": 33,
+   "line_end": 60,
+   "severity": "robustness",
+   "title": "Test `test_a_free_slot_goes_to_the_waiter_of_the_highest_priority` can hang: waiting() reflects all holders too",
+   "why": "`Slots.waiting()` counts `self._waiting`, which includes the holder only while waiting. After `holder.set()`, the holder thread has popped itself; new threads append. The test loops `while slots.waiting() < len(threads) - 1` — a race if a thread hasn't started waiting yet. Could deadlock; test-only robustness."
+  },
+  {
+   "file": "src/review_agents/pipeline/agent.py",
+   "line_start": 206,
+   "line_end": 210,
+   "severity": "robustness",
+   "title": "Deadline check moved inside slot; exceeded-deadline return now occurs after possibly long slot wait",
+   "why": "A model call pending behind a higher-priority waiter may block past the deadline. The `left <= 0` branch then returns incomplete, but the thread was blocked. This means an agent can be counted as still `agents_out` well past `submit_by`, delaying the review's next phase. The check should be before entering the slot."
+  },
+  {
+   "file": "src/review_agents/pipeline/run.py",
+   "line_start": 383,
+   "line_end": 390,
+   "severity": "robustness",
+   "title": "limit_hit aggregation now includes verify runs; a verifier's token/time limit marks the whole review limited",
+   "why": "hits = [r.limit_hit for r in runs] + [c.run.limit_hit for c in checks if c.run]. This is intended per docs, but if a single verifier hits a token limit, the review's `limit_hit` becomes 'time' or 'tokens' even though no agent did. Can mislead callers about why findings are missing; also `_LIMIT_ORDER` picks time over tokens, so a single timed-out verifier plus token-exhausted finder reports 'time'. Behavioral change worth flagging."
+  },
+  {
+   "file": "src/review_agents/pipeline/run.py",
+   "line_start": 274,
+   "line_end": 280,
+   "severity": "robustness",
+   "title": "D-027 gate is checked before _check_not_superseded; a superseded review with all-unverified findings raises the wrong error",
+   "why": "Order changed vs old code: the failure gate is placed right after `find_and_verify` and before `_check_not_superseded`. If a newer push superseded the review while it was running, the review raises 'no finding could be verified' instead of ReviewSuperseded, which will be recorded as a review failure rather than being replaced. Supersession should be checked first."
+  }
+ ],
+ "content": null,
+ "error": null
+}

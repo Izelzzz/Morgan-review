@@ -1,0 +1,377 @@
+{
+ "case": "py-mr-basis-001",
+ "run": 2,
+ "model": "deepseek-flash",
+ "thinking": "disabled",
+ "max_tokens": 32768,
+ "seconds": 49.4,
+ "usage": {
+  "prompt_tokens": 14967,
+  "completion_tokens": 8539,
+  "total_tokens": 23506,
+  "prompt_tokens_details": {
+   "cached_tokens": 14720
+  },
+  "prompt_cache_hit_tokens": 14720,
+  "prompt_cache_miss_tokens": 247
+ },
+ "findings": [
+  {
+   "file": "src/review_agents/api.py",
+   "line_start": 231,
+   "line_end": 231,
+   "severity": "important",
+   "title": "json.loads(f[\"basis\"]) will crash for rows where basis is NULL, but the migration sets DEFAULT '[]' with NOT NULL",
+   "why": "The migration is added as ALTER TABLE ... DEFAULT '[]' NOT NULL, so existing rows get '[]', but api.py assumes every row has a string. That's fine. However, the test in test_api_reviews inserts basis via json — OK. The real risk: `_insert_finding` writes `json.dumps([...])`, never NULL, so json.loads is safe. No bug here — but note the column DEFAULT matters only if some code path inserts without basis. Tests in test_context_pr and test_db omit basis, relying on DEFAULT. That's fine in SQLite only if the migration ran. Not a bug."
+  },
+  {
+   "file": "src/review_agents/pipeline/basis.py",
+   "line_start": 96,
+   "line_end": 122,
+   "severity": "important",
+   "title": "_find computes wrong line numbers when trailing empty lines or partial-line matches occur",
+   "why": "The `at` offset is a position in the squashed-joined text. If `at` equals the exact end of the concatenated string (e.g. a quote matching a suffix), `at + len(...)-1` bisects to last. More significantly, when a quote spans only part of a line but the matched text starts mid-line, bisect_right on starts is correct, but the computed `last` can exceed the number of lines when the quote is whitespace-collapsed and the last part is empty. Also if a line is entirely whitespace, `_squash(line)` returns ''. These empty parts still increment starts by 1 (len('') + 1), so positions map back correctly. The real risk: bisect_right on starts with a position exactly equal to a subsequent start returns the next line — off-by-one for a quote starting exactly at a line boundary that the accumulated offset coincidentally hits. This produces incorrect 'corrected' line numbers reported back to the verifier."
+  },
+  {
+   "file": "src/review_agents/pipeline/basis.py",
+   "line_start": 96,
+   "line_end": 122,
+   "severity": "robustness",
+   "title": "_find line computation is off when quote starts at position 0 of a non-first line",
+   "why": "`starts` holds cumulative lengths including the +1 separator. A position `at` equal to the start of line k is `starts[k]`. `bisect_right(starts, at)` returns k (since starts[k] == at, bisect_right returns k+1 actually since it returns insertion point after equal). Let's trace: starts = [0, len0+1, ...]. If at == starts[1], bisect_right returns 2, meaning 'first = 2' — line 2, 1-based. But starts[1] corresponds to line 2 (0-indexed line 1), which is 1-based line 2. Correct. However for `at == 0` corresponding to line 1, bisect_right(starts, 0) returns 1 — 1-based line 1. Correct. The concern is whether the trailing separator gives a false hit when a quote starts at the very end of a line's squashed content and the next line contributes its first char. Since each part is separated by exactly one space and quotes are squashed the same way, the offsets align. No confirmed bug — but `last = bisect_right(starts, at + len - 1)` when the last char position lands exactly on a separator space (which is a synthetic space between lines) gives an over-count. E.g., a quote whose last character is the last char of line k has position = starts[k] + len(part_k) - 1; bisect_right(starts, that) returns k+1 → last = k+1 (1-based line k). OK. But if the quote ends exactly on the synthetic space, that space never is part of the squashed quote because _squash and the join both insert single spaces consistently. Acceptable."
+  },
+  {
+   "file": "src/review_agents/pipeline/basis.py",
+   "line_start": 130,
+   "line_end": 136,
+   "severity": "important",
+   "title": "_place_problem accepts line_end before line_start silently for path? No, it checks. But it does not bound line_start >= 1 by policy if model passes 0 — pydantic Field(ge=1) enforces.",
+   "why": "Place validates line_start and line_end >= 1 via Field. _place_problem also checks line_end < line_start. But the check runs only when kind has places, which is min_length=1. For 'path' kind with a single step whose line_end==line_start is fine. No bug; just verifying."
+  },
+  {
+   "file": "src/review_agents/pipeline/basis.py",
+   "line_start": 160,
+   "line_end": 190,
+   "severity": "important",
+   "title": "_source_problem may raise ToolTimeoutError caught only by check_basis, but the loop in check_basis iterates places first and could raise there — it does catch ToolTimeoutError around the whole block, good.",
+   "why": "OK."
+  },
+  {
+   "file": "src/review_agents/pipeline/basis.py",
+   "line_start": 155,
+   "line_end": 190,
+   "severity": "important",
+   "title": "Quote search across PR/issues uses squashed substring match, which allows quotes that span concatenated unrelated text and also allows the whole 300-char limit exceeded after squash to still match — validation is on raw quote length, not squashed",
+   "why": "A model could submit a quote within 300 chars whose squashed form contains only whitespace differences and matches. More critically, `_squash` on PR/issue means a quote with any whitespace layout in the description matches, which is intended. But it also means a 300-char quote with lots of whitespace can match hundreds of chars in source, effectively bypassing the 'sentence or a few lines' intent. Low risk."
+  },
+  {
+   "file": "src/review_agents/pipeline/basis.py",
+   "line_start": 195,
+   "line_end": 200,
+   "severity": "blocking",
+   "title": "check_basis sets basis.check but the model validator permits a model-supplied check; SkipJsonSchema only hides it from the schema, it does not prevent the model from setting it",
+   "why": "The comment says 'a model's value is replaced', but `check` is a regular field with a value from the model if provided. `check_basis` overwrites it, so the final value is fine. The test `test_a_model_cannot_mark_its_own_basis_as_checked` confirms it's replaced. Not a bug — but note SkipJsonSchema[Check | None] does not add a validation that blocks model input; only omission from JSON schema for the model's tool use. Since check_basis always overwrites, OK."
+  },
+  {
+   "file": "src/review_agents/pipeline/merge.py",
+   "line_start": 141,
+   "line_end": 145,
+   "severity": "important",
+   "title": "sort key ranks by count of checked-out bases then by total explanation length, but for unverified (quick) findings check may be None if any path only reaches run through verifying routing — actually check is set in agent.py always",
+   "why": "Not a bug — check is always set by run_dimension."
+  },
+  {
+   "file": "src/review_agents/pipeline/run.py",
+   "line_start": 605,
+   "line_end": 620,
+   "severity": "blocking",
+   "title": "Quick-mode publish filter runs on every candidate but the same candidate could be published multiple times if merge assigns overlapping groups — no, one candidate, one finding.",
+   "why": "Not a bug."
+  },
+  {
+   "file": "src/review_agents/pipeline/run.py",
+   "line_start": 605,
+   "line_end": 620,
+   "severity": "important",
+   "title": "self._publishable_unverified writes one 'basis.N' step per dropped finding; concurrent or retried runs could collide on step name; also increments self.dropped across all dimensions",
+   "why": "If the review is retried/replayed, `steps` may already contain 'basis.1'; `_step` likely upsert (unknown), but the counter is per-_Work instance so restarts may reuse numbers. Check `_step` semantics — if it inserts and the column is unique on (review_id, step), a replay would fail with IntegrityError. If it uses INSERT OR REPLACE, the note is fine. The dropped counter also means order-of-completion determines which finding gets which step number — non-deterministic, minor. The bigger issue: a candidate dropped here still got an id and could have been referenced in `published.reported` elsewhere if merge already ran — but filtering happens before merge candidate processing. Need to verify `_candidates` was already called and this candidate is excluded from `accepted`, so downstream insertion is not done. Skipped findings never reach the verifier nor published.reported, so calls lookup by id would KeyError? Check `_insert_finding` reads `published.reported.get(...)` with get. OK. Not blocking."
+  },
+  {
+   "file": "src/review_agents/pipeline/run.py",
+   "line_start": 605,
+   "line_end": 620,
+   "severity": "important",
+   "title": "In quick mode, dropped important findings never get published.reported set, but the merging/judge may have already merged other candidates into this one; if this candidate was a lead, the merged group is lost",
+   "why": "The filter runs inside the loop over candidates after merge. If `candidate` here is the merged lead and it is dropped for lacking a basis, other candidates merged into it are also dropped. Worse: if the merged lead comes from a different finding (per _lead rule) whose bases do not check out, but a member's bases did, that's not the case since _lead picks best-argued = most checked-out bases; still, a merged lead can lack 'ok' — e.g., all members only have failed bases. Then the whole merged problem is silently dropped in quick mode even though it was reported as important by multiple dimensions. That's an intentional policy but the drop is only on the lead's bases, not the merged whole; acceptable per spec but worth flagging: `supported` checks the lead's finding, which was chosen for having most checked-out bases — so a member with a checked basis would win as lead. Reasonable."
+  },
+  {
+   "file": "src/review_agents/pipeline/run.py",
+   "line_start": 605,
+   "line_end": 620,
+   "severity": "important",
+   "title": "self.dropped and the 'basis.N' step are written before the finding is confirmed absent from the DB; a concurrent write for the same review could produce the same step id, or the note may be lost",
+   "why": "`_step` uses `_now(self.conn)` inline. Two concurrent _Work instances for the same review_id would both start dropped at 1 and both write 'basis.1'. If _step is INSERT OR REPLACE, one overwrites the other; otherwise IntegrityError. The stated findings table stores bases; the drop note is admin-visible so losing a note is correctness-visible. Also `dropped` is never reset per dimension — if two dimensions each drop their first finding, both get numbered basis.1 and basis.2 — but order of execution decides which. Non-deterministic: the 'basis.1' note could refer to a different finding across runs. This is a real non-determinism/data-integrity concern."
+  },
+  {
+   "file": "src/review_agents/pipeline/run.py",
+   "line_start": 206,
+   "line_end": 212,
+   "severity": "important",
+   "title": "json.dumps(b.model_dump()) serializes the check field including any problem string; Pydantic model_dump on Check with status Literal is fine, but SkipJsonSchema[Check|None] returns the Check model or None — model_dump of list[Basis] recursively serializes; if check is None (verifier path?), it becomes null",
+   "why": "In normal flow every basis has check set by run_dimension. But if any basis somehow reaches _insert_finding without a check (e.g., from a code path that constructs Finding with a basis directly), json.dumps handles None as null. api.py json.loads and diff still surfaces it. Not a bug, but the API contract now includes 'check' key — tests/schema may break. Consider field excluded via exclude. This is actually shown in test_pipeline_run: `stored['check'] == {'status':'ok','problem':None}` — so check is expected in DB. Fine."
+  },
+  {
+   "file": "src/review_agents/pipeline/agent.py",
+   "line_start": 343,
+   "line_end": 345,
+   "severity": "blocking",
+   "title": "check() no longer requires evidence for blocking/important; the only gating is now _publishable_unverified in quick mode. But in full (verifying) mode, a blocking/important finding with EMPTY basis is passed to the verifier and could be published if the verifier accepts it",
+   "why": "Previously check() rejected evidence-less blocking/important findings. Now check() has no such guard. In full mode, an unbased blocking finding goes to the verifier. The verifier may be lenient (or the LLM may accept it). The description says 'Every 🔴 / 🟡 needs at least one basis' and 'a finding the verifier cannot confirm does not hold' — this is defensible since the verifier sees 'basis: none given'. But it does shift a program-enforced guarantee to an LLM decision, and a buggy or overly lenient verifier can publish a blocking finding with literally no stated basis. That contradicts 'Every 🔴 / 🟡 needs at least one basis' as a hard contract; at minimum the verifier prompt should require at least one checked basis for 🔴/🟡. Currently VERIFY_TASK does not enforce this."
+  },
+  {
+   "file": "src/review_agents/pipeline/verify.py",
+   "line_start": 58,
+   "line_end": 62,
+   "severity": "important",
+   "title": "verifier prompt says 'where it says it could not confirm a basis, find the evidence yourself or the finding does not hold' but does not require that at least one basis be present for blocking/important",
+   "why": "Given check() dropped the evidence requirement, the verifier is the only gate for full-mode; nothing in the prompt instructs 'none given' to be a rejection for 🔴/🟡. A model can accept a finding with no basis. Strengthen the prompt or re-add a program check."
+  },
+  {
+   "file": "src/review_agents/pipeline/basis.py",
+   "line_start": 152,
+   "line_end": 155,
+   "severity": "robustness",
+   "title": "_LINES regex `^(.+?):(\\d+)(?:-(\\d+))?$` fails to match paths with colons on Windows or with trailing spaces; and `.+?` non-greedy could greedily consume only up to the first colon, so a filename with a colon in it like 'src/a:b.py:3' would parse path='src/a', range=3? No — `(.+?)` is non-greedy but must be followed by `:\\d+$`, so regex tries shortest; for 'src/a:b.py:5' the first ':' is inside 'a:b.py' and would need digits after it — 'b.py' isn't digits, so the regex backtracks and matches 'src/a:b.py' + 5. Actually `.+?` will extend until the rest matches; backtracking makes `.+?` become 'src/a:b.py'. Fine. But a path ending in digits like 'v1:3' — regex would treat 'v1' as path and 3 as line; if the file is literally 'v1:3'? Not typical. Minor."
+  },
+  {
+   "file": "src/review_agents/pipeline/basis.py",
+   "line_start": 173,
+   "line_end": 180,
+   "severity": "important",
+   "title": "A quote found at other lines: fixup compares `given_start <= start and end <= given_end`; if the model gave a line range where the quote is exactly within it, it is ok. But if the model gave only `file` (no lines), `lines_given` is None and it returns 'corrected' with the real lines — good. However if the quote appears in the file but the given range is a SUPERSET that also covers it partially — actually it returns 'ok' if quote lies strictly within; if only partially overlapping it returns 'corrected'. The corrected line range may be far from the model's original, silently rewriting the source to point elsewhere — this is fine for the verifier (which sees corrected lines). But if the same quote appears multiple times, `_find` returns the FIRST occurrence, which may not be the one the model meant; the 'correction' thus can point to the wrong place, misleading the verifier."
+  },
+  {
+   "file": "src/review_agents/pipeline/basis.py",
+   "line_start": 175,
+   "line_end": 180,
+   "severity": "important",
+   "title": "The corrected source replaces the original, so a duplicate quote elsewhere makes the model's intent silently change to the first occurrence — the verifier then checks the wrong lines",
+   "why": "Consequence: a model quotes a rule that appears in multiple places (e.g., both a spec and a changelog) and cites line 200; _find returns line 5; basis.source is rewritten to :5; the verifier inspects line 5 (a different context) and may confirm or deny based on the wrong rule. Combined with 'A quote found at other lines gets those lines' this is the intended feature, but it needs disambiguation or a failure (not a silent correction) when the quote appears more than once. Otherwise the verifier's decision is based on the wrong occurrence."
+  },
+  {
+   "file": "src/review_agents/pipeline/basis.py",
+   "line_start": 96,
+   "line_end": 122,
+   "severity": "robustness",
+   "title": "_find: continuous-length accumulation uses `length += len(part) + 1` even for the last line, so total is longer than the joined string by 1 per line. Positions `at` are in the joined string, not in this accumulated space — the last line's end offset in `starts` frames is `starts[-1] + len(parts[-1])` which does not equal the joined-string length. This is consistent because both sides use the same framing only for `starts`, but `at` comes from the joined-string `find`. Mismatch: The joined text length is sum(len(part)) + (n-1) spaces; starts[k] = sum of parts up to k-1 + k. For k = n-1 (last): starts[n-1] = (sum previous parts) + (n-1) = joined length - len(part_last) + (n-1) - (n-1) + ... let me recompute: for line i, starts[i] = sum_{j<i}(len(part_j) + 1) = (sum_{j<i} len) + i. In joined string, position of line i's first char = (sum_{j<i} len) + i (spaces contribute i). Match! Good — no bug."
+  },
+  {
+   "file": "src/review_agents/pipeline/basis.py",
+   "line_start": 130,
+   "line_end": 138,
+   "severity": "robustness",
+   "title": "_place_problem: line_end <= lines but line_start may exceed lines too; a place with line_start=5 but line_end=5 in a 3-line file: line_end(5) > lines(3) → return error. Good. But if line_start=5, line_end=4: caught by end<start. If line_start=4, line_end=5 in 3-line file: end>lines caught. OK. No bug."
+  },
+  {
+   "file": "src/review_agents/pipeline/basis.py",
+   "line_start": 155,
+   "line_end": 158,
+   "severity": "robustness",
+   "title": "PR/issue matching uses `in` on squashed strings, so a quote could be a substring of a larger word — e.g., 'refund' matches inside 'refunds'",
+   "why": "There's no word-boundary. A model quoting 'refund' would match 'refunds' — the check passes even though the exact quote is not present. The description says 'the quote is in its source'. Substring matching is technically consistent but misleading; especially for short quotes (single word) this effectively bypasses the check. Same applies to _find on files. A quote of 'API' matches 'RAPID'. Minor but real."
+  },
+  {
+   "file": "src/review_agents/pipeline/basis.py",
+   "line_start": 152,
+   "line_end": 158,
+   "severity": "important",
+   "title": "Model quotes free text from PR body; PR body is untrusted input from PR author, so a model can be induced to write a basis that 'checks out' by putting the quote in the PR description",
+   "why": "The whole design treats the PR description as a source of truth for spec bases. An attacker controlling the PR can add 'Freeze the account when refund fails' to the description and the model cites it as a spec; the program's check passes because the quote IS in the description. That turns the PR body into a self-validating source — a malicious PR can introduce any 'rule' into the review db as a checked spec basis. The verifier prompt relies on bases being claims from rules; PR-description quotes are not a stable contract. The description says PR description is a source intentionally, so maybe acceptable, but worth flagging: this makes the check gameable by the PR author."
+  },
+  {
+   "file": "src/review_agents/tools.py",
+   "line_start": 215,
+   "line_end": 218,
+   "severity": "robustness",
+   "title": "clean_path is called twice in text() — once in the except-block wrapper and once in RepoTools.text — and any ToolError from _git (permission etc.) is treated as 'not in commit', hiding real errors",
+   "why": "Broad `except (GitError, ToolError): return None` swallows any git error (e.g., not-a-repo, corrupt object) and reports the file as missing. That is semantically wrong: 'None means not there', but a repo error is not the file being absent. check_basis will then flag the basis as 'not in the reviewed commit' — a false negative that turns a real (undetected) failure into a misleading 'the file is absent'. Should distinguish 'missing object' from 'git error'."
+  },
+  {
+   "file": "src/review_agents/tools.py",
+   "line_start": 210,
+   "line_end": 218,
+   "severity": "important",
+   "title": "text() decodes with errors='replace', so a binary file silently produces a lossy string; a quote check on a binary file 'succeeds' against corruption-substituted text",
+   "why": "If a model quotes a spec from a file containing non-UTF-8 bytes, the comparison may pass or fail unpredictably. Additionally, decoding a huge file in memory (no size cap unlike issue_text) — a large file in the repo (e.g., a minified JS blob) is loaded fully into memory per basis. Performance/memory risk: one basis on a 100MB file allocates 200MB. text() should cap size."
+  },
+  {
+   "file": "src/review_agents/tools.py",
+   "line_start": 210,
+   "line_end": 218,
+   "severity": "important",
+   "title": "text() re-does clean_path even though Agents could never call it (it is not an agent tool) — but pack_sources wraps it with functools.cache; a lazy init call would be cached forever per run — OK.",
+   "why": "No bug—documenting the cache. functools.cache on tools.text is applied in pack_sources as `functools.cache(tools.text)`, but tools.text is a bound method; caching a bound method using `self` as key works because self is hashable (default id). If RepoTools is GC'd, no leak beyond run lifetime. Fine."
+  },
+  {
+   "file": "src/review_agents/pipeline/agent.py",
+   "line_start": 287,
+   "line_end": 296,
+   "severity": "important",
+   "title": "pack_sources uses functools.cache(tools.text) — but tools.text raises ToolTimeoutError; functools.cache does not cache exceptions, correct per comment. However caching an empty/missing (None) result persists: later a transient git error could return None and then be cached for the rest of the run, permanently reporting a file as missing even if it's readable",
+   "why": "If the first `text()` call for a path hits a GitError (not timeout) → text() returns None, which is cached. Subsequent basis checks see the file as missing. A transient error (lock contention, transient I/O) is frozen for the run. Worse: a file that is genuinely missing is fine, but any recovery is blocked. Since pack_sources says 'a timeout raises, so it is never remembered' — but a non-timeout GitError (returned as None) IS remembered. Should distinguish 'missing' (cacheable) from 'git error' (raise/do not cache)."
+  },
+  {
+   "file": "src/review_agents/migrations/0008_basis.sql",
+   "line_start": 3,
+   "line_end": 4,
+   "severity": "blocking",
+   "title": "ALTER TABLE DROP COLUMN evidence after ADD COLUMN basis — SQLite versions before 3.35 do not support DROP COLUMN; and existing tests/rows lose evidence with no migration of value into basis",
+   "why": "Dropping `evidence` is destructive; any evidence data in existing DBs is lost forever (no copy into basis). The migration also depends on SQLite >= 3.35. If the runtime's bundled SQLite is older (Python < 3.11 ships older sqlite often), migration fails. Verify minimum version or rewrite table. Also since NOT NULL DEFAULT '[]' on ADD COLUMN, existing rows get '[]' — losing all previous evidence; any user who had important findings now has baseless findings recorded with no record of previous rationale."
+  },
+  {
+   "file": "src/review_agents/migrations/0008_basis.sql",
+   "line_start": 3,
+   "line_end": 3,
+   "severity": "important",
+   "title": "CHECK (json_valid(basis)) only in the ADD COLUMN constraint — SQLite does not enforce CHECK on ADD COLUMN defaults consistently, and json_valid requires the JSON1 extension; if absent, every insert fails with 'no such function: json_valid'",
+   "why": "On SQLite builds without JSON1 (older or trimmed builds), the CHECK expression fails at insert time, breaking all finding writes. Standard Python sqlite3 includes JSON1, but it's not guaranteed in all deployment environments. Worth a startup check."
+  },
+  {
+   "file": "src/review_agents/api.py",
+   "line_start": 231,
+   "line_end": 231,
+   "severity": "important",
+   "title": "API now returns 'basis' but silently drops 'evidence' key — any external consumer relying on `evidence` gets KeyError; the schema change is not documented in the diff",
+   "why": "This is a breaking API change (evidence → basis). The description says 'the findings table stores them in place of evidence', but the HTTP API output shape is part of a contract. External consumers reading `finding['evidence']` will break. Request/response models aren't shown but the dict is returned directly."
+  },
+  {
+   "file": "src/review_agents/pipeline/merge.py",
+   "line_start": 275,
+   "line_end": 277,
+   "severity": "nit",
+   "title": "_describe now shows `why` instead of `evidence`; the judge loses the concrete traced path that evidence used to convey, so judge decisions are based on prose",
+   "why": "Previously the merge judge saw the path from caller to failure (evidence). Now it sees `why` which is a consequence statement. The judge's ability to decide 'same problem'/'same kind' degrades for path-based findings — it may merge two distinct problems that share prose, or fail to merge. Since the judge prompt has not been updated to walk basis/places, this is a functional regression in merge quality. At minimum include a summary of places/bases."
+  },
+  {
+   "file": "src/review_agents/pipeline/run.py",
+   "line_start": 605,
+   "line_end": 620,
+   "severity": "important",
+   "title": "Quick-mode filter counts dropped findings but does not record the finding body/suggestion, only the title and the problems — the user loses the details of what was dropped",
+   "why": "A user reading run steps sees only 'not published, no basis checked out: <title>: <reason>' — no file/line, no suggested fix. If the reviewer model was correct but had a formatting issue with the basis, the potentially actionable finding is completely lost. The description says it goes to the verifier — but in quick mode there is no verifier, so it is dropped with no recovery path. Users have no way to re-run just for that finding."
+  },
+  {
+   "file": "src/review_agents/pipeline/run.py",
+   "line_start": 605,
+   "line_end": 610,
+   "severity": "important",
+   "title": "Quick-mode dropping happens after candidate/merge processing but before verdict assignment; the accepted set excludes the dropped candidate, but if it was the only member of a merged group, the merge counts it as a dimension found, so the resulting merged finding may be attributed to fewer dimensions — but if _lead returned a dropped candidate while a member of the same group had a passing basis, the whole group is dropped",
+   "why": "Confirmed by _lead using checked_out filter to choose best lead: if at least one member has any checked basis, _lead picks that member (since -len(held) most negative wins). But if the winning member happens to be blocking with NO checked basis while another member has a checked basis — wait, _lead already prefers checked bases. So a merged group will be represented by its best-based member; if that member's check is only 'failed', all are failed. Then the whole group is dropped in quick mode. Fine, but note: the drop is per candidate not per merged group; you are looking at `candidate.finding` — which is `merged.finding` if candidate is a Merged. So the whole group is dropped — correct behavior but never reported as 'N dimensions agreed'; the note references only one title. Minor."
+  },
+  {
+   "file": "tests/test_context_pr.py",
+   "line_start": 267,
+   "line_end": 272,
+   "severity": "robustness",
+   "title": "Test insert omits basis — relies on the migration's DEFAULT '[]', but there is no setup connecting to a migrated DB in this fixture? If the fixture does not apply migrations, or if migrations were relocated, this test breaks.",
+   "why": "Assuming the fixture applies migrations, fine. If a future migration changes basis to NOT NULL without default, breakage. Just noting dependency."
+  },
+  {
+   "file": "tests/test_db.py",
+   "line_start": 100,
+   "line_end": 103,
+   "severity": "nit",
+   "title": "Insert column list dropped 'evidence' — ok, but basis omission relies on DEFAULT; the test asserts a CHECK violation (severity) before basis constraints would apply, so it doesn't exercise basis defaulting",
+   "why": "Not a bug, just noting the test no longer verifies evidence-related integrity."
+  },
+  {
+   "file": "src/review_agents/pipeline/basis.py",
+   "line_start": 96,
+   "line_end": 122,
+   "severity": "robustness",
+   "title": "_find searches whole-file squashed content each time; for a large file and multiple basis, this is O(n*m) — a cheap find, acceptable",
+   "why": "Not a bug."
+  },
+  {
+   "file": "src/review_agents/pipeline/basis.py",
+   "line_start": 178,
+   "line_end": 179,
+   "severity": "important",
+   "title": "The 'corrected' basis still uses the model-provided `places` unchanged; only `source` is corrected. The verifier checks whether the code at `places` breaks the rule quoted from the corrected source. That is fine, but if the model gave a wrong source range and got corrected to a different rule occurrence, its explanation may reference the wrong rule; the verifier must reconcile.",
+   "why": "Not blocking, just exposure."
+  },
+  {
+   "file": "src/review_agents/pipeline/basis.py",
+   "line_start": 130,
+   "line_end": 138,
+   "severity": "robustness",
+   "title": "Place._as_git_spells_it runs clean_path at validation; for a model-supplied path with ToolError, pydantic raises ValidationError which is caught where? agent.run_dimension catches ToolError but not pydantic ValidationError. If clean_path rejects e.g. absolute paths, the entire Finding fails to parse and the whole submit is dropped, not just that basis.",
+   "why": "The model cannot easily produce an invalid path because Finding validation happens at Submit parse time — one bad Place kills the whole Submit (all findings). Before this change, a single bad path only risked one finding. Worth noting: whole-submission failure is a blunter failure mode than the old evidence-string validation."
+  },
+  {
+   "file": "src/review_agents/pipeline/agent.py",
+   "line_start": 76,
+   "line_end": 80,
+   "severity": "important",
+   "title": "Finding.basis list of Basis with min_length=1 on places and model validators means the tool schema now rejects a whole submit if the model writes one malformed basis; rapid loss of all findings",
+   "why": "See above. Should consider per-finding fallback — but the pydantic-in-submit contract means parse failure loses everything. Not newly introduced by this PR? Previously a bad evidence was just a string; now a bad basis (wrong kind/quote/source shape) fails the submit. This materially increases the rate at which entire submits are lost, since the model is now required to produce a structured object matching a schema and a validator. In the D-036 design, per-basis failures should be soft (failed check), but shape errors are hard. This means a new class of 'nothing got through' runs."
+  },
+  {
+   "file": "src/review_agents/pipeline/merge.py",
+   "line_start": 140,
+   "line_end": 145,
+   "severity": "robustness",
+   "title": "argued = sum(len(b.explanation) for b in held) — only COUNTS held bases' explanation lengths; a candidate with one checked basis of a long explanation beats a candidate with two shorter checked bases. Previously evidence length used the whole evidence, so a similar preference. Fine, but the metric shifts weight from number of bases to total prose length; a verbose unchecked base is excluded. Fine."
+  },
+  {
+   "file": "src/review_agents/skills/_shared.md",
+   "line_start": 35,
+   "line_end": 49,
+   "severity": "important",
+   "title": "Shared rules tell the model to quote 'exactly as written in its source' but for a `pr` source the model cannot see the full PR description unless tools expose it — the pack's pr_text is available to the dimension agent via request.title+body but only as part of context; if the PR body is truncated in the context, the model quote may be from a truncated portion; the check uses the full body and passes. Conversely if the model quotes something from the title+body joined with '\\n\\n' it may be mismatched. Minor.",
+   "why": "Not blocking."
+  },
+  {
+   "file": "src/review_agents/skills/_shared.md",
+   "line_start": 43,
+   "line_end": 45,
+   "severity": "important",
+   "title": "'A source is a file in the reviewed commit with its line range (path:start-end) ...' — the program accepts `path` without a range and will correct; rules say with its line range but the parser tolerates. Fine.",
+   "why": "Not blocking."
+  },
+  {
+   "file": "src/review_agents/skills/_shared.md",
+   "line_start": 47,
+   "line_end": 47,
+   "severity": "important",
+   "title": "The rule 'Quote at most 300 characters, exactly as written: the program checks that every file and line range exists and that the quoted text is there' — but the fixup allows the quote to appear elsewhere and rewrites source silently; the model is told line ranges are 'checked' which may lead it to trust given lines",
+   "why": "Not blocking, informative."
+  },
+  {
+   "file": "src/review_agents/pipeline/agent.py",
+   "line_start": 343,
+   "line_end": 346,
+   "severity": "robustness",
+   "title": "check_basis is called BEFORE check(item, line_count); if check_basis raises on an unexpected exception (e.g., a malformed source with e.g. \\ud800 surrogate decoded), the whole item is not dropped and the pipeline may crash",
+   "why": "The except only catches ToolTimeoutError inside check_basis. Other exceptions (e.g., a `ValueError` from int() on huge digit strings, or a decode error in text) propagate out of run_dimension and fail the run. text() uses errors='replace', so decode is safe; _ISSUE and _LINES parse with int() safe; clean_path is guarded. OK, no bug."
+  },
+  {
+   "file": "src/review_agents/pipeline/basis.py",
+   "line_start": 152,
+   "line_end": 163,
+   "severity": "robustness",
+   "title": "If basis.source is a path that happens to look like a PR alias (e.g., a real file named 'pr'), it is matched by _PR and treated as PR description instead; likewise a file named 'description' or 'pull request'. The model may have intended a file 'pr' (a file named 'pr' with no extension is unusual but possible).",
+   "why": "Minor collision. Not blocking."
+  },
+  {
+   "file": "src/review_agents/pipeline/basis.py",
+   "line_start": 163,
+   "line_end": 168,
+   "severity": "important",
+   "title": "sources.issues is a Mapping[int, str] with dict(pack.pr.issues); pack.pr.issues may include the PR itself as an issue number? If the PR body is in a linked issue it is fine, but if pack.pr.issues maps an issue that duplicates the PR (same content) it is still fine.",
+   "why": "Not blocking."
+  }
+ ],
+ "content": null,
+ "error": null
+}

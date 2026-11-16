@@ -1,0 +1,29 @@
+{
+ "case": "py-mr-mirror-tools-001",
+ "run": 1,
+ "model": "deepseek-flash",
+ "thinking": "disabled",
+ "seconds": 2.0,
+ "usage": {
+  "prompt_tokens": 9775,
+  "completion_tokens": 156,
+  "total_tokens": 9931,
+  "prompt_tokens_details": {
+   "cached_tokens": 0
+  },
+  "prompt_cache_hit_tokens": 0,
+  "prompt_cache_miss_tokens": 9775
+ },
+ "findings": [
+  {
+   "file": "src/review_agents/tools.py",
+   "line_start": 152,
+   "line_end": 152,
+   "severity": "blocking",
+   "title": "ls-tree -l's size column breaks for tree entries with a leading dash",
+   "why": "For tree entries git ls-tree -l emits '-' in the size column and ls-tree actually prints size only for blobs; using `{size:>8}` on the string would work but the earlier parse `_, kind, _, size = meta.split()` assumes 4 fields — actually meta has 4 fields so that's fine. The real issue is that sizes for tree entries are the literal '-' string, which still formats. Reconsider."
+  }
+ ],
+ "content": null,
+ "error": null
+}

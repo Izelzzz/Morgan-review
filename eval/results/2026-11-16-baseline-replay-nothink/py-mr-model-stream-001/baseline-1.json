@@ -1,0 +1,149 @@
+{
+ "case": "py-mr-model-stream-001",
+ "run": 1,
+ "model": "deepseek-flash",
+ "thinking": "disabled",
+ "seconds": 24.3,
+ "usage": {
+  "prompt_tokens": 9806,
+  "completion_tokens": 3947,
+  "total_tokens": 13753,
+  "prompt_tokens_details": {
+   "cached_tokens": 0
+  },
+  "prompt_cache_hit_tokens": 0,
+  "prompt_cache_miss_tokens": 9806
+ },
+ "findings": [
+  {
+   "file": "src/review_agents/models.py",
+   "line_start": 133,
+   "line_end": 155,
+   "severity": "blocking",
+   "title": "_within_deadline leaves the timed-out attempt thread running, overlapping retries and dirtying state",
+   "why": "The worker thread can't be killed; the code sets `cancelled` and raises DeadlinePassedError, but the abandoned thread is still iterating the underlying LangChain `_stream` generator and will keep calling `run_manager.on_llm_new_token` callbacks (the UsageMeter) for pieces arriving until the read timeout. In a concurrent partial failure it is also possible for subsequent code to overlap. Worse, since `_generate` raises DeadlinePassedError directly, the underlying stream is never closed by the abandoned thread until the next piece or its read timeout, so a slow trickle can keep a daemon thread alive past the deadline and leak for a long time. The 'given-up attempt stops reading at its next piece' comment is wrong for the immediate case: the loop blocks on `for piece in stream` until a piece arrives, so the worker thread lives until the read timeout."
+  },
+  {
+   "file": "src/review_agents/models.py",
+   "line_start": 428,
+   "line_end": 432,
+   "severity": "blocking",
+   "title": "Non-streaming path has no deadline enforcement and ignores time_left",
+   "why": "When `stream_replies` is False, `_attempt` calls `super()._generate(...)` inside `_within_deadline`, so the deadline does bound it via the worker thread. However, the httpx2 read timeout is set to `min(WHOLE_REPLY_SECONDS, time_left)`, and `time_left` here has already been passed as the total deadline; when `time_left < 0.001`, `wait` is clamped to 0.001 s, making every call time out immediately. But more importantly the non-streaming path derives `wait` from `time_left` per call with no division, so a whole reply that could take up to 120 s is limited to whatever is left at that turn — acceptable — but combined with the clamp a zero/near-zero remainder silently yields a 1 ms timeout instead of a clear DeadlinePassedError."
+  },
+  {
+   "file": "src/review_agents/models.py",
+   "line_start": 158,
+   "line_end": 175,
+   "severity": "blocking",
+   "title": "Retry loop consumes budget from a thread that may still be writing usage; Error object re-raised loses DeadlinePassedError semantics",
+   "why": "When an attempt raises a retryable error while another abandoned worker thread from a previous `_within_deadline` timeout is still alive, the new attempt starts a second stream concurrently on the same client for the same run_manager, so the UsageMeter records tokens from both and callback ordering breaks. Additionally `_within_deadline` re-raises outcome['error'], so if that error is a BaseException (KeyboardInterrupt, etc.) it is re-raised from a plain dict lookup losing the original traceback context in some cases; more concretely a `DeadlinePassedError` raised in the worker is indistinguishable from the local one, but any non-Exception BaseException is swallowed into the dict and re-raised only after join completes."
+  },
+  {
+   "file": "src/review_agents/models.py",
+   "line_start": 167,
+   "line_end": 178,
+   "severity": "important",
+   "title": "_check_not_empty only inspects the first generation and misses empty tool-call-only semantics",
+   "why": "The loop iterates generations but the emptiness condition requires `not message.content and not message.tool_calls`. A message with empty text but a finish_reason of stop and no tool_calls raises retryable=True; however a streamed message where content is `''` and tool_calls is `[]` with finish_reason 'tool_calls' or None will be retried spuriously. Also, `EmptyReplyError` from a non-final agent turn legitimately with zero content but a final `submit` tool call is fine, but a final turn that only emitted `finish_reason=None` (heartbeat-only stall that closed cleanly) is retried, which is desired; the real defect is that EmptyReplyError is raised but `_generate` only marks it retryable, and on a non-streaming path `message.response_metadata` may be absent on the AIMessage if the service omitted it, causing AttributeError inside _check_not_empty (unhandled, aborting the call)."
+  },
+  {
+   "file": "src/review_agents/models.py",
+   "line_start": 60,
+   "line_end": 70,
+   "severity": "important",
+   "title": "retry_wait does not distinguish APITimeout vs stalled stream vs generic APIConnectionError for retry budget; httpx2 timeouts surface as retryable, but the 30s Retry-After cap can exceed remaining deadline",
+   "why": "_generate checks `self.clock() + wait >= self.deadline` before sleeping, but sleep_for could still overshoot because the check and sleep are not atomic; more importantly the Retry-After path returns the raw min(asked, 30) with no jitter and no cap relative to time_left, and a `Retry-After` of 0.0 returns 0.0 which then passes the deadline check, causing a tight retry loop against the service."
+  },
+  {
+   "file": "src/review_agents/models.py",
+   "line_start": 205,
+   "line_end": 215,
+   "severity": "blocking",
+   "title": "generate_from_stream on a CancelledIterator that returns early raises ValueError or produces an empty generation",
+   "why": "When `cancelled.is_set()` becomes true mid-iteration, the generator `return`s early, so `generate_from_stream` finalizes a ChatResult with whatever chunks were accumulated so far, which may be a partial message. That result is then returned as a success by the worker thread even though the deadline passed. The main thread has already raised DeadlinePassedError, so the partial result is dropped — but if the cancellation fires just after the last chunk but before the `_within_deadline` join returns, the worker can complete with a truncated reply that _check_not_empty won't flag (content non-empty), and the main thread returns the partial data as if complete. Additionally, `generate_from_stream` with an iterator that yielded zero chunks (cancel set before first piece) returns an empty generation list, and `result.generations[0]` guard handles it, but llm_output model_name falls to self.model_name which may not be the actual model."
+  },
+  {
+   "file": "src/review_agents/models.py",
+   "line_start": 300,
+   "line_end": 320,
+   "severity": "blocking",
+   "title": "Timeouts use the raw time_left in httpx2.Timeout without reserving connect, and the 0.001 clamp breaks the deadline contract",
+   "why": "`wait = min(endpoint.idle_seconds if endpoint.stream else WHOLE_REPLY_SECONDS, time_left)` then `max(wait, 0.001)`. If `time_left` is, say, 0.5, the read timeout and connect timeout become 0.5/0.001 (connect clamped by min with CONNECT_TIMEOUT_SECONDS=10, so connect=min(10, 0.5)=0.5). That is fine, but if time_left=0.0001 the clamp forces 0.001, allowing a read past the stated deadline, and the retry-deadline check uses `self.clock()` in the model while the httpx timeout is per-read not per-attempt, so the connect + first-read can take up to 2*wait (connect, then read) plus header time — a non-streaming call can take up to 2x the intended minimum(120, time_left). The `WHOLE_REPLY_SECONDS` also only sets the *read* timeout, but the code claims the whole reply must arrive in 120 s: a service can trickle heartbeats-free data slower than that? No heartbeats in non-streaming, so read timeout per-read is total for a single body; acceptable. The chief defect is the 0.001 floor."
+  },
+  {
+   "file": "src/review_agents/models.py",
+   "line_start": 380,
+   "line_end": 395,
+   "severity": "important",
+   "title": "Deadline check in _generate uses `>=` and time_left=math.inf leads to float('inf') - clock() being finite but then clock()+time_left = inf, fine; but the initial left<=0 check races with connect",
+   "why": "`_within_deadline` computes `left = self.deadline - self.clock()`. With `time_left=math.inf`, `deadline = clock() + inf = inf`, so `left=inf` and skips the worker thread — correct. But when `time_left` is set on a model that is then reused across turns (model_for is called per turn so no reuse here), the `stream_replies` and `retries` are fine. The concrete bug: `_generate` catches `Exception` broadly, which will also catch `openai.APIStatusError` subclassed errors like `PermissionDeniedError` — retry_wait correctly returns None — but it also catches programming errors (e.g. TypeError from the attempt) and silently re-raises; that's fine. The real problem is that DeadlinePassedError raised *inside* the worker is put into `outcome['error']` and re-raised, which is correct; but if the deadline passes exactly while the worker completes successfully, the main thread raises DeadlinePassedError and discards a completed result. Rare but contract-violating."
+  },
+  {
+   "file": "src/review_agents/config.py",
+   "line_start": 18,
+   "line_end": 26,
+   "severity": "robustness",
+   "title": "idle_seconds and max_retries added without wiring to any review-level timeout budget; stream=False combined with idle_seconds is meaningless",
+   "why": "`idle_seconds` only applies when `stream=True`, yet it is always validated and its presence in config suggests it governs the non-streaming case too; the docstring says 'turned off, a whole reply must arrive within two minutes' but the 120 s is hardcoded as WHOLE_REPLY_SECONDS and ignores idle_seconds entirely, so a user setting idle_seconds=600 with stream=False still gets 120 s. No cross-field validation warns that idle_seconds is ignored."
+  },
+  {
+   "file": "src/review_agents/models.py",
+   "line_start": 200,
+   "line_end": 210,
+   "severity": "important",
+   "title": "Thread-per-attempt leaks daemon threads on every retry, and the abandoned stream holds the underlying httpx connection",
+   "why": "Each timed-out attempt spawns a new thread and abandons the previous one holding a live HTTP response. With four retries and a 5-minute idle timeout, up to five daemon threads per call per dimension may persist for up to idle_seconds each, each holding a socket. Over a review with many dimensions and models this exhausts file descriptors / connections in the httpx2 pool. The `finally` close is only reached when the consumer stops iterating, which for an abandoned thread only happens when the next piece arrives or read times out."
+  },
+  {
+   "file": "src/review_agents/models.py",
+   "line_start": 195,
+   "line_end": 210,
+   "severity": "important",
+   "title": "result.llm_output overwrites any llm_output from generate_from_stream (usage/finish info) and `_attempt` drops `stream_usage` tokens on non-streaming path",
+   "why": "`result.llm_output = {\"model_name\": reported or self.model_name}` replaces the whole dict produced by `generate_from_stream` / `super()._generate`. The old ChatOpenAI path put `token_usage` and `model_name` into `llm_output`, which LangChain's callback/usage plumbing relies on; wiping it drops token usage for the non-streaming path so UsageMeter records nothing when `stream=False` — usage rows would be missing, silently undercounting budget for endpoints that disable streaming."
+  },
+  {
+   "file": "tests/test_models.py",
+   "line_start": 340,
+   "line_end": 360,
+   "severity": "important",
+   "title": "Test service sends `retry-after-ms` 0.001*1000 mapping wrong and no test covers Retry-After HTTP-date; also FakeService doesn't validate the `stream` flag for 200 error bodies",
+   "why": "In `test_retry_after_sets_the_wait_up_to_thirty_seconds`, header '2' with key Retry-After maps to 2.0 s, '90' clamps to 30.0 — fine. But the `_retry_after` reads retry-after-ms first; the fake's default `retry_headers={\"retry-after-ms\": \"1\"}` yields 0.001 s, so tests that rely on backoff with defaults actually exercise 0.001 s waits, masking the backoff code path. `test_four_retries_back_off_from_half_a_second` explicitly clears headers, good. But the production `_retry_after` returns 0.0 for a '0' Retry-After header which then bypasses the `clock()+wait >= deadline` and causes immediate retry storms."
+  },
+  {
+   "file": "src/review_agents/pipeline/run.py",
+   "line_start": 225,
+   "line_end": 228,
+   "severity": "robustness",
+   "title": "Summarizer given math.inf has no overall bound and bypasses all deadline discipline",
+   "why": "`model_for(math.inf)` sets `deadline=inf`, so the summarizer's model relies solely on `idle_seconds`/`WHOLE_REPLY_SECONDS` read timeout per read plus `max_retries` retries with no total cap. The comment says 'summaries belong to no review and have no deadline', but background summary threads are still daemon threads in `_summaries`; a hanging summarizer with heartbeats every < idle_seconds can run forever. That was previously bounded by `REQUEST_TIMEOUT_SECONDS` (120 s) plus client retries; now it is unbounded, so a misbehaving service can pin summary threads and burn tokens indefinitely."
+  },
+  {
+   "file": "src/review_agents/pipeline/agent.py",
+   "line_start": 152,
+   "line_end": 158,
+   "severity": "robustness",
+   "title": "model_for(deadline - now) can be negative or zero, and chat_model clamps it to 1 ms; the turn then fails with a transport timeout rather than a clear DeadlinePassedError",
+   "why": "When `deadline - now` <= 0, `chat_model` computes `wait = max(min(idle_seconds, negative), 0.001) = 0.001`, sets `deadline = clock() + negative` (a past time), and `_within_deadline` raises DeadlinePassedError only if `left <= 0`. The loop in `run_dimension` calls model_for repeatedly; at the last turn time can be exactly expired and the code will attempt one more call, which is then immediately rejected — but not before building/binding tools and consuming a turn. If `deadline - now` is slightly positive (e.g. 1e-4), the httpx2 timeout floor of 0.001 s makes even a fast local service time out immediately, converting a would-be successful 100 µs call into a retryable APITimeoutError and, if any retries remain, into a 0.5 s sleep that overshoots the deadline check by a hair."
+  },
+  {
+   "file": "src/review_agents/pipeline/run.py",
+   "line_start": 283,
+   "line_end": 285,
+   "severity": "robustness",
+   "title": "judge_for(deadline - clock()) with expired deadline still constructs a judge and passes time; model_judge then invokes it and errors are only degraded, hiding the budget loss",
+   "why": "`judge_for` constructs a `chat_model` with `time_left = deadline - clock()`. If that is <= 0, the model still gets built with deadline in the past; when `model_judge` invokes it, DeadlinePassedError is caught somewhere as a generic failure (the code says a failing judge degrades the merge), so we silently skip the judge when under time pressure rather than reporting a clear degraded reason. This is a behavior change that is arguably desired but the comment still implies the judge fits within the time left; with retries it can consume a backoff sleep only bounded against the model deadline, and a single attempt may run until deadline."
+  },
+  {
+   "file": "src/review_agents/models.py",
+   "line_start": 108,
+   "line_end": 115,
+   "severity": "robustness",
+   "title": "_retry_after parses retry-after-ms as seconds*0.001 but the canonical header is already milliseconds; scale is inverted",
+   "why": "`retry-after-ms` is in milliseconds, so seconds = value/1000 = value * 0.001 — that part is correct. However `retry-after` may be an HTTP-date; the code's `float(...)` raises ValueError and falls through to `continue`, which is correct, but it then falls to the *next* header (none) and returns None, causing the normal backoff — fine. The actual bug: negative values are clamped with max(0.0, ...) yielding 0.0, and `_generate` accepts wait=0.0 with `clock()+0.0 >= deadline` false (unless deadline is now), causing a zero-sleep retry loop up to max_retries against a service that keeps returning `Retry-After: 0`. Not a livelock (max_retries caps it) but a hot retry burst."
+  }
+ ],
+ "content": null,
+ "error": null
+}

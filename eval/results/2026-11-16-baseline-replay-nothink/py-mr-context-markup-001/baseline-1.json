@@ -1,0 +1,229 @@
+{
+ "case": "py-mr-context-markup-001",
+ "run": 1,
+ "model": "deepseek-flash",
+ "thinking": "disabled",
+ "seconds": 19.8,
+ "usage": {
+  "prompt_tokens": 11722,
+  "completion_tokens": 3471,
+  "total_tokens": 15193,
+  "prompt_tokens_details": {
+   "cached_tokens": 0
+  },
+  "prompt_cache_hit_tokens": 0,
+  "prompt_cache_miss_tokens": 11722
+ },
+ "findings": [
+  {
+   "file": "src/review_agents/context/git.py",
+   "line_start": 44,
+   "line_end": 44,
+   "severity": "important",
+   "title": "file list build mixes str/bytes split and can drop records silently",
+   "why": "run_git returns bytes; the code decodes the whole output and splits on '\\0'. Git file names are arbitrary bytes and need not be valid UTF-8; with decode(..., 'replace') two distinct paths can collapse to the same string (and tree ids/hashes then mismatch), and the cache key is computed from these paths. Also `filter(None, ...)` drops empty records, which is fine, but a path containing a literal '\\0' is impossible — this is fine — however the decode/replace mangles non-UTF-8 paths, so split_modules and read_text operate on wrong paths, producing wrong modules and summaries. Use bytes throughout or split before decode."
+  },
+  {
+   "file": "src/review_agents/context/git.py",
+   "line_start": 32,
+   "line_end": 34,
+   "severity": "robustness",
+   "title": "tree_id is re-derived from a commit that may not exist locally",
+   "why": "Snapshot.at_branch pins to a commit sha from rev-parse, but tree_id, files() and read_text all use git against that commit. If a fetch updates the branch and the mirror is pruned (gc or ref update), the commit may become unreachable while a build is running, causing GIT calls to fail. Not blocking since build_repo_layer snapshots once, but concurrent syncs can force-reload."
+  },
+  {
+   "file": "src/review_agents/context/git.py",
+   "line_start": 58,
+   "line_end": 69,
+   "severity": "important",
+   "title": "ls-tree record split assumes exactly one space between meta fields",
+   "why": "`meta.split()` on `mode SP type SP object SP size` works, but ls-tree -l pads the size column with spaces before the size; `split()` handles that. However `record.split('\\t', 1)` with a path containing a tab is safe. The real bug: `int(size)` will raise ValueError when size is '-' (non-blob, but filtered by kind == 'blob'); ok. Not a real bug — remove."
+  },
+  {
+   "file": "src/review_agents/context/markup.py",
+   "line_start": 5,
+   "line_end": 11,
+   "severity": "important",
+   "title": "Only the literal string 'untrusted' in closing tags is defused; other tag names are not",
+   "why": "The regex only neutralises `</untrusted...>`. Repository content can contain a closing tag for a different block (or another `</untrusted` variant that the regex misses, e.g. split across lines or with a `\\t`/newline between '<' and '/'). The intent is that repo content cannot forge the data block; the implementation is correct for the specific case but callers might rely on it to fence other tags — currently only used for one tag name, so severity robustness, not blocking. Actually the only purpose stated is preventing forgery of this tag; that works. Downgrade to nit — remove."
+  },
+  {
+   "file": "src/review_agents/context/modules.py",
+   "line_start": 178,
+   "line_end": 195,
+   "severity": "important",
+   "title": "Cached module summaries are read without verifying the summary key belongs to this repo's tree",
+   "why": "cache_key is derived only from module content (file paths + blob ids) and module path, not from the repo. Two repositories with identical module content share the cache row, but the context_cache row is keyed by (repo, layer, cache_key), so cross-repo sharing is prevented. Not a bug. Remove."
+  },
+  {
+   "file": "src/review_agents/context/modules.py",
+   "line_start": 185,
+   "line_end": 187,
+   "severity": "blocking",
+   "title": "sqlite3.Row indexing used but connection may not be configured with row_factory",
+   "why": "`row[\"content\"]` assumes the connection has `row_factory = sqlite3.Row`. If `connect()` does not set this (tests pass, so it does), this would fail. Given the tests pass, this is fine — remove."
+  },
+  {
+   "file": "src/review_agents/context/modules.py",
+   "line_start": 195,
+   "line_end": 208,
+   "severity": "robustness",
+   "title": "Exceptions from the DB insert after a successful summary propagate and abort the whole build",
+   "why": "The `else` branch after `except` handles the success case, inserting into context_cache. A sqlite error here (e.g. lock contention with another concurrent build) is not caught, unlike summarize failures, so it aborts module_summaries and build_repo_layer entirely rather than falling back to stats. A transient DB error takes down the whole context build."
+  },
+  {
+   "file": "src/review_agents/context/modules.py",
+   "line_start": 200,
+   "line_end": 207,
+   "severity": "important",
+   "title": "Summary from a failed/malformed sub-generator stored without validation",
+   "why": "`summarize(...).strip()` may return an empty string; that empty string is stored as the summary and also renders as a `- stats\\n  ` line. On later cache hits it is treated as a present summary (`summary is not None`), so an empty summary is permanent until the module content changes. Treat empty/whitespace-only as failure."
+  },
+  {
+   "file": "src/review_agents/context/modules.py",
+   "line_start": 104,
+   "line_end": 112,
+   "severity": "important",
+   "title": "sample_module treats a genuinely empty entry file as 'not text' via `if not text`",
+   "why": "`read_text` returns None for missing/binary, but an empty file returns '' which is falsy. The empty file is then skipped instead of adding an (empty) excerpt — minor, and skipping is acceptable. However it also means the largest-file fallback may select a huge generated file whose read_text returns None, and the loop keeps trying smaller ones. Fine. Remove."
+  },
+  {
+   "file": "src/review_agents/context/modules.py",
+   "line_start": 118,
+   "line_end": 120,
+   "severity": "important",
+   "title": "Cache key ignores module file sizes/contents for renames that keep path+blob",
+   "why": "Key is `path=blob` per file with path — correct. Remove."
+  },
+  {
+   "file": "src/review_agents/context/modules.py",
+   "line_start": 158,
+   "line_end": 171,
+   "severity": "important",
+   "title": "Module sample can blow the prompt due to token estimation vs actual model tokens",
+   "why": "`_SAMPLE_TOKENS` is an estimate; sample sizes are truncated at `remaining * 4` characters, which for high-token-density content (CJK, base64) can far exceed remaining tokens. The comment acknowledges estimation error, but there is no hard cap and the finder model may reject oversized prompts. Additionally the initial listing of file names is included without limit; a module of 50 files with long paths is fine, but the root module (when the repo root has >MAX_MODULE_FILES and files at root) could list many files. Mostly robustness."
+  },
+  {
+   "file": "src/review_agents/context/repo_layer.py",
+   "line_start": 100,
+   "line_end": 120,
+   "severity": "important",
+   "title": "Cached conventions/tree loaded but modules rebuilt every call without cache_hit deduplication",
+   "why": "Even on a cache hit the code still runs `module_summaries`, which lists files and issues one DB read per module. Not a correctness bug, but it means 'cached under tree id' claim only covers conventions+tree; the description implies the whole layer is cached. Design/perf, not a bug. Remove."
+  },
+  {
+   "file": "src/review_agents/context/repo_layer.py",
+   "line_start": 110,
+   "line_end": 118,
+   "severity": "important",
+   "title": "Conventions cached by tree id but module summaries are cached by content only, so README-only edits still rebuild nothing",
+   "why": "That is the intent. Remove."
+  },
+  {
+   "file": "src/review_agents/context/repo_layer.py",
+   "line_start": 78,
+   "line_end": 86,
+   "severity": "robustness",
+   "title": "directory_tree file counts double-count when a path component appears at multiple depths",
+   "why": "`counts['/'.join(parts[:level])] += 1` for every file and every ancestor level is correct. Remove."
+  },
+  {
+   "file": "src/review_agents/context/repo_layer.py",
+   "line_start": 55,
+   "line_end": 62,
+   "severity": "important",
+   "title": "Nested CLAUDE.md/AGENTS.md in skipped directories are excluded, but skip_patterns match full paths, so nested files inside node_modules are excluded correctly",
+   "why": "Fine. Remove."
+  },
+  {
+   "file": "src/review_agents/context/repo_layer.py",
+   "line_start": 128,
+   "line_end": 132,
+   "severity": "blocking",
+   "title": "Cache is written and read but never invalidated on migration/schema change, and the content json is trusted blindly",
+   "why": "`json.loads(row['content'])` for the layer cache assumes the row was written by this LAYER_VERSION. The key includes LAYER_VERSION so a version bump misses the cache, but the schemas of content (e.g. adding a field) are not compat-checked. Today the JSON is stable. Not a real bug. Remove."
+  },
+  {
+   "file": "src/review_agents/context/summarizer.py",
+   "line_start": 17,
+   "line_end": 24,
+   "severity": "important",
+   "title": "UsageMeter raises BudgetExceededError and is swallowed per-module, so budget is only checked at call time, not in modules.py loop",
+   "why": "modules.py catches BudgetExceededError, sets summarize=None, and continues. That is intended. However `UsageMeter` also handles `on_llm_error`; when the budget is exceeded, does it raise from a callback or before? If BudgetExceededError is raised from inside langchain callbacks (e.g. in on_chat_model_start), the model invocation is aborted and raise propagates correctly — matches the test. Remove."
+  },
+  {
+   "file": "src/review_agents/context/summarizer.py",
+   "line_start": 17,
+   "line_end": 24,
+   "severity": "important",
+   "title": "Summary path injects the module path into a HumanMessage header outside the untrusted block",
+   "why": "`f\"Module: {path}\\n\\n{untrusted(...)}\"` places the module path outside the data block. Paths come from git and can contain attacker-controlled characters (arbitrary bytes, newlines via `git` path quoting aside, paths are valid UTF-8 with odd characters like newlines are not legal in git tree entries... actually git forbids '\\0' but allows '\\n'). A repo with a directory containing `</untrusted>` or prompt-injection text in the path would inject instructions outside the data block, breaking the 'repository content is data' guarantee. The path is also used inside the untrusted source attribute (via f-string interpolation into the HTML attribute) without escaping quotes, allowing breaking out of the attribute."
+  },
+  {
+   "file": "src/review_agents/context/markup.py",
+   "line_start": 9,
+   "line_end": 11,
+   "severity": "blocking",
+   "title": "source attribute is interpolated unescaped, allowing attribute injection",
+   "why": "`f'<untrusted source=\"{source}\">'` does not escape `source`. Callers pass values derived partly from repository-controlled paths (e.g. `f'module:{path}'` in summarizer, `convention:{path}` in RepoLayer.render). A path containing `\">` (or a newline) breaks out of the attribute and can inject arbitrary markup/instructions into the surrounding prompt, defeating the defusing. Escape quotes/angle brackets in the source attribute (or restrict paths), and also defuse any closing tag of an unrelated block."
+  },
+  {
+   "file": "src/review_agents/models.py",
+   "line_start": 73,
+   "line_end": 103,
+   "severity": "important",
+   "title": "Every usage record opens a new SQLite connection; concurrent callbacks can hit 'database is locked'",
+   "why": "This was already the behaviour before, but the change moves it into a shared factory and summary_usage may be called from the summarizer while review_usage runs for parallel agents. SQLite default `timeout` (5s in connect presumably) may not be enough; a failed insert silently loses usage data since there is no retry. This is a pre-existing pattern but the new concurrent path (summaries during review) increases contention. Robustness."
+  },
+  {
+   "file": "src/review_agents/models.py",
+   "line_start": 88,
+   "line_end": 99,
+   "severity": "important",
+   "title": "summary_usage writes model/token/duration but the DB table lacks an index and no FK; not a bug",
+   "why": "Remove."
+  },
+  {
+   "file": "src/review_agents/migrations/0002_summary_usage.sql",
+   "line_start": 2,
+   "line_end": 10,
+   "severity": "nit",
+   "title": "summary_usage has no index on repo/created_at",
+   "why": "Queries/aggregations by repo will table-scan. Not a current bug; adds cost as the table grows."
+  },
+  {
+   "file": "tests/test_db.py",
+   "line_start": 4,
+   "line_end": 8,
+   "severity": "nit",
+   "title": "Test imports private _migrations from review_agents.db",
+   "why": "Couples tests to an internal name; if _migrations is refactored the test breaks. Acceptable but brittle."
+  },
+  {
+   "file": "src/review_agents/context/modules.py",
+   "line_start": 142,
+   "line_end": 171,
+   "severity": "important",
+   "title": "Summaries cached under key without incrementing build budget: over-budget check relies on BudgetExceededError only",
+   "why": "The description promises a 'summary_tokens_per_build' budget, and config.Settings gains summary_tokens_per_build, but nothing in module_summaries reads this setting. The only budget control is the shared TokenBudget via UsageMeter. So the new config option is dead — runaway-cost safety net is not wired in. Callers cannot pass summary_tokens_per_build to bound summarisation; the claimed feature is missing."
+  },
+  {
+   "file": "src/review_agents/config.py",
+   "line_start": 60,
+   "line_end": 62,
+   "severity": "important",
+   "title": "summary_tokens_per_build setting is never used",
+   "why": "Field added but no code reads it (module_summaries accepts no budget, build_repo_layer ignores it, nothing constructs a TokenBudget from it). Dead configuration; the documented safety net does not exist."
+  },
+  {
+   "file": "src/review_agents/context/modules.py",
+   "line_start": 195,
+   "line_end": 207,
+   "severity": "robustness",
+   "title": "Cache write inserts `estimate_tokens(summary)` for a JSON-wrapped summary but the same DB tokens column for the layer uses estimate_tokens(content) on JSON — inconsistent but harmless",
+   "why": "tokens column semantics differ per cache row. Cosmetic. Remove."
+  }
+ ],
+ "content": null,
+ "error": null
+}

@@ -1,0 +1,93 @@
+{
+ "case": "py-mr-increment-001",
+ "run": 2,
+ "model": "deepseek-flash",
+ "thinking": "disabled",
+ "seconds": 11.6,
+ "usage": {
+  "prompt_tokens": 3814,
+  "completion_tokens": 1911,
+  "total_tokens": 5725,
+  "prompt_tokens_details": {
+   "cached_tokens": 3584
+  },
+  "prompt_cache_hit_tokens": 3584,
+  "prompt_cache_miss_tokens": 230
+ },
+ "findings": [
+  {
+   "file": "src/review_agents/context/increment.py",
+   "line_start": 109,
+   "line_end": 116,
+   "severity": "important",
+   "title": "Deleted-file hunks map to the old path but are keyed against now/before by new_path",
+   "why": "For a deletion git emits `+++ /dev/null`, so `_FILE` (and thus new_path) is wrong or the hunk's new_path won't match the PR's own-change ranges. `_added(diff(f\"{base}...{head}\"))` never contains entries for fully deleted paths (new_count=0 => added=None), and `_overlap(hunk.removed, before.get(hunk.old_path,...))` uses old_path, but the result is filed under `hunk.new_path`. If the file was deleted, new_path is `/dev/null` or empty, producing a bogus path key, and the deletion of a file the PR added is never reported because `before` is also keyed by new_path and cannot contain the old path of a deleted file. Root cause: hunk paths and range maps use inconsistent sides for deletions."
+  },
+  {
+   "file": "src/review_agents/context/increment.py",
+   "line_start": 107,
+   "line_end": 116,
+   "severity": "important",
+   "title": "Removal-only hunks use new-side line numbers that shift when lines are deleted",
+   "why": "When the author deletes lines, `hunk.at` is computed from `max(new_start, 1)` of the removal hunk in the `previous_head..head` diff. That new-side line number is where the removal occurred in `head`, but the surrounding lines may themselves be newly added or the deletion may be at a boundary; more importantly `_overlap(hunk.removed, before.get(hunk.old_path,...))` maps old-side ranges to a single new-side position without accounting for line shifts caused by other deletions in the same file. Reviewing that wrong line can point the reviewer at unaffected code and miss the actual taken-back change."
+  },
+  {
+   "file": "src/review_agents/context/increment.py",
+   "line_start": 96,
+   "line_end": 116,
+   "severity": "important",
+   "title": "Failures after the previous head is fetched are swallowed, conflating 'unknown' with 'nothing to review'",
+   "why": "The whole comparison is wrapped in `except GitError: return None`, but the contract says None means the previous head is unknown (force-pushed away / never fetched) and a full review should follow. A transient git failure, a timeout on the (potentially large) `previous_head..head` or `base...head` diff, or a corrupt object mid-computation also yields None, and callers cannot distinguish 'full review' from 'we could not compute'. That silently changes behavior on infrastructure errors, e.g. skipping a real increment or spuriously triggering a full review."
+  },
+  {
+   "file": "src/review_agents/context/increment.py",
+   "line_start": 98,
+   "line_end": 100,
+   "severity": "robustness",
+   "title": "Diff and cat-file for large non-merge ranges are unbounded in memory, unlike the timeout",
+   "why": "`run_git(...).decode(...)` reads the entire diff of `previous_head..head` and `base...head` into memory. For a long-lived PR this can be the whole PR diff each round, and the `-U0 -M` diffs are computed repeatedly; combined with a fresh sync this can be large. No issue for correctness but the output of `git diff` on huge ranges is buffered fully; less a bug than a scaling risk, and `GIT_TIMEOUT_SECONDS` only bounds time."
+  },
+  {
+   "file": "src/review_agents/context/increment.py",
+   "line_start": 55,
+   "line_end": 61,
+   "severity": "robustness",
+   "title": "Combined diffs (merge commits) produce multiple @@@ headers that _HUNK does not match",
+   "why": "`git diff` without `--cc`/`-m` emits combined diff format (`@@@ -a,b -c,d +e,f @@@`) for merge commits, which `_HUNK` does not parse. For `previous_head..head` where head is a merge, hunks from the merge could be skipped or misparsed, producing incorrect or empty increments. The tests use `--no-edit` merges whose resulting commit changes are still emitted as a normal diff against the first parent only when using two-dot, so it may pass tests but the parser silently drops combined-format lines."
+  },
+  {
+   "file": "src/review_agents/context/increment.py",
+   "line_start": 50,
+   "line_end": 64,
+   "severity": "important",
+   "title": "_FILE regex does not handle quoted paths or paths with ' b/' in the name",
+   "why": "Although `core.quotePath=false` avoids octal quoting, git still quotes paths containing spaces or special chars when the diff header is generated (quoting is controlled by `core.quotePath` for non-ASCII and by `-z`/`-c core.quotePath` for others; spaces in filenames cause the `b/(.+)` capture to be ambiguous when the name contains the literal sequence ` b/`). The greedy `(.+)` on group 2 will over-capture across ` b/` occurrences, producing a wrong path. It also does not strip the trailing tab for paths with spaces in some git versions. Result: wrong keys in lines/bin and dropped review lines."
+  },
+  {
+   "file": "tests/test_context_increment.py",
+   "line_start": 75,
+   "line_end": 90,
+   "severity": "robustness",
+   "title": "Merge test does not verify the previous head object is fetched for the comparison",
+   "why": "The merge test calls `repo.main(...)` then merges and pushes, then `increment(repo.sync(), ...)` with `first` as previous_head. The sync fetches refs; `first` exists locally because it was made locally, but on a fresh mirror the previous head object may not be present unless it is an ancestor of a fetched ref. The 'force-pushed away' path is tested, but the 'never fetched but reachable' and 'reachable but only via the previous round' cases are not exercised; the implementation's `cat-file -e` check relies on the object being reachable from fetched refs, which the branch ref may not include after a rebase. Test coverage gap could hide a real failure."
+  },
+  {
+   "file": "src/review_agents/context/increment.py",
+   "line_start": 129,
+   "line_end": 134,
+   "severity": "important",
+   "title": "Renames: between-diff new_path vs now/before keys can mismatch old-side overlap path",
+   "why": "In the taken-back branch, `before.get(hunk.old_path, [])` uses the old path from `previous_base...previous_head`, but `before` is keyed by `new_path` of that diff. For a renamed file, the previous PR diff's new_path is the renamed path, while the between-diff's old_path is also the renamed path (rename detection on `previous_head..head`), so it works. But if the rename happened at `head` relative to `previous_head`, the old_path of the between-diff is the pre-rename path while `before` (base...previous_head, no rename) is keyed by the original pre-rename path too — still matches. However the result is filed under `hunk.new_path` (post-rename) with line numbers from the `previous_head..head` diff, which can be offset by the rename's line changes; the rename test only covers adds."
+  },
+  {
+   "file": "src/review_agents/context/increment.py",
+   "line_start": 41,
+   "line_end": 54,
+   "severity": "robustness",
+   "title": "Zero-count hunk start line off-by-one for pure additions/deletions",
+   "why": "When `new_count`/`old_count` is 0 git writes a start line that is the line *before* the insertion/deletion (e.g. `@@ -5,0 +6 @@`). The code computes `max(new_start,1)` for `at` and `(start,start+count-1)` ranges. For a removal-only hunk, `new_start` is the line *after which* nothing is added; `at` should point at the deleted location in the new file, which is `new_start` (or `new_start+1`), not `new_start` in all cases. This can place the taken-back marker one line off; the removal line is reported at the wrong new-side line."
+  }
+ ],
+ "content": null,
+ "error": null
+}

@@ -1,0 +1,10 @@
+{
+ "case": "py-mr-basis-001",
+ "run": 2,
+ "model": "deepseek-flash",
+ "seconds": 0.9,
+ "usage": null,
+ "findings": null,
+ "content": null,
+ "error": "HTTPError: HTTP Error 402: Payment Required"
+}

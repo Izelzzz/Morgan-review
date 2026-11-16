@@ -1,0 +1,94 @@
+{
+ "case": "py-mr-mirror-tools-001",
+ "run": 3,
+ "model": "deepseek-flash",
+ "seconds": 301.1,
+ "usage": {
+  "prompt_tokens": 9799,
+  "completion_tokens": 53846,
+  "total_tokens": 63645,
+  "prompt_tokens_details": {
+   "cached_tokens": 9600
+  },
+  "completion_tokens_details": {
+   "reasoning_tokens": 52863
+  },
+  "prompt_cache_hit_tokens": 9600,
+  "prompt_cache_miss_tokens": 199
+ },
+ "findings": [
+  {
+   "file": "src/review_agents/tools.py",
+   "line_start": 153,
+   "line_end": 156,
+   "severity": "important",
+   "title": "search_code misparses paths containing ':' and can bypass skip/path filters",
+   "why": "git grep output is '<path>:<lineno>:<content>'; after stripping the commit prefix the code splits at the first ':' to obtain the path. A PR can add e.g. 'dir:x/.env', which is parsed as 'dir', so is_skipped and path_glob are evaluated against the wrong path and the matching line from the skipped file is still returned."
+  },
+  {
+   "file": "src/review_agents/tools.py",
+   "line_start": 139,
+   "line_end": 161,
+   "severity": "important",
+   "title": "search_code buffers unbounded git grep output and ignores MAX_FILE_BYTES",
+   "why": "run_git captures all of git grep's stdout before any filtering, and MAX_SEARCH_MATCHES is applied only after decoding the full output. Files larger than MAX_FILE_BYTES are still searched, and a single huge matching line or a repository with millions of matches can exhaust memory or return far more than the documented 200 KB limit."
+  },
+  {
+   "file": "src/review_agents/tools.py",
+   "line_start": 121,
+   "line_end": 131,
+   "severity": "robustness",
+   "title": "list_dir returns unbounded output for large trees",
+   "why": "git ls-tree -l output is captured and returned in full with no entry or byte cap. A malicious commit can add a tree with a huge number of entries or very long names, causing excessive memory use and tool output that bypasses the stated size limit."
+  },
+  {
+   "file": "src/review_agents/tools.py",
+   "line_start": 56,
+   "line_end": 62,
+   "severity": "robustness",
+   "title": "NUL in agent-supplied paths reaches subprocess and raises an uncaught ValueError",
+   "why": "_clean_path does not reject NUL; the NUL survives into the git argument, subprocess.run raises ValueError('embedded null byte'), and ToolBudget only catches ToolError, so the tool call crashes instead of returning an error. The same issue exists for the search pattern passed to git grep."
+  },
+  {
+   "file": "src/review_agents/tools.py",
+   "line_start": 205,
+   "line_end": 207,
+   "severity": "robustness",
+   "title": "ToolBudget check-then-increment is racy",
+   "why": "The limit check and increment are separate operations. If the runtime executes tool calls concurrently, multiple calls can pass the check while used is limit-1, and self.used += 1 is not atomic, so the agent can execute more than the 25-call budget."
+  },
+  {
+   "file": "src/review_agents/tools.py",
+   "line_start": 34,
+   "line_end": 49,
+   "severity": "robustness",
+   "title": "Agent-controlled path_glob is cached unboundedly and compiled into a backtracking regex",
+   "why": "_glob_regex is decorated with unbounded @cache, and path_glob comes from the agent, so every unique pattern is retained for the process lifetime. The naive translation of repeated '**' into multiple '.*' also allows a crafted pattern and path to trigger catastrophic regex backtracking and CPU exhaustion."
+  },
+  {
+   "file": "src/review_agents/tools.py",
+   "line_start": 169,
+   "line_end": 171,
+   "severity": "robustness",
+   "title": "git_log does not apply the skip list to its path",
+   "why": "read_file and search_code check is_skipped, but git_log only sanitizes the path and then runs git log -- <path>. An agent can therefore query history for a skipped path, contrary to the documented rule that skip rules apply to every tool."
+  },
+  {
+   "file": "src/review_agents/tools.py",
+   "line_start": 183,
+   "line_end": 189,
+   "severity": "robustness",
+   "title": "read_issue leaves non-JSON responses uncaught",
+   "why": "Only HTTPError, URLError and TimeoutError are converted to ToolError. A 200 response that is not JSON (proxy, captive portal, or misconfigured enterprise API) makes json.load raise JSONDecodeError/ValueError, which escapes the tool wrapper and aborts the agent run instead of returning a tool error."
+  },
+  {
+   "file": "src/review_agents/mirror.py",
+   "line_start": 60,
+   "line_end": 65,
+   "severity": "robustness",
+   "title": "git fetch has no timeout and can hold the per-repo lock indefinitely",
+   "why": "run_git calls subprocess.run without a timeout. A stalled network connection during MirrorStore.sync blocks inside git fetch while holding the flock, so every later review of that repository also blocks; the HTTP issue call has a timeout but the git network path does not."
+  }
+ ],
+ "content": null
+}

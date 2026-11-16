@@ -1,0 +1,62 @@
+{
+ "case": "py-mr-increment-001",
+ "run": 1,
+ "model": "deepseek-flash",
+ "seconds": 260.0,
+ "usage": {
+  "prompt_tokens": 3838,
+  "completion_tokens": 47289,
+  "total_tokens": 51127,
+  "prompt_tokens_details": {
+   "cached_tokens": 3584
+  },
+  "completion_tokens_details": {
+   "reasoning_tokens": 46602
+  },
+  "prompt_cache_hit_tokens": 3584,
+  "prompt_cache_miss_tokens": 254
+ },
+ "findings": [
+  {
+   "file": "src/review_agents/context/increment.py",
+   "line_start": 120,
+   "line_end": 121,
+   "severity": "blocking",
+   "title": "Only additions are tracked, so new deletions and reverted deletions are missed",
+   "why": "`now` and `before` are built with `_added`, and removals in `between` are only considered when they overlap `before`. A later commit that deletes a pristine base line (or file) has no `hunk.added` and no `before` overlap, so it is dropped; a later commit that re-adds a line the PR had deleted has an added line not in `now` and no removal, so it is also dropped. The increment can be empty even though the PR's own diff changed."
+  },
+  {
+   "file": "src/review_agents/context/increment.py",
+   "line_start": 129,
+   "line_end": 133,
+   "severity": "important",
+   "title": "Take-back is skipped when the same hunk also has kept additions",
+   "why": "The `elif` only checks `hunk.removed` when `kept` is empty. With `-U0`, a deletion of a PR-added line adjacent to another PR change lands in the same hunk; `kept` is non-empty, so the reverted line is never added to `lines`. The later round will not review that reverted line."
+  },
+  {
+   "file": "src/review_agents/context/increment.py",
+   "line_start": 131,
+   "line_end": 133,
+   "severity": "important",
+   "title": "Took-back branch can emit a head-side path/line absent from head",
+   "why": "For a file deleted in head (or a file emptied by the deletion), `hunk.new_path` is still the diff header's old path and `at` is forced to at least 1. The code then records a head-side line for a file/line that does not exist, breaking the `Increment` contract and causing downstream comment placement to fail or target the wrong place."
+  },
+  {
+   "file": "src/review_agents/context/increment.py",
+   "line_start": 20,
+   "line_end": 20,
+   "severity": "robustness",
+   "title": "Diff header parsing fails on quoted paths and paths containing ' b/'",
+   "why": "`core.quotePath=false` only disables octal quoting; git still C-quotes paths with quotes, backslashes, tabs, or newlines, which `_FILE` does not match. The greedy `(.+) b/(.+)` also misparses a path containing the substring ' b/'. When `_FILE` does not match, `_hunks` keeps the previous file's paths and attributes the following hunks to the wrong file."
+  },
+  {
+   "file": "src/review_agents/context/increment.py",
+   "line_start": 116,
+   "line_end": 124,
+   "severity": "robustness",
+   "title": "All Git errors are treated as an unknown previous head",
+   "why": "The `try` covers diffs for the current `base...head` and `previous_head..head` as well as the previous-head existence check. A missing/corrupt current base or head, a timeout, or any other `GitError` returns `None` (full review), masking the real failure and violating the documented condition that `None` means the previous head is unknown."
+  }
+ ],
+ "content": null
+}

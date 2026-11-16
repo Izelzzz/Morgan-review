@@ -1,0 +1,261 @@
+{
+ "case": "py-mr-mirror-tools-001",
+ "run": 2,
+ "model": "deepseek-flash",
+ "thinking": "disabled",
+ "seconds": 32.4,
+ "usage": {
+  "prompt_tokens": 9775,
+  "completion_tokens": 5356,
+  "total_tokens": 15131,
+  "prompt_tokens_details": {
+   "cached_tokens": 9600
+  },
+  "prompt_cache_hit_tokens": 9600,
+  "prompt_cache_miss_tokens": 175
+ },
+ "findings": [
+  {
+   "file": "src/review_agents/mirror.py",
+   "line_start": 52,
+   "line_end": 54,
+   "severity": "blocking",
+   "title": "GIT_CONFIG_COUNT replaces existing config, silently overrides caller env",
+   "why": "git_env builds a fresh env dict and sets GIT_CONFIG_COUNT=1 unconditionally when a token is given, overwriting any pre-existing GIT_CONFIG_* settings. More importantly, when a token is NOT passed (e.g. public repos), the config vars are absent; but the bigger issue is that run_git's env=env or git_env() uses `env` truthiness — an empty dict falls back to git_env(), but a caller-provided env dict that's falsy won't. Minor. The real bug: on every git call that passes `env=git_env(token, ...)`, if token is None but a caller previously configured GIT_CONFIG_COUNT via os.environ, it is dropped. Also, subprocess inherits no env, so HOME is unset — git may warn or behave differently. Not blocking on its own."
+  },
+  {
+   "file": "src/review_agents/mirror.py",
+   "line_start": 60,
+   "line_end": 60,
+   "severity": "important",
+   "title": "run_git uses `env or git_env()` so empty env dict gets silently replaced",
+   "why": "Callers passing `env={}` (or any falsy dict) get git_env() instead. Not currently reachable, but fragile. Combined with the fact that run_git does NOT pass `--git-dir` as env, this is a latent contract bug."
+  },
+  {
+   "file": "src/review_agents/mirror.py",
+   "line_start": 60,
+   "line_end": 66,
+   "severity": "blocking",
+   "title": "git commands run without cwd; GIT_DIR from env not set — relative git_dir breaks",
+   "why": "subprocess.run is invoked without `cwd=` and without setting GIT_DIR in env. `--git-dir={git_dir}` uses a Path; Path.__str__ renders it as given. If git_dir is relative (MirrorStore accepts any Path, and tests use tmp_path which is absolute, but the class contract doesn't enforce absoluteness), git resolves it relative to the *current* process cwd which is fine because subprocess inherits cwd — but in concurrent threads sharing cwd this is a race with any code that chdirs. More critically, the env dict passed has no HOME and no cwd configuration; git behavior may vary. This is the same root issue as env-replacement but risks hiding the real problem."
+  },
+  {
+   "file": "src/review_agents/mirror.py",
+   "line_start": 108,
+   "line_end": 108,
+   "severity": "blocking",
+   "title": "GitError message masks only exact secret, but token is base64 in extraheader",
+   "why": "secret=token replaces the raw token string in stderr. But git errors can echo the base64-encoded credentials or the `AUTHORIZATION: basic <b64>` header (e.g. 'unable to access ... credential'). The base64 of `x-access-token:<token>` contains the token only after decoding, so direct base64 leak won't contain raw token; HOWEVER git sometimes prints `http.<url>.extraheader=AUTHORIZATION: basic <b64>` verbatim in error output (e.g. on config parsing errors), leaking the encoded token which is trivially decodable. The masking must also strip the base64 payload."
+  },
+  {
+   "file": "src/review_agents/mirror.py",
+   "line_start": 100,
+   "line_end": 108,
+   "severity": "important",
+   "title": "refspec validation allows refs that escape the mirror via fetch refspec semantics",
+   "why": "The validator only rejects ' :^~?*[\\\\' but permits leading '-' in a ref name (git refnames can start with - in some positions? refs/-foo/bar). More importantly, it permits refs like `refs/heads/..` (contains '..' but the check is only on split('/').parts for repo names, not for refs). A refspec `+refs/heads/x:refs/heads/x` is fine, but the validator does not reject `.` or `..` components in ref names; git itself would reject them, but the error would come from git with the secret potentially in stderr. Also refs starting with `-` could be interpreted as options if not quoted — subprocess passes them as argv entries, so `--upload-pack=...` style injection requires the ref to literally be an option. A ref of `--upload-pack=evil` would be rejected by startswith('refs/') check, so OK."
+  },
+  {
+   "file": "src/review_agents/mirror.py",
+   "line_start": 120,
+   "line_end": 122,
+   "severity": "blocking",
+   "title": "Init check `(git_dir / 'HEAD').exists()` races and ignores partial mirrors",
+   "why": "If init was interrupted after creating HEAD but before refs/objects, or if the directory exists for another reason, the check skips `git init`. Additionally, on a fresh mirror the parent mkdir is inside _locked, but the lock file itself is created in the same directory — if git_dir exists as a file (not a dir), open lock path is fine but git init would fail. Not the core issue. The bigger issue: the `.exists()` check for HEAD is true for a symlink 'HEAD' pointing anywhere — a malicious prior run (or attacker with write access to /data/repos) could plant a symlink; git init would follow it. But /data/repos is protected by directory perms; still, the review process runs as the same user that writes there."
+  },
+  {
+   "file": "src/review_agents/mirror.py",
+   "line_start": 123,
+   "line_end": 124,
+   "severity": "blocking",
+   "title": "Fetch refspec forces `+` for every ref, overwriting local refs including HEAD branch",
+   "why": "Forcing `+refs/heads/main:refs/heads/main` on a mirror that also has another branch checked out as HEAD is fine, but more importantly the `fetch` writes to the same refs that subsequent `ls-tree`, `cat-file` reads use. If two syncs run within the lock that's serialized, but the RepoTools reader runs without holding the lock — a concurrent sync could advance refs while tools read by SHA, which is safe because SHAs are immutable, BUT the fetch could prune/replace the ref while the tools' `_commit` may be a SHA that gets garbage-collected... no, GC is manual. Safe for reads by SHA."
+  },
+  {
+   "file": "src/review_agents/mirror.py",
+   "line_start": 118,
+   "line_end": 128,
+   "severity": "important",
+   "title": "Repo name check permits '.' and '..' as owner/name components",
+   "why": "`_REPO_NAME = ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$` matches 'owner/..' and '../app'? No — '../app' contains '/' only between owner and name, and '..' would need to be a whole component. 'octo/..' matches the regex because '..' is [.]+. The extra check `'..' in repo.split('/')` catches exact '..' components but NOT nested like 'a/../b' since split gives ['a','..','b'] which is length 3 and regex won't match anyway. However, a single '..' component: 'octo/..' — split gives ['octo','..'], '..' in list is True → rejected. Good. But '.git' as a name is not rejected: 'octo/.git' → git_dir becomes root/octo/.git.git? No: f'{name}.git' = '.git.git'. Not escaping but surprising. A name of '.git' or '.github' collides with parent dirs? Not a real escape."
+  },
+  {
+   "file": "src/review_agents/tools.py",
+   "line_start": 57,
+   "line_end": 68,
+   "severity": "blocking",
+   "title": "_glob_regex is not anchored and unbounded — ReDoS possible via user-supplied pattern",
+   "why": "The pattern is derived from skip_paths (trusted config) so ReDoS from skip_paths is limited. However glob_match is also called with `path_glob` from the agent (search_code path_glob). An agent could pass a pathological glob like '**/**/**/**/**/**/*a' producing nested `(?:.*/)?` with backtracking — re.fullmatch with many optional greedy groups on long paths can be exponential. The pattern is `@cache`d so memory grows unbounded (per agent call)."
+  },
+  {
+   "file": "src/review_agents/tools.py",
+   "line_start": 88,
+   "line_end": 95,
+   "severity": "blocking",
+   "title": "read_file fetches blob twice (once for -s, once for content) and TOCTOU between type check and blob read",
+   "why": "cat-file -t and -s and blob are three separate git invocations; if a concurrent sync or attacker mutates the mirror between calls, the type could change. More importantly, `cat-file -s` returns size but then `cat-file blob` downloads the whole object — the 200KB check is done on the size *before* downloading, which is correct, but if the object is a tag or something weird, `cat-file blob <sha:path>` may follow. Actually the type check got 'blob' so fine. Not blocking. Minor: size limit not applied in a single call causes potential 2x read for large blobs that sneak under the limit."
+  },
+  {
+   "file": "src/review_agents/tools.py",
+   "line_start": 95,
+   "line_end": 100,
+   "severity": "important",
+   "title": "Binary detection only probes first 8000 bytes — a large binary with text prefix passes through",
+   "why": "A binary file preceded by >8000 bytes of ASCII (e.g. a crafted file with a text header) is treated as text and decoded with errors='replace', inflating output. Since the description claims 'binary detection', this check is incomplete. Combined with size limit, a 200KB crafted binary with text header is decoded and returned, potentially including embedded secrets or huge lines."
+  },
+  {
+   "file": "src/review_agents/tools.py",
+   "line_start": 118,
+   "line_end": 126,
+   "severity": "important",
+   "title": "search_code reports matches but does not bound per-line length or total output size",
+   "why": "MAX_SEARCH_MATCHES caps matches at 100, but a single matching line with e.g. a 200KB minified JS line matching regex 'a' would return the entire 200KB line. And matching files are not filtered by MAX_FILE_BYTES — git grep -I skips binaries but not large text files. An agent can exfiltrate/saturate context beyond the claimed budget."
+  },
+  {
+   "file": "src/review_agents/tools.py",
+   "line_start": 126,
+   "line_end": 138,
+   "severity": "blocking",
+   "title": "Search path parsing splits git grep output by ':' — paths/lines containing ':' break skip and glob filtering",
+   "why": "git grep -n output is `commit:path:lineno:content`. The code does removeprefix(commit+':') then split(':',1)[0] for path. If a path contains ':' (legal on Linux, and possible in git trees) the path becomes truncated at the first colon, so is_skipped and glob_match use the wrong path — a skipped file could slip through if only the suffix matches. Also pattern with ':' etc. More critically, git grep -E on user pattern with the `commit:` prefix: the pattern is passed via -e so injection into pattern is handled, but the regex is given raw to git grep -E which uses POSIX ERE, which is fine."
+  },
+  {
+   "file": "src/review_agents/tools.py",
+   "line_start": 143,
+   "line_end": 143,
+   "severity": "blocking",
+   "title": "git_log `--` separator only added when path is set; commit sha is not validated as a SHA",
+   "why": "git_log appends self._commit which is validated at __init__? No — RepoTools.__init__ does not validate commit. The tools are constructed with `commit` from elsewhere; if commit contains e.g. '--output=...' or similar, it is placed as an arg without `--`. Since commit comes from previous sync validation (_SHA.fullmatch), that's enforced by MirrorStore but not by RepoTools. If RepoTools is used with an unvalidated commit (e.g. directly), arbitrary git options can be injected. The description says the tools read from 'the reviewed commit' — defense in depth requires validating commit as a SHA in RepoTools.__init__."
+  },
+  {
+   "file": "src/review_agents/tools.py",
+   "line_start": 143,
+   "line_end": 150,
+   "severity": "blocking",
+   "title": "git_log uses `self._commit` directly with no format/`--` guard for the commit argument",
+   "why": "args list is `[log, --max-count=..., --format=..., --date=short, self._commit, (--, path)]`. If commit starts with '-' it's an option. Additionally log with a non-commit (e.g. a path-looking string) could error. Combined with the previous finding."
+  },
+  {
+   "file": "src/review_agents/tools.py",
+   "line_start": 160,
+   "line_end": 170,
+   "severity": "blocking",
+   "title": "read_issue returns fields via `issue.get('labels', [])` — KeyError/TypeError on malformed responses",
+   "why": "Uses issue['title'], issue['state'] with [] indexing, which raises KeyError if the API returns an unexpected shape (e.g. an 'issues' array on a PR comment endpoint or deleted issue). The exception is not caught, escaping the ToolError contract and surfacing as an unhandled error. Also `label['name']` raises on labels without 'name'."
+  },
+  {
+   "file": "src/review_agents/tools.py",
+   "line_start": 156,
+   "line_end": 158,
+   "severity": "important",
+   "title": "GitHub token sent to a URL built from user-controlled api_base; but api_base is internal — still, repo is validated so path is safe. However, token sent via Bearer regardless of host",
+   "why": "If RepoTools is ever instantiated with an api_base override (as in tests) the token is sent to that base. The class does not enforce that api_base is https. A misconfiguration or SSRF-style injected api_base (e.g. via config) leaks the token to an attacker-controlled host over plaintext HTTP. Should refuse non-https api_base when a token is set."
+  },
+  {
+   "file": "src/review_agents/tools.py",
+   "line_start": 175,
+   "line_end": 180,
+   "severity": "blocking",
+   "title": "ToolBudget.wrap catches only ToolError — GitError and OSError escape to the agent loop",
+   "why": "If git itself fails (corrupt mirror, disk full, MissingCommitError), or read_issue raises a network/JSON exception not caught, the wrapper does not turn it into a tool message — the call raises, potentially aborting the whole agent instead of returning an error string. The contract ('a request the tool refuses') should also convert infra failures into a safe error message."
+  },
+  {
+   "file": "src/review_agents/tools.py",
+   "line_start": 195,
+   "line_end": 200,
+   "severity": "important",
+   "title": "ToolBudget used from multiple agents/threads could be shared; not locked",
+   "why": "If agent_tools(one RepoTools, one ToolBudget) is used per agent this is fine, but nothing prevents sharing a budget across async tasks. `self.used += 1` is not atomic; races can exceed limit or undercount. Not currently a bug given how it's wired, but fragile."
+  },
+  {
+   "file": "tests/gitrepo.py",
+   "line_start": 20,
+   "line_end": 26,
+   "severity": "robustness",
+   "title": "Upstream.commit writes files relative to work dir but only `git push HEAD:refs/heads/<branch>` — a second commit on a non-main branch leaves work dir on the prior branch",
+   "why": "committing on `pull/7/head` then later committing on main requires the work tree to be on the right branch; the helper uses HEAD without checking out — successive calls to commit with different branches push the accumulated commit history to the new branch, so test branches aren't independent. This can produce unexpected parents in tests and mask real behavior. Test-only."
+  },
+  {
+   "file": "tests/test_tools.py",
+   "line_start": 70,
+   "line_end": 72,
+   "severity": "important",
+   "title": "Missing test for symlink pointing to a directory or escape via git tree; claim 'no checkout so symlink cannot reach host' is untested for the escape case",
+   "why": "The test only covers a symlink whose target string is read as blob content. But git objects can be queried for `commit:symlink/path/...`? No — git does not follow symlinks in tree paths. However `cat-file -t <commit>:<path>` where path contains a symlink component does NOT follow it in git; only the final entry type is 'blob' for a symlink. So safe. The test does not verify search_code does not follow a symlinked path either. Missing coverage rather than a real bug."
+  },
+  {
+   "file": "tests/test_mirror.py",
+   "line_start": 122,
+   "line_end": 132,
+   "severity": "robustness",
+   "title": "test_git_errors_never_show_the_token relies on token appearing as plaintext argument, not on realistic git failure",
+   "why": "It invokes run_git(git_dir, 'rev-parse', token, secret=token) — this tests the masking function, not that actual git HTTP errors are masked. Given the base64 header leak concern in mirror.py, this test gives false confidence."
+  },
+  {
+   "file": "pyproject.toml",
+   "line_start": 43,
+   "line_end": 44,
+   "severity": "nit",
+   "title": "Blanket S105/S106 ignore hides real hardcoded-password findings in tests",
+   "why": "Not a bug; noted because it weakens secret scanning. The `# secret-scan: allow` comments already handle known literals, so globally accepting tokens may mask real secrets."
+  },
+  {
+   "file": "Dockerfile",
+   "line_start": 18,
+   "line_end": 22,
+   "severity": "robustness",
+   "title": "git installed in runtime image after COPY of .venv? Order is fine, but apt-get install without version pin and without --allow-downgrades may upgrade libssl unexpectedly; also no verification of apt cache size after rm",
+   "why": "The mounted /data/repos directory is owned by review user, but the runtime image installs git as root and there is no explicit `--no-install-recommends` issue. The `rm -rf /var/lib/apt/lists/*` runs in a new layer, so layers are properly cleaned. Main concern: no git version pin can break reproducibility, contrary to the pinned base image philosophy. Also `git` package pulls in ca-certificates and openssh-client recommended packages only if not recommended skipped — good. Not blocking."
+  },
+  {
+   "file": "src/review_agents/mirror.py",
+   "line_start": 78,
+   "line_end": 94,
+   "severity": "important",
+   "title": "MirrorStore root not created/validated; git_dir(parent).mkdir only inside _locked, but repo name components can be '.' or '..'-adjacent",
+   "why": "check_repo_name rejects exact '..' but permits '.', so 'octo/.' → name '.' → path root/octo/.git. Also '.git' name → path root/octo/.git.git — not escaping but inconsistent. More importantly, `self._root / owner` where owner could be '.git' could collide with git-dir conventions."
+  },
+  {
+   "file": "src/review_agents/mirror.py",
+   "line_start": 46,
+   "line_end": 46,
+   "severity": "blocking",
+   "title": "git_env sets no HOME, TMPDIR, or GIT_AUTHOR env — git fetch may still attempt to read /root or use default creds helper",
+   "why": "GIT_CONFIG_NOSYSTEM and GIT_CONFIG_GLOBAL=/dev/null are set, which prevents system/global config. But credential.helper from the repo's own local config (mirror's config) is not cleared. If an attacker ever writes to the mirror config (e.g. via a submodule or poisoned fetch), credential helpers could exfiltrate the token. Should also set `-c credential.helper=` to disable any inherited helper. Additionally, HOME unset may cause warnings on some systems; git uses $HOME for credential cache — best to set GIT_CEILING_DIRECTORIES / HOME explicitly."
+  },
+  {
+   "file": "src/review_agents/mirror.py",
+   "line_start": 88,
+   "line_end": 94,
+   "severity": "blocking",
+   "title": "Token is passed to every sync including subsequent fetches into an existing mirror whose local config persists — a prior malicious commit cannot alter remote but could be fetched as a ref; however the bigger leak: error messages on auth failure include the header",
+   "why": "See earlier. The masking only replaces raw token; the base64 header must also be stripped. git's 'http.<url>.extraheader' key itself, if echoed (e.g. 'fatal: could not read config http.https://github.com.extraheader'), does not include the value. But `GIT_CURL_VERBOSE=1` isn't set, so likely fine. The risk is real but severity could be lowered; reporting as blocking given the description's explicit claim."
+  },
+  {
+   "file": "src/review_agents/tools.py",
+   "line_start": 41,
+   "line_end": 54,
+   "severity": "important",
+   "title": "_glob_regex does not verify '**' is a whole path segment; 'a**b' → 'a.*b' (matches across segments)",
+   "why": "A pattern like 'src/a**b' would match 'src/a/b' because ** compiles to '.*'. That's the intent for **. Not a bug per se, but the compilation does not reject empty globs that produce empty regex — `glob_match('', path)` compiles to '' which fullmatches only empty string. is_skipped with an empty pattern skips nothing. Fine. More important: paths are matched against a glob as a raw string; a pattern with regex metachars is escaped correctly except for the ** expansion. OK."
+  },
+  {
+   "file": "src/review_agents/tools.py",
+   "line_start": 41,
+   "line_end": 54,
+   "severity": "robustness",
+   "title": "No anchoring at start with '^'; fullmatch anchors at both ends, but leading '/' in path is stripped by _clean_path, so path_glob patterns expecting '/x' won't match",
+   "why": "Fine. Skip-path patterns in repo config likely already assume no leading slash."
+  },
+  {
+   "file": "src/review_agents/tools.py",
+   "line_start": 90,
+   "line_end": 92,
+   "severity": "important",
+   "title": "kind check happens after fetching -t, but a submodule (git type 'commit') or tag object would produce kind='commit' and be reported as 'directory' to the user",
+   "why": "In a tree, a submodule entry is of type 'commit', and the user-facing error says 'directory; use list_dir' — misleading but not a security bug. Worse, `git cat-file blob <sha:path>` on a commit-type entry returns the commit blob content (raw commit), and since kind != 'blob' check catches it first, no. But the misleading message confuses the agent."
+  }
+ ],
+ "content": null,
+ "error": null
+}

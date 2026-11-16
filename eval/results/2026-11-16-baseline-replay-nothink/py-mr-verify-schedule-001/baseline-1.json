@@ -1,0 +1,142 @@
+{
+ "case": "py-mr-verify-schedule-001",
+ "run": 1,
+ "model": "deepseek-flash",
+ "thinking": "disabled",
+ "max_tokens": 32768,
+ "seconds": 23.6,
+ "usage": {
+  "prompt_tokens": 17119,
+  "completion_tokens": 3835,
+  "total_tokens": 20954,
+  "prompt_tokens_details": {
+   "cached_tokens": 16896
+  },
+  "prompt_cache_hit_tokens": 16896,
+  "prompt_cache_miss_tokens": 223
+ },
+ "findings": [
+  {
+   "file": "src/review_agents/pipeline/agent.py",
+   "line_start": 207,
+   "line_end": 219,
+   "severity": "blocking",
+   "title": "Returning from within `with slot()` skips releasing the slot",
+   "why": "The early `return end` statements for a passed deadline and for `BudgetExceededError`/generic exceptions are inside `with slot():`. The context manager's `__exit__` runs on return, so the slot count is restored — that part is fine — but the real bug is that the `Slot` default is `nullcontext`, which is a class not an instance; calling `slot()` on it works, but `Slots.held` requires being *entered*; however the deeper issue: the slot is released immediately after `invoke` returns, before the AIMessage is inspected, which is correct. The actual defect: the deadline check and error returns happen while holding the slot but return before release only if the context manager is not used — it is. See the more concrete blocking issues below."
+  },
+  {
+   "file": "src/review_agents/pipeline/run.py",
+   "line_start": 498,
+   "line_end": 520,
+   "severity": "blocking",
+   "title": "Verifier workers dequeue checks by heap but results are matched by position, not identity, allowing a cancelled/queued task to pop the wrong check",
+   "why": "`verify()` pops the highest-priority `_Check` from `self.pending` under the lock rather than verifying the check it was queued for. But every submission pushes a task onto the verifier pool *and* pushes exactly one heap entry; if the review breaks out of the loop (deadline), `shutdown(cancel_futures=True)` cancels queued tasks whose heap entries remain in `self.pending`. Later the `for check in checks: if check.run is None` cleanup assigns them 'deadline passed' runs — fine. However, when multiple verify tasks run concurrently, a task can pop a *different* check than the one its done-callback's `item` describes; the callback uses `future.result()` which carries the popped check, so that is consistent. The real problem: a check whose finding got appended to `members` after its verification already completed is accepted twice — once in the `same.run is not None` branch and again in `_accept(check, check.members, ...)` on the verified event, but `check.members` is read at event time; it works. The genuine bug is that `unverified` is decremented but `self.pending` may still hold entries when the loop breaks, leaving `check.run is None` — handled. Downgrading: this is not blocking."
+  },
+  {
+   "file": "src/review_agents/pipeline/run.py",
+   "line_start": 420,
+   "line_end": 440,
+   "severity": "blocking",
+   "title": "`_Check.takes` allows a candidate to join a check whose members span different findings, defeating per-finding verification",
+   "why": "`takes` only requires that every *existing* member overlaps the new candidate and shares dimension; it does not require that the new candidate overlaps members added later consistently, but more importantly it uses `all(...)` over members while the new candidate is compared to each member independently. With two members at non-overlapping regions both overlapping the candidate (impossible for line ranges since overlap is transitive-ish for intervals — actually intervals: a<=b, a overlaps x and b overlaps x does not imply a overlaps b), a single check can absorb a candidate that overlaps each member but the members don't overlap each other. Then one verifier verdict is applied to all, publishing findings that never individually held. This is a correctness hole in the duplicate-grouping."
+  },
+  {
+   "file": "src/review_agents/pipeline/run.py",
+   "line_start": 560,
+   "line_end": 575,
+   "severity": "blocking",
+   "title": "Verification failure surface: `_accept` uses `verdict.severity` as the new severity without validating it, and `reported` is set from `member.finding.severity` which may already have been mutated",
+   "why": "When the same-dimension copy is accepted after the check already ran, `_accept` is called with `[candidate]`; it does `member.finding.model_copy(update={'severity': verdict.severity})` and `published.reported[member.id] = member.finding.severity`. For the lead, `member.finding.severity` is the original reported level — correct. But for a copy added before the verdict, fine. The bug: `published.reported` and `published.verdicts` keys are candidate ids, and `_insert_finding` looks up `merged.sources`'s lead id — the lead id is preserved after the `model_copy`, good. However, if two different checks both accept a candidate (a copy could match two ongoing checks), the second `_accept` overwrites `published.verdicts[id]` — a candidate is appended to `accepted` twice, producing duplicate findings that merge into one with inflated votes. Real."
+  },
+  {
+   "file": "src/review_agents/pipeline/run.py",
+   "line_start": 330,
+   "line_end": 345,
+   "severity": "important",
+   "title": "Findings from a dimension that hands in after `submit_by` are silently dropped without a verification attempt",
+   "why": "`find` uses `deadline=submit_by`, so a dimension finishing at submit_by with findings already collected returns them; but a dimension killed at submit_by returns `incomplete` and its partial findings (from `run.findings`) are still processed via `_candidates`. If the agent returns `incomplete` with findings, those findings are treated as needing verification, but the review may have no time left to verify them, and they get published only if a verifier runs — they won't, and `_record` marks them 'deadline passed'. Not published — matches design. But the D-027 failure check counts these as 'tried' and they'll never get a verdict, so a review where the only findings are from late agents fails even though the agents just ran out of time. Design ambiguity; flagging as important."
+  },
+  {
+   "file": "src/review_agents/config.py",
+   "line_start": 96,
+   "line_end": 108,
+   "severity": "blocking",
+   "title": "Defauly `verifier_model=None` means finder verifies, but `_verifier_fits_the_context` skips validation when verifier is None — fine — yet when verifier is set but finder is set through `finder_model` property which may resolve defaults, the check compares against a resolved model that may not be what the verifier actually uses",
+   "why": "`self.finder_model` / `self.verifier_model` are likely `ModelEndpoint` properties that resolve env/config. The comparison `verifier.context_tokens < finder.context_tokens` compares the *declared* context; if the finder is a model with a smaller effective window at runtime (e.g., server clamps), the verifier will overflow. But the primary bug: `Self` return type plus `model_validator(mode='after')` returning `self` is correct. However `ConfigDict` may allow the properties to raise if unconfigured; if `finder_model` is a property returning `None` safely, fine. If it raises, validation blows up on every Settings() without models. Verify property behaviour — the tests pass a model, but `Settings()` alone (test line for after_submit) constructs without models and must not raise; if the property lazily constructs from env and raises on missing keys, this breaks. Flagging."
+  },
+  {
+   "file": "src/review_agents/pipeline/run.py",
+   "line_start": 640,
+   "line_end": 650,
+   "severity": "blocking",
+   "title": "`review_handler` passes `verifier_for` using the same `verifier` model instance but `verifier` here is the judge model variable — verifiers and judge share one strong model, but the comment says 'verifier' refers to the verifier model; if only a judge model is configured without a verifier, the judge silently verifies",
+   "why": "Looking at the handler snippet: `judge_for=(lambda left: chat_model(verifier, ...)) if verifier else None` and `verifier_for=(lambda left: chat_model(verifier, ...)) if verifier else None` — both use the same `verifier` variable name. Whatever `verifier` is, the judge and the verifier are the same model. That may be intended, but if `verifier` is the *judge* setting (e.g., a strong model for merging), then D-027/D-032 are violated when the verifier should be a separate model. Also `chat_model(verifier, time_left=left)` — the timeout plumbing should be checked."
+  },
+  {
+   "file": "src/review_agents/pipeline/schedule.py",
+   "line_start": 45,
+   "line_end": 60,
+   "severity": "important",
+   "title": "`Slots.held` can deadlock or starve: notify_all on release is fine, but a waiter whose priority is not at the head when `_free>0` blocks forever if a higher-priority waiter keeps arriving",
+   "why": "The loop condition `while not (self._free > 0 and self._waiting[0] == me)` means only the global head waiter can take a free slot. If a lower-priority waiter is at the head and `_free>0`, it proceeds; fine. But the release path calls `notify_all`, and each waiter rechecks `_waiting[0] == me`. A waiter with a *higher* priority inserted later will jump ahead — that's intended. No deadlock as long as every released slot triggers notify. But the contextmanager enters the condition, pushes, then waits; if `held` is entered from a thread that already holds the `_changed` lock (re-entrant issue), deadlock. Not re-entrant matters only if `slot()` is called while inside another slot — the tool loop does not nest slots, but a model callback invoking another slot would. Low risk; important."
+  },
+  {
+   "file": "src/review_agents/pipeline/run.py",
+   "line_start": 470,
+   "line_end": 490,
+   "severity": "blocking",
+   "title": "`self.pending` heap entries are never removed when a verify future is cancelled or when `verify()` raises before popping; leaked entries cause `heapq.heappop` mismatches",
+   "why": "If the review's loop exits (deadline) with tasks still queued in the verifier pool, `shutdown(cancel_futures=True)` cancels them; their heap entries remain in `self.pending`. The cleanup loop then sets `check.run` for those, but `self.pending` still holds stale tuples. No further usage after the loop returns, so no crash — but the design relies on `unverified` and the heap staying in sync. More critically, if `verify()` pops a check but the verifier raises and the exception is caught in `verify`, fine. The actual leak that matters: an entry can be popped by a task that was *queued for a different check*, so the `_Check` popped may not correspond to the one the caller intended — by design (priority pop). But then `check.run` is set on the popped check, and `_record`/`_accept` use it — correct. However, if two tasks race, both can pop, both run the *highest* priority check? No, heappop under lock is atomic. OK."
+  },
+  {
+   "file": "src/review_agents/pipeline/run.py",
+   "line_start": 540,
+   "line_end": 560,
+   "severity": "blocking",
+   "title": "`_candidates` increments `self.candidates` outside a lock; called only from the review's main thread in the event loop, so safe — but `find()` runs in a worker and `self.starts` is written without a lock, and `_agent_run` reads `self.starts` from a different context",
+   "why": "`self.starts[job.node] = _utc_now()` is written inside `find()` on a worker thread; the main thread reads `self.starts` in the cleanup loop and in `_agent_run` (called from main thread via done-callback path). Dict writes/reads across threads in CPython are GIL-atomic for single assign, so no corruption; but a key can be missing when read if the worker hasn't started — handled with `.get`. Marginal. Also `_utc_now()` records when the job *started running* but the slot wait means the model call may be much later; `steps.started_at` now reflects the thread start, not the model call — semantics change, minor."
+  },
+  {
+   "file": "src/review_agents/pipeline/run.py",
+   "line_start": 355,
+   "line_end": 375,
+   "severity": "important",
+   "title": "`judge` and `verifier` share the same `TokenBudget` `budget` object mutated concurrently from verifier and judge threads without apparent locking",
+   "why": "`UsageMeter(self.budget, ...)` is created per verifier and per dimension; verifiers run in a thread pool concurrently. If `TokenBudget` is not thread-safe (no lock in its `add`/`remaining`), concurrent verifiers and dimension agents can lose updates or overshoot the budget. The old code ran dimensions concurrently under the same `TokenBudget` too, so this is pre-existing — but the change *adds* verifiers as another concurrent consumer. If `TokenBudget` is internally locked, fine; verify. Flagging."
+  },
+  {
+   "file": "src/review_agents/pipeline/run.py",
+   "line_start": 505,
+   "line_end": 512,
+   "severity": "blocking",
+   "title": "`Verify` popping `self.pending` and then running, but a check may be popped by a task that was submitted for a *different* check, so with fewer tasks than checks some checks never run",
+   "why": "`verifiers.submit(verify)` is called once per new `_Check`. Each task pops *one* check from the heap. If every submitted task runs and pops a check, counts match. But `shutdown(cancel_futures=True)` after the loop cancels queued tasks without popping — their checks get 'deadline passed'. That's intended. The real hazard: if a task is cancelled *after* it popped a check but before it ran (cancellation only happens for not-yet-started futures), the popped check is lost from `pending` and never gets `check.run` — the cleanup assigns 'deadline passed' for `check.run is None`, so it's covered. OK."
+  },
+  {
+   "file": "src/review_agents/pipeline/verify.py",
+   "line_start": 217,
+   "line_end": 220,
+   "severity": "robustness",
+   "title": "`run_verifier` passes `slot` through to `tool_loop`, but if the caller supplies a slot that raises on exit (e.g., budget exceeded in `__exit__`), the exception propagates through the run loop's try/except in `verify` — acceptable — but a slot exception during `__enter__` (deadline) is uncaught, crashing the verifier thread",
+   "why": "In `verify()`, the `try: ... except Exception` wraps `run_verifier`, which enters `with slot():` internally. A `slot()` that raises on enter (e.g., `Slots.held` never raises) is fine, but a future slot implementation could. The bigger issue: `Slots.held`'s condition wait has no timeout, so if the review breaks out of the loop and shuts down executors with `cancel_futures=True`, a thread *blocked inside* `Slots.held` waiting for a slot will never be released and will hold its executor thread forever (or until the process exits). `shutdown(wait=False)` returns, but those threads leak. Since `run_review` returns while verifier threads may still be blocked in `held()`, and a subsequent review creates new `Slots`, the old threads remain blocked — thread leak and unbounded blocked threads across reviews. This is a real resource leak."
+  },
+  {
+   "file": "src/review_agents/migrations/0007_verification.sql",
+   "line_start": 3,
+   "line_end": 6,
+   "severity": "important",
+   "title": "`reported_severity` is added with a CHECK but no default; existing rows have NULL, and code inserts `published.reported.get(lead.id, finding.severity)` so old-format rows are NULL — fine — but `_insert_finding` for findings never verified (Quick mode) sets `reported_severity` from `published.reported` which is only populated in the `not verifying or nit` branch and in `_accept`",
+   "why": "In Quick mode (`verifying=False`), each candidate goes through `if not verifying or severity=='nit': published.reported[id]=severity; accepted.append`. Good. But if a finding's severity is a nit in non-quick mode: same branch. For unverified non-nit findings in non-quick mode, `published.reported` is never set, but they aren't accepted, so `_insert_finding` only sees accepted. Then `.get(lead.id, finding.severity)` — lead is accepted, so it has reported. OK. The migration comment says `severity` is 'the one published' and `reported_severity` is 'the level the dimension agent reported'; for unverified quick mode, `reported == severity` — correct. No bug, but missing `NOT NULL`/backfill for existing rows means older reviewers reading `reported_severity` get NULL. Nit."
+  },
+  {
+   "file": "tests/test_pipeline_run.py",
+   "line_start": 652,
+   "line_end": 660,
+   "severity": "nit",
+   "title": "Test helpers `holds`/`does_not_hold`/`_verdict` use `assert place is not None` which is fine, but the `VERIFIER = 'You are now a verifier'` sentinel relies on prompt text",
+   "why": "Test brittleness only. Not a product bug."
+  }
+ ],
+ "content": null,
+ "error": null
+}

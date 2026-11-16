@@ -1,0 +1,22 @@
+{
+ "case": "py-mr-pipeline-run-001",
+ "run": 2,
+ "model": "deepseek-flash",
+ "seconds": 333.4,
+ "usage": {
+  "prompt_tokens": 10699,
+  "completion_tokens": 65536,
+  "total_tokens": 76235,
+  "prompt_tokens_details": {
+   "cached_tokens": 10496
+  },
+  "completion_tokens_details": {
+   "reasoning_tokens": 65536
+  },
+  "prompt_cache_hit_tokens": 10496,
+  "prompt_cache_miss_tokens": 203
+ },
+ "findings": null,
+ "content": "",
+ "error": "JSONDecodeError: Expecting value: line 1 column 1 (char 0)"
+}

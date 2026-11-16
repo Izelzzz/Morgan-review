@@ -1,0 +1,62 @@
+{
+ "case": "yaml-mr-ci-template-001",
+ "run": 2,
+ "model": "deepseek-flash",
+ "seconds": 338.7,
+ "usage": {
+  "prompt_tokens": 14746,
+  "completion_tokens": 62712,
+  "total_tokens": 77458,
+  "prompt_tokens_details": {
+   "cached_tokens": 14592
+  },
+  "completion_tokens_details": {
+   "reasoning_tokens": 61819
+  },
+  "prompt_cache_hit_tokens": 14592,
+  "prompt_cache_miss_tokens": 154
+ },
+ "findings": [
+  {
+   "file": "ci/review-agents.yml",
+   "line_start": 35,
+   "line_end": 37,
+   "severity": "important",
+   "title": "Any comment on the PR cancels the review run that is in flight",
+   "why": "The workflow triggers on `issue_comment: created` for every comment, and the single concurrency group `review-agents-<PR number>` with `cancel-in-progress: true` is taken by that run even when the `review` job's `if` later skips it. So a comment by anyone — including a non-collaborator's `/review`, which the action will refuse, or a plain comment — cancels the pull_request_target run that is polling the service, and its `post` job is cancelled too. The review result is never posted and the check never resolves, so anyone can keep a PR unreviewed/unmergeable just by commenting on it."
+  },
+  {
+   "file": "ci/review-agents.yml",
+   "line_start": 16,
+   "line_end": 17,
+   "severity": "important",
+   "title": "A pull_request_target check run lands on the base commit, so `post` cannot be a required check for the PR",
+   "why": "Check runs are created for the workflow run's head SHA; for `pull_request_target` GITHUB_SHA is the last commit of the base (default) branch, so the `post` check is reported there and not on the PR's head commit. Required status checks are matched against the PR head, so following README step 3 / the template comment and making `post` required leaves PRs waiting forever on a check that never runs on their head, while the red/green result produced by the review is never evaluated for merging — the feature's central promise (D-037) does not hold."
+  },
+  {
+   "file": "ci/review_agents_ci.py",
+   "line_start": 56,
+   "line_end": 62,
+   "severity": "robustness",
+   "title": "The https-only guard is bypassed by redirects",
+   "why": "Only the initial URL is checked with `startswith(\"https://\")`; `urllib.request.urlopen` follows 3xx redirects by default and `HTTPRedirectHandler` copies the request headers (including `Authorization` / `X-Review-Agents-Signature`) onto the redirected request. A redirect to `http://` (or another host) re-sends the GitHub token or the signed body in clear, contradicting the documented invariant that no other scheme/host is ever opened."
+  },
+  {
+   "file": "ci/review_agents_ci.py",
+   "line_start": 338,
+   "line_end": 343,
+   "severity": "robustness",
+   "title": "Rejected inline comments are silently dropped when the summary has no counts marker",
+   "why": "The rejected comments are inserted with `summary.rpartition(\"\\n<!-- review-agents:counts\")`; when that marker is absent `sep` is empty, `updated` becomes the unchanged `summary`, `_upsert` sees the body already posted and issues no request, and the comments GitHub refused are lost with no error. Nothing validates that the report's summary carries the marker (`gate` only looks at `report['counts']`), so D-033 ③ (\"none is lost\") is not guaranteed."
+  },
+  {
+   "file": "ci/review_agents_ci.py",
+   "line_start": 159,
+   "line_end": 174,
+   "severity": "robustness",
+   "title": "GitHub API failures before the try block leave no result file for the post job",
+   "why": "Only the service calls are wrapped in `try/except Failure`; the PR fetches and the head check (`github.ok(...)`) are outside it, so a 5xx/rate-limited/403 GitHub response raises `Failure` uncaught, the step dies with a traceback, the artifact is never uploaded and the `post` job then fails on the download step. The reason never reaches the PR (no summary update, empty step summary), and the required check stays red until a re-run."
+  }
+ ],
+ "content": null
+}

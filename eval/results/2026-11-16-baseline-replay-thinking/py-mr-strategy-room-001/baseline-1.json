@@ -1,0 +1,62 @@
+{
+ "case": "py-mr-strategy-room-001",
+ "run": 1,
+ "model": "deepseek-flash",
+ "seconds": 302.5,
+ "usage": {
+  "prompt_tokens": 9605,
+  "completion_tokens": 55512,
+  "total_tokens": 65117,
+  "prompt_tokens_details": {
+   "cached_tokens": 0
+  },
+  "completion_tokens_details": {
+   "reasoning_tokens": 54455
+  },
+  "prompt_cache_hit_tokens": 0,
+  "prompt_cache_miss_tokens": 9605
+ },
+ "findings": [
+  {
+   "file": "src/review_agents/pipeline/run.py",
+   "line_start": 583,
+   "line_end": 585,
+   "severity": "important",
+   "title": "Walkthrough-first agent waits until the submit deadline and then has no time to review",
+   "why": "The walkthrough and the group-1 finder now run one after the other, but the finder keeps the review-wide `submit_by` deadline, and the wait's timeout is `submit_by` itself. On any PR where the walkthrough consumes a meaningful share of the window, the finder either starts with its budget already cut by the walkthrough's duration or starts exactly at the deadline, so group 1's findings miss \"the latest submit time\" and are reported as not handed in (previously the dimension agents ran in parallel with the walkthrough). The wait must stop early enough to leave the agent its own share of the window, otherwise `walkthrough_first` silently loses the whole first group exactly on the large PRs it is meant for."
+  },
+  {
+   "file": "src/review_agents/context/pack.py",
+   "line_start": 103,
+   "line_end": 104,
+   "severity": "important",
+   "title": "The general agent's all-dimensions task inflates fixed_tokens for every strategy",
+   "why": "`fixed_tokens` is the per-group fixed-prompt estimate used while packs are built, and packs are built before the strategy is known. Adding `task(GENERAL, DIMENSIONS)` (every skill concatenated) to the `max` raises that estimate for every strategy, so with the default `dimensions` strategy (and with quick mode, which holds at most two dimensions) the packing reserves room for a task no agent will ever use. The same PR is therefore split into more groups than before, adding agents, cost and cross-group duplicate findings even though the description says `dimensions` is unchanged; the estimate needs to be per-strategy (or stated as the strategy's own task), not a global maximum."
+  },
+  {
+   "file": "src/review_agents/pipeline/agent.py",
+   "line_start": 322,
+   "line_end": 324,
+   "severity": "robustness",
+   "title": "A carrying-on agent starts from the walkthrough's whole transcript with nothing accounting for its size",
+   "why": "With `opening`, the agent's first prompt becomes the entire walkthrough transcript — an agentic conversation full of code and tool results — plus its task, while the pack it was planned with was sized by `fixed_tokens` as if the conversation started fresh. Nothing here checks the resulting size, so a long walkthrough can push the finder's very first call past the model window or past the token budget derived from the group, giving a failed or force-submitted run instead of findings. The transcript's tokens need to be counted against the agent's limits/packing (or trimmed) when it is used as an opening."
+  },
+  {
+   "file": "src/review_agents/pipeline/strategy.py",
+   "line_start": 58,
+   "line_end": 58,
+   "severity": "robustness",
+   "title": "A plan with no enabled dimension builds a general agent holding no rules, which then crashes",
+   "why": "`mode_plan` can return an empty dimension list (nothing validates that at least one dimension is enabled), and the `else` branch then builds `Author(GENERAL, ())`. In `run_dimension`, `held = dimensions or (dimension,)` turns that empty tuple back into `(\"general\",)`, so `task()` indexes `SKILLS[\"general\"]`, which does not exist: a KeyError in the review's only agent. The old code simply produced no dimension agents for that config. Either `plan` must not emit an author with no rules, or the empty/`GENERAL` case must not fall through to `SKILLS[dimension]`."
+  },
+  {
+   "file": "src/review_agents/pipeline/agent.py",
+   "line_start": 350,
+   "line_end": 352,
+   "severity": "robustness",
+   "title": "An untrusted dimension tag becomes \"general\", a value outside DIMENSIONS",
+   "why": "For a general agent, a tag it does not hold (a misspelt or foreign dimension) is replaced by `dimension`, i.e. the agent's own name `GENERAL` = \"general\". That is not one of `DIMENSIONS`: `Plan.dimensions`, which the report uses as the list of dimensions that were reviewed, never contains it, so the finding ends up under a pseudo-dimension that the summary does not list, and any downstream per-dimension handling (merge/rank/report grouping keyed on the real dimensions) has no bucket for it. The fallback should map the finding onto a dimension the agent actually holds (or drop it), not onto the agent's name."
+  }
+ ],
+ "content": null
+}

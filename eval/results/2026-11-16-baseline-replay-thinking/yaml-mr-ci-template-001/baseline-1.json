@@ -1,0 +1,94 @@
+{
+ "case": "yaml-mr-ci-template-001",
+ "run": 1,
+ "model": "deepseek-flash",
+ "seconds": 243.0,
+ "usage": {
+  "prompt_tokens": 14746,
+  "completion_tokens": 45863,
+  "total_tokens": 60609,
+  "prompt_tokens_details": {
+   "cached_tokens": 0
+  },
+  "completion_tokens_details": {
+   "reasoning_tokens": 44179
+  },
+  "prompt_cache_hit_tokens": 0,
+  "prompt_cache_miss_tokens": 14746
+ },
+ "findings": [
+  {
+   "file": "ci/review_agents_ci.py",
+   "line_start": 209,
+   "line_end": 212,
+   "severity": "important",
+   "title": "Service error detail is republished in a public PR comment and can leak the GITHUB_TOKEN",
+   "why": "`_detail` copies up to 300 characters of the service's `detail` field into the `Failure` message. `review()` stores that text as `reason` in the artifact, and `post()` writes `reason` verbatim into the public summary comment (`## 审查失败 ...`). The request body sent to the service contains `\"token\": github.token`, so any service that echoes the request back on a validation error (e.g. FastAPI's 422 `detail[].input`, which contains the whole body) publishes the job's token and internal error text on the pull request. Error text from an untrusted endpoint should never be forwarded into a comment, and the token should be stripped/omitted from anything written to `--result`."
+  },
+  {
+   "file": "ci/review-agents.yml",
+   "line_start": 35,
+   "line_end": 37,
+   "severity": "important",
+   "title": "A /review comment cancels the run whose post check the branch protection needs",
+   "why": "The concurrency group is shared by push-triggered and issue_comment-triggered runs with `cancel-in-progress: true`. A collaborator commenting `/review` while a review is in flight (reviews can run ~30-45 minutes) cancels that run; the comment run then reports its checks against the default branch, not the PR head, so nothing ever produces a `post` result for the head. The head is left with a check that does not reflect a finished review: if the skipped `post` job counts as passing (the reason `!cancelled()` is needed at line 52), the required check is green without a review; if the cancellation counts as failure, the PR stays blocked until another push."
+  },
+  {
+   "file": "ci/review/action.yml",
+   "line_start": 24,
+   "line_end": 30,
+   "severity": "important",
+   "title": "No artifact is uploaded when the review step fails, so the post job dies in download-artifact",
+   "why": "The upload step has no `if: always()` and the script only produces `$RUNNER_TEMP/review-agents-result.json` on its normal paths. When it exits 2 (missing secrets, a very likely misconfiguration) or dies with an uncaught exception (see the `review()` findings) no file exists; `download-artifact` then fails with 'Artifact not found' and the previous review's summary/walkthrough stay up as if they were current, instead of being replaced by the failure summary `post()` was written to produce."
+  },
+  {
+   "file": "ci/review_agents_ci.py",
+   "line_start": 158,
+   "line_end": 173,
+   "severity": "important",
+   "title": "GitHub lookups run before the try, so one API error kills the run with no result file",
+   "why": "`github.ok(\"GET\", f\"/pulls/{...}\")` at lines 158 and 168 happens outside the `try`, and the `try` only converts `Failure`. A 403 (rate limit), 404 (deleted PR) or 5xx there - and a malformed service reply such as a missing `created[\"id\"]` or `polled[\"status\"]` - escapes as an unhandled exception: nothing is written to `--result`, no artifact is produced, and the post job fails at download with no explanation and no summary update. These paths should be recorded as `{\"status\": \"error\", \"reason\": ...}` like the rest."
+  },
+  {
+   "file": "ci/review_agents_ci.py",
+   "line_start": 62,
+   "line_end": 72,
+   "severity": "robustness",
+   "title": "A non-JSON 200 response raises an uncaught JSONDecodeError",
+   "why": "`json.loads(raw)` sits in the success branch, and the handlers only catch `HTTPError`, `URLError`, `TimeoutError` and `OSError`; `JSONDecodeError` is a `ValueError`. A 200 with an HTML/proxy/error page (or a truncated body) therefore crashes the review step instead of becoming a recorded `Failure`, with the same consequence as above: no artifact, stale summary."
+  },
+  {
+   "file": "ci/review_agents_ci.py",
+   "line_start": 56,
+   "line_end": 60,
+   "severity": "robustness",
+   "title": "The https-only check covers only the first URL; redirects re-send the token",
+   "why": "The scheme is checked on the URL the caller passed, but `urllib.request.urlopen` follows 3xx responses and re-sends the request headers (Authorization, User-Agent, and the service signature) to the redirect target without this code re-checking scheme or host. A redirect to another host - or to http:// - sends the read-only token/secret-signed request over a channel the module claims never to use, and the post job's token is a write token."
+  },
+  {
+   "file": "ci/review_agents_ci.py",
+   "line_start": 337,
+   "line_end": 342,
+   "severity": "robustness",
+   "title": "Rejected inline comments are silently dropped when the summary has no counts line",
+   "why": "`summary.rpartition(\"\\n<!-- review-agents:counts\")` leaves `sep` empty unless the report's summary contains that exact hidden line; in that case `updated == summary`, `_upsert` sees an unchanged body and writes nothing, so every comment GitHub rejected (403/422, an outage, a summary rendered by an older/other service version) disappears - exactly what D-033 ③ says must not happen. The rejected section should be appended even without the marker."
+  },
+  {
+   "file": "ci/review_agents_ci.py",
+   "line_start": 307,
+   "line_end": 310,
+   "severity": "robustness",
+   "title": "post() indexes report[\"summary\"] unguarded and never handles Failure",
+   "why": "`gate()` tolerates a report without counts, but `post()` then dereferences `report[\"summary\"]` directly; a report missing that key raises KeyError and the job dies after the walkthrough was already updated, without the failure summary that the `status != \"done\"` branch exists to write. Likewise any `GitHub.request` `Failure` in `post` (5xx while paginating comments, 403 on PATCH, a rate limit on the batch) propagates as a traceback, leaving the last round's summary posted and the check red with no explanation."
+  },
+  {
+   "file": "ci/review_agents_ci.py",
+   "line_start": 288,
+   "line_end": 296,
+   "severity": "robustness",
+   "title": "post never re-checks that the review is still for the PR's head",
+   "why": "D-021 stops an older *submission*, but the post job only shares the concurrency group indirectly: a post that starts just before a new push (or that overlaps the next run's post, since only `review` is in the group) still overwrites the walkthrough/summary with the older round's text and then fails to place its inline comments on the moved head, dumping them into the summary. Comparing `result[\"head_sha\"]` with the PR's current head before writing, as `review()` does, would keep a stale round from clobbering the newer one."
+  }
+ ],
+ "content": null
+}

@@ -1,0 +1,70 @@
+{
+ "case": "py-mr-mirror-tools-001",
+ "run": 2,
+ "model": "deepseek-flash",
+ "seconds": 335.7,
+ "usage": {
+  "prompt_tokens": 9799,
+  "completion_tokens": 58047,
+  "total_tokens": 67846,
+  "prompt_tokens_details": {
+   "cached_tokens": 9600
+  },
+  "completion_tokens_details": {
+   "reasoning_tokens": 57273
+  },
+  "prompt_cache_hit_tokens": 9600,
+  "prompt_cache_miss_tokens": 199
+ },
+ "findings": [
+  {
+   "file": "src/review_agents/tools.py",
+   "line_start": 139,
+   "line_end": 156,
+   "severity": "important",
+   "title": "search_code bypasses skip/path filters on quoted or colon-containing paths",
+   "why": "git grep output is C-quoted by default (non-ASCII/control characters) and paths are then split at the first colon. The code uses that quoted/truncated string for is_skipped/glob_match but still returns the full match line. A PR can add e.g. `é.pem` matching a `**/*.pem` skip rule; the quoted path does not match the skip glob, so the file content is returned. Filenames containing `:` are also filtered against the wrong path. This violates the skip-rule contract and can leak files intended to be hidden."
+  },
+  {
+   "file": "src/review_agents/tools.py",
+   "line_start": 139,
+   "line_end": 162,
+   "severity": "important",
+   "title": "search_code has no file-size or output-size cap",
+   "why": "Unlike read_file, search_code never checks MAX_FILE_BYTES and appends whole git grep matching lines without truncation. A large text blob or a single very long matching line can produce arbitrarily large output, exhausting memory or the model context. One tool call can do this, so the 25-call budget does not help; this contradicts the claimed 200 KB limit applying to every tool."
+  },
+  {
+   "file": "src/review_agents/tools.py",
+   "line_start": 121,
+   "line_end": 131,
+   "severity": "robustness",
+   "title": "list_dir output is unbounded",
+   "why": "git ls-tree output is decoded and every entry is appended without a max entry count or byte cap. A repository/directory with very many files or very long names can make one list_dir call return a huge string and exhaust memory/context. The tool budget limits call count, not output size."
+  },
+  {
+   "file": "src/review_agents/tools.py",
+   "line_start": 183,
+   "line_end": 192,
+   "severity": "robustness",
+   "title": "read_issue lets JSON/KeyError escape instead of returning ToolError",
+   "why": "Only HTTPError, URLError and TimeoutError are converted to ToolError. A 200 response with malformed JSON, a non-object JSON value, or missing `title`/`state`/label keys raises JSONDecodeError/TypeError/KeyError. ToolBudget.wrap catches only ToolError, so such a response aborts the review instead of being returned to the agent as an error."
+  },
+  {
+   "file": "src/review_agents/tools.py",
+   "line_start": 81,
+   "line_end": 81,
+   "severity": "important",
+   "title": "Commit is not validated before being passed to git_log",
+   "why": "RepoTools stores any caller-supplied commit string, and git_log later appends it directly as an argument (line 168). If the value is not a full SHA, Git can interpret it as an option; e.g. `--output=/data/...` can write files, breaking the read-only guarantee. The constructor should enforce the same full-SHA validation used by MirrorStore.sync."
+  },
+  {
+   "file": "src/review_agents/tools.py",
+   "line_start": 34,
+   "line_end": 49,
+   "severity": "robustness",
+   "title": "Agent-controlled path_glob can cause regex cache growth or catastrophic backtracking",
+   "why": "_glob_regex is an unbounded global cache keyed by arbitrary path_glob strings, and its translation turns repeated `**/` into repeated `(?:.*/)?` groups. An agent can submit many unique or pathological globs, causing unbounded memory growth and potentially exponential backtracking in glob_match on long paths, hanging the review process."
+  }
+ ],
+ "content": null
+}

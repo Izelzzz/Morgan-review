@@ -1,0 +1,197 @@
+{
+ "case": "yaml-mr-ci-template-001",
+ "run": 2,
+ "model": "deepseek-flash",
+ "thinking": "disabled",
+ "seconds": 30.0,
+ "usage": {
+  "prompt_tokens": 14722,
+  "completion_tokens": 4831,
+  "total_tokens": 19553,
+  "prompt_tokens_details": {
+   "cached_tokens": 14588
+  },
+  "prompt_cache_hit_tokens": 14588,
+  "prompt_cache_miss_tokens": 134
+ },
+ "findings": [
+  {
+   "file": "ci/review_agents_ci.py",
+   "line_start": 267,
+   "line_end": 300,
+   "severity": "blocking",
+   "title": "review() passes the read-only token to the service but never verifies head after re-fetch; for issue_comment it uses issue['number'] then posts to pull number",
+   "why": "On the issue_comment path, pr is fetched via /pulls/{issue['number']} and then PR number == issue number is assumed only in the request; downstream post() keys everything on result['pr'], which is set from pr['number'], so that part is fine. The real bug is the manual path: the collaborator comment carries only the issue number, but the PR head at comment time can advance between the comment and the fetch, and review() for manual events skips the D-021 head-check that the pull_request_target branch performs—so a manual /review of a PR whose head has changed since the comment still submits whatever the current head is, which is acceptable, but more importantly it never confirms the current head equals the commit that was reviewed/rendered by the workflow's event, so the artifact's head_sha can mismatch what the user asked to review. The consequence is a review of a different commit than the one the user commented on, with inline comments anchored to a stale head the API will reject."
+  },
+  {
+   "file": "ci/review_agents_ci.py",
+   "line_start": 196,
+   "line_end": 199,
+   "severity": "blocking",
+   "title": "Service request signature does not include query or full path consistently with polling URL",
+   "why": "Service.request signs `{timestamp}\\n{method}\\n{path}\\n` + body with path being the relative path passed by callers (/v1/reviews and /v1/reviews/{id}). The test's verify uses the same relative path so it passes, but the server must re-derive the exact signed path. If the server signs the full request URI (including any trailing slash or query) or the URL is built with self.url.rstrip('/') + path, the two can disagree; more concretely, Service stores url possibly with a path prefix (e.g. https://host/api), and request() signs only `/v1/reviews` while sending https://host/api/v1/reviews — the HMAC is over a path the server cannot reconstruct from the request. Any deployment behind a path prefix is silently rejected with 401."
+  },
+  {
+   "file": "ci/review_agents_ci.py",
+   "line_start": 289,
+   "line_end": 292,
+   "severity": "important",
+   "title": "Poll loop treats any non-200/parse failure identically and aborts immediately",
+   "why": "A single transient 5xx or truncated JSON from the service during polling raises Failure, which is caught and written as status=error, immediately failing the run red even though the review may still be in progress. With a 45-minute wait budget, one blip kills the whole run. There is no retry/backoff for transient errors; only the top-level catch."
+  },
+  {
+   "file": "ci/review_agents_ci.py",
+   "line_start": 296,
+   "line_end": 300,
+   "severity": "important",
+   "title": "Response body checked with `polled['status']` after only isinstance(dict), no KeyError guard",
+   "why": "`polled['status']` and downstream `polled['report']`/`polled['id']` assume keys exist. A 200 with a dict that lacks `status` raises KeyError, which is not a Failure, escapes the except clause, and crashes with a traceback—no result file is written, so the post job's `python3 ... post --result <path>` fails on a missing file and the whole run dies without the designed red-with-message behavior."
+  },
+  {
+   "file": "ci/review_agents_ci.py",
+   "line_start": 331,
+   "line_end": 345,
+   "severity": "blocking",
+   "title": "post() reads `result['head_sha']` unconditionally in the 'done' branch but skipped/superseded results may lack it",
+   "why": "In post(), the early return only covers status in ('skipped','superseded') or number is None. If status == 'done' but the artifact was written by a different path (e.g. a service that returns done without head_sha in the base dict, or a future producer), `head = result['head_sha']` raises KeyError after comments have already been posted, leaving the summary/walkthrough updated but the job crashing red with a traceback instead of a clean failure message."
+  },
+  {
+   "file": "ci/review_agents_ci.py",
+   "line_start": 352,
+   "line_end": 360,
+   "severity": "important",
+   "title": "Batch of inline comments: rejection fallback loses the 'start_line' grouping semantics and re-posts already-rejected lines individually with wrong side when original used multi-line",
+   "why": "When the batch POST /pulls/{n}/reviews fails, each comment is retried solo with `_inline(comment, head) | {'commit_id': head}`. That is fine per-comment, but the batch path uses a single `commit_id` for all comments and GitHub rejects the whole batch if any single comment is invalid—so this fallback re-attempts every comment, including valid ones already... they weren't posted because the batch was atomic, so that's OK. The real issue: `_inline` sets side RIGHT and start_side RIGHT unconditionally; if a finding's line is on the LEFT/deleted side (path with only old lines, line number on base), GitHub 422s every time and it silently lands in the summary, but the fingerprint is computed from the comment body regardless, so on the next run it is not in `posted` and is retried forever, re-appending the rejected section each run and duplicating it in the summary because the updated summary is computed from the fresh `summary` variable, not the previously posted one."
+  },
+  {
+   "file": "ci/review_agents_ci.py",
+   "line_start": 380,
+   "line_end": 388,
+   "severity": "important",
+   "title": "Rejected-comment summary splice only replaces the counts tail on the variable `summary`, discarding prior rejected blocks silently",
+   "why": "`head_part, sep, tail = summary.rpartition('\\n<!-- review-agents:counts')` splits the freshly generated summary, not the current live comment body. If a previous run appended a rejected section to the live summary but the current run's generated `summary` lacks it (model output regenerated), the new PATCH drops the previous rejected findings entirely—violating D-033 'none is lost'. Prior rejected inline comments exist only in the posted summary body, and _upsert overwrites the whole body."
+  },
+  {
+   "file": "ci/review_agents_ci.py",
+   "line_start": 420,
+   "line_end": 436,
+   "severity": "important",
+   "title": "Concurrency between review runs is not protected: two runs can post duplicate inline comments",
+   "why": "The workflow's concurrency group is only on the review job, not the post job; and post() computes `posted` fingerprints, then POSTs—no cross-process lock. Two overlapping runs (manual /review + a synchronize) each fetch REVIEW_COMMENTS, both see a fingerprint as missing, both POST inline comments, producing duplicates. The workflow-level cancel-in-progress cancels the whole workflow including the post job of the newer run only if a still-newer one arrives; but the review and post are separate jobs with no concurrency fence on post. Result: duplicate inline comments and possibly flipped summaries."
+  },
+  {
+   "file": "ci/review_agents_ci.py",
+   "line_start": 397,
+   "line_end": 404,
+   "severity": "blocking",
+   "title": "Security: skipping comment handling returns 0 (green) and the post job then sees status=skipped → green, so an attacker-triggered run reports success",
+   "why": "gate() returns Outcome(True, ...) for status 'skipped'. For an issue_comment by a non-collaborator, review() writes status=skipped and returns 0, and post() returns 0 (green). Combined with the required 'post' check on the default branch, this means the check passes on any comment by a non-collaborator—but that's harmless. The bigger issue: the review job never fails for non-collaborators, so an external user commenting `/review` on any PR causes a green check run to be created and (if 'post' is the required context) posted on the PR head, which could satisfy the required status check on a PR that was never actually reviewed, if any prior review run had a stale/skipped artifact. Specifically skipped is treated as passing, so a required check is satisfied by a not-reviewed run."
+  },
+  {
+   "file": "ci/review_agents_ci.py",
+   "line_start": 103,
+   "line_end": 116,
+   "severity": "important",
+   "title": "GitHub.pages() has no cap and will loop forever on a repository that always returns 100+ items",
+   "why": "Loop increments page while batch length == 100. If the endpoint caps pages (GitHub allows up to 100 pages for some APIs) at exactly 100 items per page with more than 10k items it stops; but for issues/comments the limit is fine. More relevant: no `Link` header following; GitHub rejects page > some max with a 422 for some endpoints, causing Failure rather than truncation. For a PR with thousands of comments this raises instead of handling. Low likelihood but a hard failure on a large thread."
+  },
+  {
+   "file": "ci/review_agents_ci.py",
+   "line_start": 305,
+   "line_end": 325,
+   "severity": "important",
+   "title": "post() never handles 'timeout'/'error' before accessing issue comments but does handle them; however for 'failed' status report is None → goes to failed branch, good; but for status 'done' where review.report is None returns failed branch yet writes outcome.message from gate which says 'No result: ...' — fine. The real bug: outcome is computed before report comprehension but number may point to a PR that's now closed/merged, so posting fails",
+   "why": "Focused bug: post() for a `done` status fetches issue comments, posts walkthrough/summary, then computes inline comments against `head = result['head_sha']`. If the PR was merged or the branch deleted between the review job and the post job, GitHub rejects inline reviews with 422; the code falls to the per-comment path, all 422, and all are dumped into the summary—good. But if the issue itself is locked, _upsert's PATCH/POST raises via ok() as a Failure with severity handled? No—post() has no try/except around GitHub calls, so any 403/404 raises an uncaught Failure except it is not caught: main() returns post(...) directly with no try, so the process dies with a traceback instead of the intended 'red with message'. Comments/walkthrough can be partially posted then the job crashes—no clean gate result."
+  },
+  {
+   "file": "ci/review_agents_ci.py",
+   "line_start": 375,
+   "line_end": 379,
+   "severity": "important",
+   "title": "Walkthrough and summary upserted before inline comments; if inline posting raises uncaught exception, required check state is inconsistent",
+   "why": "No try/except in post(); a 403 (e.g. token lost write permission due to a fork PR default, or bot rate limited) from any github.ok() raises Failure uncaught → traceback, no write_summary, no exit code discipline. The workflow's required check ends red via crash, which is acceptable colour-wise, but the design promises a red-with-message and a stable artifact, and partial posting leaves summary updated while inline comments missing, so on next run fingerprints dedupe against partially posted state—acceptable—but the crash-context is undocumented and the summary message is not written to GITHUB_STEP_SUMMARY."
+  },
+  {
+   "file": "ci/review_agents_ci.py",
+   "line_start": 230,
+   "line_end": 240,
+   "severity": "important",
+   "title": "Collaborator check trusts comment.author_association but for pull_request_target triggered /review the association is from the fork, not base repo",
+   "why": "On an issue_comment event, `comment.author_association` is computed against the repo the issue lives in, so it is reliable. That's fine. However the manual path fetches /pulls/{issue['number']} with a read token; the result is used without verifying the PR belongs to the same repo as `github.repo` (it does by path). The real problem: the manual event carries no `pull_request` object so `event['pull_request']['head']['sha']` isn't used, and the D-021 'is the head still this run's commit' check is not run for the manual case at all. The PR may have moved since the comment; a collaborator's /review therefore reviews the newest head — acceptable — but the concurrency cancellation and dedupe keys in the workflow use `github.event.issue.number`, which is correct. Minor."
+  },
+  {
+   "file": "ci/review-agents.yml",
+   "line_start": 52,
+   "line_end": 59,
+   "severity": "important",
+   "title": "Post job does not depend on the artifact existing; if review job produced no artifact (e.g. crashed before upload) download-artifact fails the step and the job is red—fine, but gate() never runs so no summary/skip message, and required check on a fork PR with secrets absent fails",
+   "why": "For a fork PR when the user has not configured secrets, review action's main() exits 2 with a message; no artifact is uploaded, upload-artifact step is skipped, and post job's download-artifact fails. The required 'post' check is then red even when there is simply nothing to review (config missing). That produces a red required check for misconfiguration, which might be intended, but there is no handling to distinguish 'not configured' from 'real failure'; and post's `if: !cancelled() && needs.review.result != 'skipped'` — when review actually fails to upload, download-artifact fails and no gate message reaches STEP_SUMMARY, degrading the designed error reporting."
+  },
+  {
+   "file": "ci/post/action.yml",
+   "line_start": 18,
+   "line_end": 21,
+   "severity": "important",
+   "title": "post action relies on `$RUNNER_TEMP/review-agents/review-agents-result.json` but download-artifact default extracts the artifact contents at `path`, not a nested file; and the filename is the uploaded file's basename—correct—but review action uploads to `$RUNNER_TEMP/review-agents-result.json` and download path is `$RUNNER_TEMP/review-agents`, so the file lands at `$RUNNER_TEMP/review-agents/review-agents-result.json` — OK. However if the artifact has multiple entries or the reviewed file name differs, the direct path breaks; the workflow hardcodes the file name instead of globbing.",
+   "why": "Path coupling is brittle: the upload names the artifact 'review-agents-result' and the file basename is 'review-agents-result.json'; download with `path: $RUNNER_TEMP/review-agents` puts the file there. If upload-artifact changes layout (v7 uses a wrapping directory named after the artifact by default? v4+ extracts into `path/<artifact-name>/<files>`), the post step's hardcoded path `$RUNNER_TEMP/review-agents/review-agents-result.json` will not match, and the post job crashes with FileNotFoundError."
+  },
+  {
+   "file": "ci/review_agents_ci.py",
+   "line_start": 250,
+   "line_end": 262,
+   "severity": "important",
+   "title": "Manual /review path never pins the reviewed commit; comment can race with a new push and post stale-line inline comments",
+   "why": "For pull_request_target events, D-021 compares the event PR head to the current head and skips if changed. For issue_comment manual runs, there is no such comparison because the event has no pull_request head. The resulting review's head_sha is whatever was current at fetch time; if the user then pushes while the 30-minute review runs, the returned inline comment lines may no longer be valid for the new head, and post() will POST them against `result['head_sha']` (the fetched head), which is no longer the PR head, and GitHub 422s them, dumping them into the summary. Acceptable but the race the description says is handled ('checks that the PR's head is still this run's commit (an older run is not sent)') is not handled for the manual trigger."
+  },
+  {
+   "file": "ci/review_agents_ci.py",
+   "line_start": 88,
+   "line_end": 100,
+   "severity": "robustness",
+   "title": "Http.call swallows non-HTTPError OSErrors but not JSON decode errors from a 200 response body",
+   "why": "A 200 response with malformed JSON (truncated proxy response) raises `json.JSONDecodeError` inside the `with` block; JSONDecodeError is a ValueError, not caught by any except, so it propagates as an uncaught exception. In review() this crashes without a result file; in post() it crashes with a traceback. Only HTTPError path wraps the parse in try/except."
+  },
+  {
+   "file": "ci/review_agents_ci.py",
+   "line_start": 140,
+   "line_end": 150,
+   "severity": "robustness",
+   "title": "GitHub request sets Authorization from token; for post job the token is the GITHUB_TOKEN with pull-requests:write only; listing issues/comments requires issues:read or pull-requests:read, which is NOT granted",
+   "why": "Template gives post job only `pull-requests: write`. `github.pages('/issues/{n}/comments')` is the Issues API and requires `issues: read` (or the pull-requests permission does not cover listing PR issue comments on repos with restrictive token perms). With only pull-requests:write, GET /issues/{n}/comments may 403. Actually reading PR comments under the pull-requests scope is allowed; the Issues API for a PR is accessible with pull-requests permission. This is ambiguous; the tests only check the YAML keys, so if it is wrong, every post run 403s uncaught. Flag as robustness."
+  },
+  {
+   "file": "src/review_agents/pipeline/run.py",
+   "line_start": 479,
+   "line_end": 480,
+   "severity": "important",
+   "title": "run_review passes loaded.retired but scope construction elsewhere (quick mode) may not",
+   "why": "The diff adds `retired=loaded.retired` only at the `_scope(...)` call around line 476. If there are other Scope(...) construction sites in run.py (e.g. a quick/withheld path or tests) that now need retired, they will omit it and mypy strict may pass only if default is present—it is (default_factory). But then the retired note silently disappears in the quick path. Verify all Scope constructions receive retired; the diff shows only one. Consequence: the D-037 'where to set it now' note is missing in some review modes."
+  },
+  {
+   "file": "src/review_agents/repo_config.py",
+   "line_start": 154,
+   "line_end": 165,
+   "severity": "important",
+   "title": "RETIRED_OPTIONS strips keys before model_validate but retired detection runs on raw data including nested typos; a misspelled `block_on_critical` (e.g. `block-on-critical`) is silently flagged as an unknown option and rejects the whole config",
+   "why": "That's the intended unknown-option behavior. The real issue: detection is `name in data` on top-level keys only; that's correct for retired top-level options. But following the D-037 promise 'the report says where to set it now', LoadedConfig.retired is surfaced only via run_review; callers that load config for anything other than a full review (e.g. a config-validation command, if any) will not report retired options. Minor. Also: retiring is silent in errors but the retired list is returned only when validation succeeds; if the rest of the config is invalid, `_rejected` is returned and `retired` is lost, so the note vanishes exactly when the user is fixing the config."
+  },
+  {
+   "file": "src/review_agents/repo_config.py",
+   "line_start": 176,
+   "line_end": 184,
+   "severity": "important",
+   "title": "retired keys are stripped then RepoConfig validates; but `_Strict` with extra='forbid' means an old config with block_on_critical inside a nested block or in `limits` would still reject; only top-level is handled",
+   "why": "block_on_critical was top-level so stripping top-level is correct. However the retired data key removal happens before `model_validate`, so errors now no longer mention block_on_critical at all—good. No bug, but the reported `retired` list ordering is insertion order of RETIRED_OPTIONS regardless of the file's order, which is fine."
+  },
+  {
+   "file": "tests/test_ci_workflow.py",
+   "line_start": 60,
+   "line_end": 75,
+   "severity": "robustness",
+   "title": "No-event-text-in-shell test only checks `run:` for `${{`, misses `env:` interpolations that feed into the script and could be shell-injectable elsewhere",
+   "why": "The template passes no event text to env, so currently safe; but the test is narrow and gives false assurance. The template's `github.event.comment.body` is read from GITHUB_EVENT_PATH by the script (good). Not a bug in the change; skip if style. Actually this is a test-coverage nit; downgrade."
+  }
+ ],
+ "content": null,
+ "error": null
+}

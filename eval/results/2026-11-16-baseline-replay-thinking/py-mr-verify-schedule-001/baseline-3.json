@@ -1,0 +1,22 @@
+{
+ "case": "py-mr-verify-schedule-001",
+ "run": 3,
+ "model": "deepseek-flash",
+ "seconds": 327.4,
+ "usage": {
+  "prompt_tokens": 17143,
+  "completion_tokens": 65536,
+  "total_tokens": 82679,
+  "prompt_tokens_details": {
+   "cached_tokens": 16896
+  },
+  "completion_tokens_details": {
+   "reasoning_tokens": 65536
+  },
+  "prompt_cache_hit_tokens": 16896,
+  "prompt_cache_miss_tokens": 247
+ },
+ "findings": null,
+ "content": "",
+ "error": "JSONDecodeError: Expecting value: line 1 column 1 (char 0)"
+}

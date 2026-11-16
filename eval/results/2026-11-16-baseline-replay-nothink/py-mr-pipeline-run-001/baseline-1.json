@@ -1,0 +1,157 @@
+{
+ "case": "py-mr-pipeline-run-001",
+ "run": 1,
+ "model": "deepseek-flash",
+ "thinking": "disabled",
+ "seconds": 20.2,
+ "usage": {
+  "prompt_tokens": 10675,
+  "completion_tokens": 3417,
+  "total_tokens": 14092,
+  "prompt_tokens_details": {
+   "cached_tokens": 0
+  },
+  "prompt_cache_hit_tokens": 0,
+  "prompt_cache_miss_tokens": 10675
+ },
+ "findings": [
+  {
+   "file": "src/review_agents/pipeline/run.py",
+   "line_start": 118,
+   "line_end": 131,
+   "severity": "blocking",
+   "title": "Token budget shared across parallel dimensions is not thread-safe and double-counts",
+   "why": "`budget = TokenBudget(...)` is created once and the same object is handed to every dimension's `UsageMeter` inside `work()`, which runs on up to `model_concurrency` threads concurrently. If `TokenBudget` is a plain mutable counter, increments from parallel model-call callbacks race; and even with locking, concurrent dimensions cumulatively racing over the same budget means a dimension can be told 'budget exceeded' or the total can be overshot depending on interleaving. The description says the budget is a per-review total, but sharing one unsynchronized object across threads breaks that contract and can produce nondeterministic limit_hit."
+  },
+  {
+   "file": "src/review_agents/pipeline/run.py",
+   "line_start": 254,
+   "line_end": 258,
+   "severity": "blocking",
+   "title": "ThreadPoolExecutor threads outlive the pool and continue mutating after return",
+   "why": "`pool.shutdown(wait=False, cancel_futures=True)` returns while still-running futures continue on their threads. Those threads keep calling `_step`-adjacent state (`starts`, and they have already been given `conn`). In particular, a still-running `work(job)` continues to use the shared sqlite `conn` through `RepoTools`/model callbacks and to call `_utc_now`/writes into `starts` after `_run_dimensions` returned and after `run_review` begins its `BEGIN IMMEDIATE` write transaction and later returns. This can (a) race the sqlite connection with the caller's transaction, (b) cause 'cannot start a transaction within a transaction' or 'database is locked', and (c) run after the caller closes the connection. It also means the review is recorded done while background threads still burn model calls."
+  },
+  {
+   "file": "src/review_agents/pipeline/run.py",
+   "line_start": 244,
+   "line_end": 258,
+   "severity": "important",
+   "title": "Overlapping executor tasks share one sqlite connection across threads",
+   "why": "`_run_dimensions` uses one `conn` opened by `run_review`; `work()` captures `conn` transitively? Actually it doesn't, but `_step(conn, ...)` is called in the loop serially after wait while abandoned worker threads may still run. More importantly, `starts` dict is written from worker threads (`starts[job.node] = ...`) while the main thread reads `starts.get` — benign in CPython for simple dict ops but the ordering assumption ('started' vs 'queued') can misreport start times when a job starts after wait returns. Line-level: `starts[job.node] = _utc_now()` runs on worker threads; the main thread iterates futures and reads `starts.get(...)` concurrently without synchronization, so a still-running task's `started_at` falls back to `_now(conn)` honoring current time rather than attempt start."
+  },
+  {
+   "file": "src/review_agents/pipeline/run.py",
+   "line_start": 100,
+   "line_end": 118,
+   "severity": "important",
+   "title": "Clock mismatched with deadline arithmetic",
+   "why": "`deadline` is computed as `started_at + review_minutes*60` where `started_at = clock()` (default `time.monotonic`). But `dimension_deadline` is later passed into `_run_dimensions`, and `per_call`, `wait(...)`, and `run_dimension(deadline=...)` all compare against `clock()` — consistent — however `_step` timestamps use sqlite `_now`, while `starts.get(job.node, _now(conn))` uses a database timestamp for started_at. That mixes two time bases in the same `steps` table row (`started_at` may be wallclock for background-path and `started_at=starts[node]` is wallclock via `_utc_now`). Inconsistency aside, the actual bug is: if a caller passes `review_seconds` derived from wallclock, the reserve math is fine; but tests pass `review_seconds` and rely on monotonic. Not a correctness break for the default path, but steps' `started_at`/`finished_at` can be in different clocks. Lower severity."
+  },
+  {
+   "file": "src/review_agents/pipeline/run.py",
+   "line_start": 207,
+   "line_end": 213,
+   "severity": "important",
+   "title": "Background summary thread may use stale branch and race the review's own snapshot",
+   "why": "`summarize_in_background` opens its own sqlite connection and calls `Snapshot.at_branch(git_dir, default_branch)`. Meanwhile the *next* review (or the same review's mirror sync) can update the mirror's refs concurrently (the mirror lock covers sync but the background snapshot may take a stale ref). More concretely: the background thread uses `git_dir` after `run_review` returns and `store.sync` may run again for a newer review, fetching new objects while `Snapshot.at_branch` is reading — refs/pull/<n>/head can be moved. Module summaries may be recorded against the wrong commit, and the module cache is keyed by version only, so wrong summaries persist. Also `module_summaries` is given the branch, not the head, so summaries are for main not the PR — but the design says summaries are repository-wide, so this may be intended; the race with a concurrent `sync` and concurrent `prune` on the same repo is the real issue since `repo_layer_for_review`'s repo lock is not held by the background thread."
+  },
+  {
+   "file": "src/review_agents/pipeline/run.py",
+   "line_start": 320,
+   "line_end": 340,
+   "severity": "important",
+   "title": "Background summaries never re-fetched into this review's repo layer",
+   "why": "`repo_layer_for_review` runs synchronously and reads the summaries that exist now; any missing ones cause `summarize_in_background` to kick off, but the review proceeds with git-stats stand-ins. That matches the description, but the follow-up is missing: `summarize_in_background` stores summaries in `context_cache` for the *next* review. Not a bug per se, just confirming; skip."
+  },
+  {
+   "file": "src/review_agents/pipeline/run.py",
+   "line_start": 300,
+   "line_end": 320,
+   "severity": "blocking",
+   "title": "Review is not marked done/failed and limit_hit update is only partially committed",
+   "why": "`run_review` writes findings and updates `limit_hit` but never sets `status='done'` (or `finished_at`). Looking at `worker.py`, nothing shown sets status after the handler returns — `not_implemented` raising means the worker marks failure elsewhere, but a successful handler is expected to leave status 'running'. The test `test_every_enabled_dimension_runs_and_its_findings_are_written` does not assert `status=='done'`. If the worker relies on the handler to mark completion, every successful review will remain 'running' and be re-queued/failed on restart. Even if the worker does it, there is no shown coordination — but the handler here also doesn't update `status`, and `steps`/`limit_hit` commit does not include it. This is a real missing contract for the pipeline."
+  },
+  {
+   "file": "src/review_agents/pipeline/run.py",
+   "line_start": 270,
+   "line_end": 300,
+   "severity": "important",
+   "title": "Finding fingerprint does not include dimension; same code = same fingerprint and unique constraint may collide",
+   "why": "`fingerprint` is `sha256(file + code)` per finding. Two dimensions running the same file/line range produce identical fingerprints. If `findings` has a unique constraint on `(review_id, fingerprint)` (likely, for dedup), the second insert fails and the whole transaction rolls back — all findings lost. If it does not, the description says duplicate findings are to be merged later, but a duplicate fingerprint in storage breaks the dedup contract for the merge step that follows. Either way, `_LIMIT_ORDER`-style dedup is deferred, but the fingerprint as written cannot distinguish dimensions; the comment says 'the same problem at the same code', which implies intentional, but the diff does not dedup before inserting."
+  },
+  {
+   "file": "src/review_agents/pipeline/run.py",
+   "line_start": 240,
+   "line_end": 250,
+   "severity": "important",
+   "title": "Dimension deadline computed from monotonic but per-call timeout for model uses wallclock fraction",
+   "why": "`per_call = min(REQUEST_TIMEOUT_SECONDS, (deadline - clock()) / 3)` — the '/3' is for the client's retry attempts. But if a dimension starts near the deadline, `per_call` becomes 1.0s minimum, so a dimension that would exceed the deadline can still make one more 1s call after the deadline; `run_dimension` presumably enforces `deadline` internally, so this may be handled. Skip unless it's the only issue."
+  },
+  {
+   "file": "src/review_agents/pipeline/run.py",
+   "line_start": 335,
+   "line_end": 340,
+   "severity": "blocking",
+   "title": "run_review never marks review as done, so worker will loop or re-run",
+   "why": "Duplicate of above; consolidate. Actually the worker's `claim_next` sets status='running'. If the handler succeeds and doesn't write status='done', claim_next will never pick it up again (status='running'), and `recover_interrupted` will re-queue it (attempts < 2) forever. That is a real correctness bug for the pipeline."
+  },
+  {
+   "file": "src/review_agents/worker.py",
+   "line_start": 23,
+   "line_end": 32,
+   "severity": "important",
+   "title": "recover_interrupted re-queue does not reset started_at or clear partial steps/findings",
+   "why": "Re-queued reviews keep any `steps` and `findings` rows written before the crash. On restart, `run_review` will re-insert steps for the same nodes (duplicates) and potentially re-insert findings if the crash happened after the transaction but before commit of `status`... actually findings are committed atomically with `limit_hit`, but a crash after commit leaves findings + status='running'. On retry, findings get duplicated. No `DELETE FROM findings WHERE review_id=?` in the re-queue path, no dedup on `(review_id, fingerprint)`. This violates 'All findings are written in one transaction, with a fingerprint' as a dedup key but the dedup isn't enforced."
+  },
+  {
+   "file": "src/review_agents/worker.py",
+   "line_start": 60,
+   "line_end": 70,
+   "severity": "robustness",
+   "title": "claim_next does not filter superseded reviews",
+   "why": "`claim_next` selects the oldest 'queued' review, but `run_review` will raise `ReviewSuperseded` on it. That exception then bubbles out of the handler; the worker presumably marks failure. Wasteful but not incorrect — unless the worker marks it failed instead of superseded. And `recover_interrupted` explicitly excludes superseded, showing awareness. Inconsistent handling of superseded reviews between recovery and claim."
+  },
+  {
+   "file": "src/review_agents/pipeline/run.py",
+   "line_start": 296,
+   "line_end": 300,
+   "severity": "robustness",
+   "title": "limit_hit update commits only limit_hit, leaving earlier steps already committed but not the review outcome if a later step fails",
+   "why": "Steps are written outside the transaction (individual INSERTs with autocommit). If the dimension phase crashes after some `_step` calls but before the transaction, the review ends with steps but no final status. The description says steps record failure but there is no top-level handler around `run_review` to write a final 'failed' step and status. Combined with the missing status write, a crash inside run_review (e.g. mirror sync failure on line ~110) propagates to the worker but the review remains 'running' — recover_interrupted requeues, doubling attempt counts, without a proper failed path."
+  },
+  {
+   "file": "src/review_agents/pipeline/run.py",
+   "line_start": 108,
+   "line_end": 118,
+   "severity": "important",
+   "title": "Mirror sync failure and git errors propagate without recording a step",
+   "why": "`store.sync(...)` raising is not wrapped; `_step(conn, ..., 'mirror.sync', step)` is not reached. Same for `read_repo_config`, `build_pr_layer`, `build_packs`, `Snapshot.read_text` in fingerprint. The docstring says 'only a failure to get the code ... ends the review', but there is no step recorded and no status/error written. The worker's handler raises and marks failure presumably, but the diagnostic step is missing. For failure isolation (a core claim in the description), this is inconsistent."
+  },
+  {
+   "file": "src/review_agents/pipeline/run.py",
+   "line_start": 328,
+   "line_end": 340,
+   "severity": "important",
+   "title": "Same dimension across multiple groups produces identical job.node and step rows",
+   "why": "`node` is `dimension.{name}{suffix}` where suffix is `.group{n}` — good, distinct per group. But `_LIMIT_ORDER` severity aggregation and `r.dimension` in `AgentRun` do not distinguish groups; findings from multiple groups are inserted as separate rows with identical `dimensions` arrays (`json.dumps([finding.dimension])`), and dedup is deferred. Not a bug per se, but no group identifier is stored on the finding, so the later 'merge' step cannot know which group a finding came from. Sidenote."
+  },
+  {
+   "file": "src/review_agents/migrations/0005_review_runs.sql",
+   "line_start": 3,
+   "line_end": 3,
+   "severity": "important",
+   "title": "New findings.suggestion column is NOT NULL DEFAULT '' but insert does not ensure non-null on legacy rows? actually default handles it — but UNIQUE constraint on fingerprint not added",
+   "why": "The migration adds `suggestion` and `attempts`. No index/constraint for `(review_id, fingerprint)` is added, yet the description calls the fingerprint a dedup key for 'the same problem at the same code'. Without a UNIQUE constraint the atomic write can store duplicate fingerprints; subsequent merge step has no DB guarantee. If the intent is that dedup happens in SQL, this migration is missing it; if not, the fingerprint is only informational, which contradicts the PR description."
+  },
+  {
+   "file": "tests/test_pipeline_run.py",
+   "line_start": 200,
+   "line_end": 220,
+   "severity": "nit",
+   "title": "Test does not assert review status after a successful run",
+   "why": "The test asserts findings and step statuses but not that the review's status became 'done', leaving the missing status-write from run_review untested and unnoticed — this is why the bug can ship as 'tests pass'."
+  }
+ ],
+ "content": null,
+ "error": null
+}

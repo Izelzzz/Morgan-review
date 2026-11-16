@@ -1,0 +1,63 @@
+{
+ "case": "py-mr-pipeline-run-001",
+ "run": 3,
+ "model": "deepseek-flash",
+ "seconds": 187.6,
+ "usage": {
+  "prompt_tokens": 10699,
+  "completion_tokens": 37083,
+  "total_tokens": 47782,
+  "prompt_tokens_details": {
+   "cached_tokens": 10496
+  },
+  "completion_tokens_details": {
+   "reasoning_tokens": 36124
+  },
+  "prompt_cache_hit_tokens": 10496,
+  "prompt_cache_miss_tokens": 203
+ },
+ "findings": [
+  {
+   "file": "src/review_agents/pipeline/run.py",
+   "line_start": 245,
+   "line_end": 255,
+   "severity": "important",
+   "title": "Last supersede check is outside the write transaction, so a superseded review can still publish findings",
+   "why": "The final `_check_not_superseded` is a plain SELECT and `BEGIN IMMEDIATE` only starts afterwards. The webhook handler in the other process can set `superseded_by` in the window between the check and the COMMIT, and the findings plus `limit_hit` are then committed for a review that has already been replaced, which is exactly what D-010 says must not happen. The check has to be repeated inside the write transaction (or the outcome UPDATE constrained to `superseded_by IS NULL`)."
+  },
+  {
+   "file": "src/review_agents/pipeline/run.py",
+   "line_start": 107,
+   "line_end": 113,
+   "severity": "robustness",
+   "title": "Fingerprint collides for every finding whose code slice is empty",
+   "why": "When the file is readable but the reported range falls outside it (a model hallucinating line numbers, a file that shrank) or the selected lines are blank after whitespace normalisation, `lines` is empty, so `code` is the empty string and every such finding in that file hashes to the same value, `sha256(file + \"\\n\")`. The unreadable-file branch deliberately falls back to the line range for exactly this reason, but the empty-slice case does not, so distinct problems silently share one fingerprint and the future merge/dedup step (or a unique index on (review_id, fingerprint)) will fold them into one or reject the whole transaction."
+  },
+  {
+   "file": "src/review_agents/pipeline/run.py",
+   "line_start": 302,
+   "line_end": 307,
+   "severity": "robustness",
+   "title": "Dimensions left behind at the deadline keep running after the review is written",
+   "why": "`shutdown(wait=False, cancel_futures=True)` neither stops nor joins the running threads; only queued futures are cancelled. Those threads keep calling the model and running git commands against the shared mirror after `run_review` has returned and the worker has settled the review, so tokens/usage are still being spent for a finished review and the next review's `store.sync`/`prune` races with them on the same `git_dir`. The docstring's claim that each in-flight model call is bounded by the deadline is also not true: `per_call` is computed once when the job starts and can be up to remaining/3 seconds, so a call begun just before the deadline runs past it."
+  },
+  {
+   "file": "src/review_agents/pipeline/run.py",
+   "line_start": 341,
+   "line_end": 355,
+   "severity": "robustness",
+   "title": "Background summary build writes the cache without the repository lock and outside model_concurrency",
+   "why": "`build()` opens its own connection and calls `module_summaries`, which has no access to `context.cache._locks`, so this write can run concurrently with the same repository's next `repo_layer_for_review`/`prune` (and with the review's own `BEGIN IMMEDIATE` transaction), which means SQLite lock contention or a summary row being pruned/overwritten while it is being written; the \"one build per repository at a time\" guard only serialises background builds against each other. The summarizer model it uses also issues calls that are not counted against `model_concurrency`, so a repository's first review — the case this change targets — runs more concurrent model calls than the configured rate-limit budget allows."
+  },
+  {
+   "file": "src/review_agents/__main__.py",
+   "line_start": 18,
+   "line_end": 19,
+   "severity": "nit",
+   "title": "Missing finder model fails every review with a stale \"not implemented\" message",
+   "why": "With no finder model the handler is `worker.not_implemented`, which raises `NotImplementedError(\"the review pipeline is not implemented yet\")`. The comment and the operational contract promise a message telling the operator what to configure, but they get one implying the feature does not exist, and each queued review is permanently marked failed instead of being left queued for the moment the model is configured."
+  }
+ ],
+ "content": null,
+ "error": null
+}

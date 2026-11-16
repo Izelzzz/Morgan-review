@@ -1,0 +1,54 @@
+{
+ "case": "py-mr-agent-window-001",
+ "run": 1,
+ "model": "deepseek-flash",
+ "seconds": 234.2,
+ "usage": {
+  "prompt_tokens": 6496,
+  "completion_tokens": 43075,
+  "total_tokens": 49571,
+  "prompt_tokens_details": {
+   "cached_tokens": 0
+  },
+  "completion_tokens_details": {
+   "reasoning_tokens": 42330
+  },
+  "prompt_cache_hit_tokens": 0,
+  "prompt_cache_miss_tokens": 6496
+ },
+ "findings": [
+  {
+   "file": "src/review_agents/pipeline/conversation.py",
+   "line_start": 125,
+   "line_end": 140,
+   "severity": "important",
+   "title": "fit silently gives up when every result is already cut to its shortened form",
+   "why": "fit only ever shortens each result once (result.shortened is set even when shorten() returned the text unchanged) and then the loop merely ends. With the defaults every cut result still costs about 1,000 tokens (500 head + 500 tail + note), so a four-fifths-window pack plus ~25 tool calls, the model's own replies and the reserved reply easily stay above window - output_reserve. When that happens run_dimension invokes the model anyway, the request still exceeds the window, and the agent fails with a context-length error - exactly the failure D-030 exists to prevent. Nothing drops results, cuts further, or reports that the conversation can no longer be made to fit."
+  },
+  {
+   "file": "src/review_agents/pipeline/conversation.py",
+   "line_start": 82,
+   "line_end": 89,
+   "severity": "robustness",
+   "title": "token estimate ignores the tool schemas bound to every call",
+   "why": "conversation_tokens only counts message content and tool-call arguments, but the request is built with bind_tools([*schemas, submit]); the JSON schemas for read_file/list_dir/search_code/submit are part of the prompt and cost on the order of a thousand tokens that are never counted (nor is anything else the client or model template adds). fit therefore thinks there is more room than there is, so a conversation it judges to fit can still be rejected for exceeding the window - with the pack at four fifths of the window the remaining margin is small enough for that to matter."
+  },
+  {
+   "file": "src/review_agents/pipeline/conversation.py",
+   "line_start": 70,
+   "line_end": 79,
+   "severity": "robustness",
+   "title": "keep_tokens of 0 turns text[-0:] into the whole result and disables the cut",
+   "why": "answer() passes result_tokens // 2, and Settings allows tool_result_tokens = 1 (ge=1), so keep_tokens can be 0: chars becomes 0, the halving loop never runs, and text[-0:] is the entire string. The 'shortened' message still carries the full tool output plus a note claiming the middle was left out, i.e. the guard silently does nothing instead of clamping or failing. The same note also prints a negative count (len(text) - 2 * chars) whenever the head and tail character windows would overlap, so the message describes a cut that did not happen."
+  },
+  {
+   "file": "src/review_agents/pipeline/conversation.py",
+   "line_start": 54,
+   "line_end": 68,
+   "severity": "nit",
+   "title": "the recovery hint is placed inside the untrusted data block",
+   "why": "The note is prepended to the tool text and then wrapped by untrusted(f\"tool:{tool}\", ...), so 'read_file with start_line and end_line reads the rest' arrives inside the block the pack tells the model is untrusted data and must not be obeyed, while the repeat reminder is deliberately appended outside the block. The only instruction that tells the agent how to recover the cut middle is therefore the one it is told to distrust."
+  }
+ ],
+ "content": null
+}

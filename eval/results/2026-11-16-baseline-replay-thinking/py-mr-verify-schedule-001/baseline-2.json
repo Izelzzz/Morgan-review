@@ -1,0 +1,70 @@
+{
+ "case": "py-mr-verify-schedule-001",
+ "run": 2,
+ "model": "deepseek-flash",
+ "seconds": 328.3,
+ "usage": {
+  "prompt_tokens": 17143,
+  "completion_tokens": 61436,
+  "total_tokens": 78579,
+  "prompt_tokens_details": {
+   "cached_tokens": 16896
+  },
+  "completion_tokens_details": {
+   "reasoning_tokens": 60140
+  },
+  "prompt_cache_hit_tokens": 16896,
+  "prompt_cache_miss_tokens": 247
+ },
+ "findings": [
+  {
+   "file": "src/review_agents/pipeline/run.py",
+   "line_start": 509,
+   "line_end": 520,
+   "severity": "important",
+   "title": "Results that completed in time are discarded when the loop exits on the clock without draining `self.events`",
+   "why": "The loop re-computes `agents_out`/`checking` from `self.clock()` and breaks as soon as the wall clock passes `submit_by`/`deadline`, but completion is only observed through the event queue. A finder (or verifier) future that finished just before its deadline whose done-callback has not been dequeued yet is treated as never having finished: the fallback loop at 557ff then records it as \"did not hand in its findings by the latest submit time\" and silently throws its findings away, and 572ff gives the check a synthetic `VerificationRun` saying \"the review's deadline passed before it was verified\". For the last remaining check that synthetic run has no verdict, so `run_review` raises \"no finding could be verified\" and marks the review failed even though the verifier answered correctly. The replaced `_run_dimensions` did not have this hole because it inspected the futures (`future.done()`/`future.result()`) after `wait()`, so this is a regression, and it is most likely exactly at the deadline where the final model call of a slow agent/verifier lands."
+  },
+  {
+   "file": "src/review_agents/pipeline/run.py",
+   "line_start": 466,
+   "line_end": 493,
+   "severity": "important",
+   "title": "`verify()` only guards `run_verifier`, so a setup failure aborts the whole review",
+   "why": "`heapq.heappop(self.pending)`, `review_usage(...)`, `UsageMeter(...)` and `self._tools()` all run outside the `try`, while the finder path's exceptions are isolated by `_agent_run` (`future.exception()`). The verify future's exception instead surfaces at `future.result()` (line 550) inside the main loop and propagates out of `find_and_verify`, killing the review with an internal error instead of losing just that one verification, which is what the comment \"one verification failing must not fail the review\" promises. This is reachable in practice because every verification thread concurrently opens the SQLite file for its usage row while the main thread inserts `steps` rows (\"database is locked\"), and an empty `pending` (e.g. a task counted twice) becomes an `IndexError` that takes down the whole review."
+  },
+  {
+   "file": "src/review_agents/pipeline/run.py",
+   "line_start": 532,
+   "line_end": 534,
+   "severity": "robustness",
+   "title": "Same-dimension duplicates are grouped by `c.pack is job.pack` identity",
+   "why": "The D-031 rule \"same-dimension copies (Deep runs) wait on one verification\" is implemented with an object-identity test on `ContextPack`. As soon as the pipeline hands a job a pack object that is equal but not identical (a rebuilt/hermetic pack, a deep run given its own pack instance), the `same` lookup never matches, so every copy becomes its own `_Check`: the same finding is verified N times (wasting the shared model calls the feature is about), several independent verdicts are produced for one finding, and the dedupe silently degrades with no error. A stable key (the job's pack index/run id) is what the rule actually needs."
+  },
+  {
+   "file": "src/review_agents/pipeline/run.py",
+   "line_start": 362,
+   "line_end": 366,
+   "severity": "robustness",
+   "title": "The merge judge's model call does not take a slot, so the review's concurrency cap can be exceeded",
+   "why": "`find_and_verify` returns after `shutdown(wait=False, cancel_futures=True)`, which cancels queued work but lets already-running verifier threads keep going (and keep holding `Slots`). The judge call created here is made outside `Slots`, so at merge time the number of in-flight model calls can exceed `model_concurrency` (D-022) — i.e. the review can trip the model service's rate limit exactly during the merge, which is the thing the slot scheme exists to prevent and which the module docstring claims is shared out for every call."
+  },
+  {
+   "file": "src/review_agents/config.py",
+   "line_start": 82,
+   "line_end": 82,
+   "severity": "robustness",
+   "title": "`after_submit_seconds` may be 0, which makes every review with a verifiable finding fail",
+   "why": "`ge=0` allows a zero reserve, which makes `submit_by == deadline`: the agents may use 100% of the budget and the verifiers get no time at all. Because D-027 is now enforced as a hard `RuntimeError` when no check gets a verdict, any review whose findings are not all nits is then marked failed rather than merely publishing fewer findings, so a single plausible misconfiguration turns into a guaranteed failure mode. There is also no check that the reserve is small enough relative to `review_minutes` to leave any verification time."
+  },
+  {
+   "file": "src/review_agents/pipeline/run.py",
+   "line_start": 352,
+   "line_end": 356,
+   "severity": "nit",
+   "title": "Supersession is only checked after the new verification failure",
+   "why": "`_check_not_superseded` moved below the new \"no finding could be verified\" raise, so a review that was superseded by a newer push while the agents were running now reports `RuntimeError('no finding could be verified')` and is failed (and its spend kept) instead of raising `ReviewSuperseded` and being dropped quietly, which is the pre-existing contract for D-010."
+  }
+ ],
+ "content": null
+}

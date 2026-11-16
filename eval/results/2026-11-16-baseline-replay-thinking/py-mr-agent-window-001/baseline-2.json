@@ -1,0 +1,54 @@
+{
+ "case": "py-mr-agent-window-001",
+ "run": 2,
+ "model": "deepseek-flash",
+ "seconds": 265.8,
+ "usage": {
+  "prompt_tokens": 6496,
+  "completion_tokens": 54289,
+  "total_tokens": 60785,
+  "prompt_tokens_details": {
+   "cached_tokens": 6272
+  },
+  "completion_tokens_details": {
+   "reasoning_tokens": 53815
+  },
+  "prompt_cache_hit_tokens": 6272,
+  "prompt_cache_miss_tokens": 224
+ },
+ "findings": [
+  {
+   "file": "src/review_agents/pipeline/conversation.py",
+   "line_start": 71,
+   "line_end": 80,
+   "severity": "robustness",
+   "title": "shorten() returns the full text when keep_tokens is 0",
+   "why": "When tool_result_tokens is 1, result_tokens // 2 is 0. chars becomes 0, the loop is skipped, and text[-0:] returns the entire text, so the result is not shortened (and the note wrongly says the middle was left out). This can still overflow the window."
+  },
+  {
+   "file": "src/review_agents/pipeline/agent.py",
+   "line_start": 254,
+   "line_end": 267,
+   "severity": "important",
+   "title": "Failed and refused tool calls bypass Conversation.answer",
+   "why": "The unknown-tool and exception branches append a ToolMessage directly and return. They are therefore neither shortened nor counted by _calls, so a repeated failing call never gets the third-call reminder, and a large exception string can still overflow the window."
+  },
+  {
+   "file": "src/review_agents/pipeline/conversation.py",
+   "line_start": 128,
+   "line_end": 129,
+   "severity": "important",
+   "title": "Window fitting ignores the bound tool schemas",
+   "why": "room subtracts only the reply reserve, and conversation_tokens counts only messages. The tool definitions passed to bind_tools are part of the model request but are not counted, so the fitted conversation can still exceed the context window by the schema size."
+  },
+  {
+   "file": "src/review_agents/pipeline/conversation.py",
+   "line_start": 130,
+   "line_end": 141,
+   "severity": "important",
+   "title": "fit() stops while still over the window if all results are already shortened",
+   "why": "The loop only shortens each result once to shortened_tokens and then exits when the loop ends. If the conversation is still larger than room (e.g., many old results at the 500-token head/tail limit, or a baseline prompt that is too large), no further action is taken and the next model call can overflow."
+  }
+ ],
+ "content": null
+}

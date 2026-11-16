@@ -1,0 +1,308 @@
+{
+ "case": "py-mr-pipeline-run-001",
+ "run": 2,
+ "model": "deepseek-flash",
+ "thinking": "disabled",
+ "seconds": 38.8,
+ "usage": {
+  "prompt_tokens": 10675,
+  "completion_tokens": 6734,
+  "total_tokens": 17409,
+  "prompt_tokens_details": {
+   "cached_tokens": 10496
+  },
+  "prompt_cache_hit_tokens": 10496,
+  "prompt_cache_miss_tokens": 179
+ },
+ "findings": [
+  {
+   "file": "src/review_agents/pipeline/run.py",
+   "line_start": 95,
+   "line_end": 112,
+   "severity": "important",
+   "title": "review_seconds uses monotonic clock but deadline arithmetic mixes clocks",
+   "why": "deadline = started_at + ... where started_at = clock() (monotonic). dimension_deadline and per-call timeouts are compared against clock() in _run_dimensions via wait(timeout=max(0.0, deadline - clock())). That is consistent for the same clock. However `review_seconds` is passed as a duration so this part is fine; the real issue is that if a caller passes a non-monotonic clock or an absolute review_seconds, semantics differ. The bug: `review_seconds` is treated as duration but the docstring/tests pass durations and production uses limits.review_minutes*60, so this is OK. Not a real bug — skip."
+  },
+  {
+   "file": "src/review_agents/pipeline/run.py",
+   "line_start": 195,
+   "line_end": 213,
+   "severity": "blocking",
+   "title": "Threads left running after pool.shutdown(wait=False) keep mutating shared state and writing steps",
+   "why": "When the deadline hits, futures that have not finished are left alive: pool.shutdown(wait=False, cancel_futures=True) only cancels not-started futures. Running dimension threads continue executing run_dimension (and model calls) after run_review proceeds. They use the same sqlite connection's _step? No — work() itself does not write steps; but they call the shared `budget` UsageMeter and `review_usage` and continue making model calls, consuming the token budget and DB. Worse, `starts[job.node]` is written from worker threads without synchronization while the main thread reads it after wait — a data race; and the run_dimension threads may still be running when the transaction COMMITs and the handler returns, leaving the review marked done while agents are still calling the model. These orphaned threads also hold RepoTools open and can outlive run_review, and the review row is left finished while work continues — for a long-lived service, this can starve the ThreadPoolExecutor (created per review) and concurrent reviews will each spawn a new pool. The dimension deadline propagates into run_dimension, but any thread not at a deadline check keeps going. Root cause: no cooperative cancellation guarantee plus unbounded orphan threads after wait timeout."
+  },
+  {
+   "file": "src/review_agents/pipeline/run.py",
+   "line_start": 232,
+   "line_end": 242,
+   "severity": "blocking",
+   "title": "detached threads race with connection close and step writes from the main thread",
+   "why": "After `wait(futures)` times out, futures not done are treated as incomplete and `_step` is written. But those worker threads are still alive. If a worker finishes milliseconds later, it returns an AgentRun that is discarded — fine — but more importantly, the worker thread was using the same `conn` sqlite3.Connection? No: _step is only called from main thread; work() does not use conn. However `starts[job.node] = _utc_now()` mutates a dict after the main thread has already decided the future `.done()` is False. The `starts.get(job.node, _now(conn))` fallback then races: a late-starting job sets its start *after* the step was recorded, producing a step with started_at later than finished_at in some orderings. Also `deadline - clock()` may already be negative when the worker starts; per_call = max(1.0, min(REQUEST_TIMEOUT_SECONDS, (deadline-clock())/3)) — if deadline has passed, (deadline-clock()) is negative, so min(...) is negative, max(1.0, negative) = 1.0, so a job still makes a 1-second call after the deadline. That violates the deadline contract: dimension threads can run model calls up to REQUEST_TIMEOUT_SECONDS even after the deadline if they only start late (queued futures that were cancelled? no — cancelled ones are skipped, but not-yet-started-but-not-cancelled ones under concurrency limit will run)."
+  },
+  {
+   "file": "src/review_agents/pipeline/run.py",
+   "line_start": 240,
+   "line_end": 247,
+   "severity": "important",
+   "title": "Stale futures result inconsistent step entries: finished-at before started-at",
+   "why": "starts is populated only inside work(). For a future that was scheduled but never actually started (pool busy, deadline hit, cancel_futures cancelled it before running), starts contains no entry, and the step is recorded with started=_now(conn) (current time) and finished=strftime(now) — both ~equal, status error 'not started'. This is acceptable. But for a job that started after the wait() returned (race), `_step` reads `starts.get(...)` — if worker set it after `_step` already did .get, the fallback uses _now. Inconsistent but minor. Real issue: `_step` records `started_at` and `finished_at` both from `_now` on the conn at the time of the SELECT, and strftime in the INSERT; these are consistent. Skip as nit."
+  },
+  {
+   "file": "src/review_agents/pipeline/run.py",
+   "line_start": 220,
+   "line_end": 228,
+   "severity": "important",
+   "title": "Exceptions raised from cancelled/not-done futures are not caught; future.exception() on a cancelled future raises CancelledError",
+   "why": "The code checks `if not future.done()` first (cancelled futures are `done()` — cancelled counts as done). Actually `future.cancelled()` is checked after `not future.done()`; a cancelled future IS done, so the `not future.done()` branch is False, and it falls to `elif future.cancelled()`. That is correct. But then `elif (exc := future.exception())` — future.exception() raises CancelledError if cancelled, but that's guarded. OK. However future.exception() on a still-running future (not done, not cancelled) would block, but that branch is guarded by `.done()` above. Fine. Not a bug."
+  },
+  {
+   "file": "src/review_agents/pipeline/run.py",
+   "line_start": 128,
+   "line_end": 134,
+   "severity": "important",
+   "title": "Background summarizer thread uses a Settings-derived model_for that captures endpoint but runs after handler returns; lifetime issues and uncaught races with repo lock",
+   "why": "summarize_in_background spawns a daemon thread that opens its own connection and calls module_summaries using `model_for(REQUEST_TIMEOUT_SECONDS)` created in run_review. The thread runs concurrently with subsequent reviews of the same repo; module_summaries acquires the repo layer lock in repo_layer_for_review? It calls module_summaries directly with its own connection — not under the repo lock. A concurrent review calling repo_layer_for_review may rebuild the repo layer while the summarizer thread writes module summaries, causing torn cache reads or duplicate work. Also the daemon thread does not respect any review deadline or budget beyond summary_tokens_per_build; if many reviews queue for the same repo, dedupe via _summaries is per-process only — fine within a process. Root: missing coordination with repo_layer_for_review's lock."
+  },
+  {
+   "file": "src/review_agents/pipeline/run.py",
+   "line_start": 90,
+   "line_end": 97,
+   "severity": "important",
+   "title": "review_seconds/wrap_up seconds are treated as durations but `clock()` is monotonic; callers passing wall-clock seconds behave wrongly across process lifetime",
+   "why": "run_review computes deadline = clock() + review_seconds; clock defaults to time.monotonic. That is consistent. But the test `test_a_dimension_still_running_at_its_deadline_is_left_behind` passes review_seconds=2.5 and wrap_up_seconds=1.0, expecting overall <2.8. dimension_deadline = deadline - min(1.0, 2.5/3)=deadline-0.833; then wait timeout ~1.67s, plus dimension threads that have not finished must be cut off. Because those threads are left alive, the test's `time.monotonic() - started < 2.8` may hold only because the main thread doesn't wait, but the orphan thread continues and may cause tests flakiness. More importantly this shows the design relies on orphaning threads. Same root as above."
+  },
+  {
+   "file": "src/review_agents/pipeline/run.py",
+   "line_start": 197,
+   "line_end": 200,
+   "severity": "blocking",
+   "title": "BEGIN IMMEDIATE on a connection that may already be in a transaction",
+   "why": "sqlite3 module with default isolation_level ('' deferred) auto-starts a transaction on the first INSERT/UPDATE. _step inserts, and the earlier `repo_layer_for_review` and `build_pr_layer` may do writes. If any of those left an open transaction (deferred implicit), `conn.execute(\"BEGIN IMMEDIATE\")` raises OperationalError 'cannot start a transaction within a transaction'. Python sqlite3 in autocommit-off mode begins a transaction before DML and leaves it open until commit/rollback. The code never commits after _step calls or repo_layer_for_review — it relies on outer COMMIT. Since _step uses INSERT, python's sqlite3 opens an implicit transaction on the first _step. By the time BEGIN IMMEDIATE runs, a transaction is already active (deferred), so BEGIN IMMEDIATE raises. Unless the connection is in autocommit/isolation_level=None. `connect()` in db.py is not shown in the diff; if it uses default isolation_level, this is a real bug. Even if autocommit, other writes via repo_layer_for_review must be committed separately. Contracts: 'All findings in one transaction' is broken because previous writes are not committed and the BEGIN will fail or include them."
+  },
+  {
+   "file": "src/review_agents/pipeline/run.py",
+   "line_start": 235,
+   "line_end": 247,
+   "severity": "important",
+   "title": "Cancelled futures and never-started jobs are recorded with limit_hit='time', which is then reported as review limit_hit even if the real cause is concurrency limits not time",
+   "why": "If model_concurrency < number of jobs and the deadline is generous, jobs that never got scheduled because earlier ones hogged workers are marked limit_hit='time'. If they were cancelled by cancel_futures after timeout, that is indeed time. But if a job was cancelled because the pool shutdown happened while it was still queued due to slow siblings, that is time too. Edge: with a very large number of dimensions/groups, some jobs may not start even when the deadline has not passed — but cancel_futures only runs after wait returns (deadline). So they are waiting → cancelled → time. OK. Not a bug."
+  },
+  {
+   "file": "src/review_agents/pipeline/run.py",
+   "line_start": 295,
+   "line_end": 305,
+   "severity": "blocking",
+   "title": "Fingerprint reads file text from the PR head snapshot for a finding, but findings may reference files/lines not in the head or line numbers out of range",
+   "why": "fingerprint(snapshot, finding) slices text.splitlines()[line_start-1:line_end]. If line_start is 0 or negative (model output), Python slice silently returns wrong lines (e.g. line_start=0 → text.splitlines()[-1:line_end]). If line_end < line_start, slice is empty → code='' → fingerprint collapses many distinct findings to the same hash (same file + empty code), so distinct findings share a fingerprint and the future dedupe/merge would drop real findings. No validation of finding.file/line ranges."
+  },
+  {
+   "file": "src/review_agents/pipeline/run.py",
+   "line_start": 295,
+   "line_end": 300,
+   "severity": "important",
+   "title": "fingerprint uses unnormalized file path: same file may arrive with leading './' or absolute, colliding/duplicating",
+   "why": "finding.file comes from the model. If two agents return 'payments/refund.py' and './payments/refund.py', fingerprints differ for the same code — dedupe across dimensions (pipeline design §4) breaks. "
+  },
+  {
+   "file": "src/review_agents/pipeline/run.py",
+   "line_start": 168,
+   "line_end": 181,
+   "severity": "important",
+   "title": "TokenBudget shared across concurrent dimension threads without proof of thread safety",
+   "why": "A single `budget = TokenBudget(...)` is passed to every UsageMeter in every dimension thread. Concurrent model calls decrement the same budget from multiple threads. If TokenBudget is not thread-safe (typically just an int without a lock), concurrent decrements race and can overshoot the review's token cap. No lock is shown here. The contract 'model_concurrency at a time … won't exceed budget' is violated under concurrent access."
+  },
+  {
+   "file": "src/review_agents/pipeline/run.py",
+   "line_start": 200,
+   "line_end": 212,
+   "severity": "blocking",
+   "title": "limit_hit UPDATE and findings INSERT run inside BEGIN IMMEDIATE, but _check_not_superseded was checked only before; a concurrent supersede between check and commit is lost",
+   "why": "The final _check_not_superseded runs before BEGIN. A new push that sets superseded_by between that check and the COMMIT will not be detected: findings are written for a superseded review, violating D-010 ('stops without writing anything'). The check and write are not atomic — the UPDATE of reviews.superseded_by is by another connection. Need to re-check superseded_by inside the transaction (or predicate the UPDATE/INSERT on superseded_by IS NULL)."
+  },
+  {
+   "file": "src/review_agents/pipeline/run.py",
+   "line_start": 200,
+   "line_end": 212,
+   "severity": "important",
+   "title": "No check that the review is still 'running' / claimed by this worker before writing findings",
+   "why": "If another process recovered and requeued the review (recover_interrupted can set status='queued'), or a second worker claims it, run_review still COMMITs findings for review_id. Double execution (e.g. recover while still running due to a long-lived orphan thread) can duplicate findings and flip limit_hit."
+  },
+  {
+   "file": "src/review_agents/pipeline/run.py",
+   "line_start": 88,
+   "line_end": 95,
+   "severity": "important",
+   "title": "review may be None / row lookups assume existence",
+   "why": "review = conn.execute('SELECT * FROM reviews WHERE id = ?'...).fetchone(); then review['has_token'] — if the review was deleted (e.g. superseded and pruned), this raises TypeError. Reasonable but worth handling: raises opaque error rather than a clear failure."
+  },
+  {
+   "file": "src/review_agents/pipeline/run.py",
+   "line_start": 108,
+   "line_end": 112,
+   "severity": "important",
+   "title": "Token budget uses settings.tokens_per_review fallback even when the repo config sets limits; concurrency shared across dimensions makes per-dimension accounting incorrect",
+   "why": "TokenBudget(limits.token_budget(settings.tokens_per_review)) is the review-wide budget, shared across all dimension meters. If a dimension exceeds it, the exception propagates only to that dimension — but the budget is exhausted for the rest; other dimensions will fail with BudgetExceededError and be marked 'tokens'. That is by design (limit_hit names it), but there is no distinction between the review-wide budget and per-dimension budget. The docstring says 'review's limit_hit' — consistent. Skip."
+  },
+  {
+   "file": "src/review_agents/pipeline/run.py",
+   "line_start": 240,
+   "line_end": 250,
+   "severity": "blocking",
+   "title": "Exceptions from future.exception() can be BaseException (e.g. KeyboardInterrupt/SystemExit) which are caught and converted to incomplete runs",
+   "why": "future.exception() returns whatever was raised in the worker. `run = AgentRun(job.dimension, 'incomplete', reason=f'{type(exc).__name__}: {exc}')` swallows BaseException-like errors from the agent thread (SystemExit, KeyboardInterrupt, MemoryError). MemoryError in particular should not be quietly recorded as a dimension failure; and any exception subclass with a __str__ that raises would propagate. Minor but: also any exception during work() before run_dimension (e.g. RepoTools constructor) is treated as a dimension failure rather than a review-level failure — the description says only code retrieval/supersede/write failure should end the review, but here a RepoTools construction bug (e.g. missing git) is silently attributed to a dimension."
+  },
+  {
+   "file": "src/review_agents/pipeline/run.py",
+   "line_start": 240,
+   "line_end": 250,
+   "severity": "important",
+   "title": "step status is 'ok' for a run with status 'done' only; but run.status could be other values silently treated as error",
+   "why": "error = None if run.status == 'done' else (run.reason or 'incomplete'). If a dimension returns status 'partial' (findings but limit hit), it is recorded as error with reason. That is probably intended. Skip."
+  },
+  {
+   "file": "src/review_agents/pipeline/run.py",
+   "line_start": 196,
+   "line_end": 214,
+   "severity": "robustness",
+   "title": "Snapshot uses head_sha from the review row, but the mirror was synced to refs; a superseded head is not re-checked and fingerprint may read stale content",
+   "why": "Snapshot(git_dir, head, tuple(skip)) — head from the review row. Fine. But note fingerprint uses snapshot.read_text which may raise if the path is a symlink escaping the repo; not shown."
+  },
+  {
+   "file": "src/review_agents/pipeline/run.py",
+   "line_start": 232,
+   "line_end": 248,
+   "severity": "important",
+   "title": "ThreadPoolExecutor created per review; orphan threads from timed-out reviews accumulate over time",
+   "why": "pool.shutdown(wait=False, cancel_futures=True) does not wait for running threads. For a service running many reviews where dimensions time out, each timeout leaks up to model_concurrency running threads (they eventually finish, but may linger for a while, each holding a mirror/RepoTools and doing model calls). Over a burst this can exhaust threads/connections/rate limits. There's no global bound on total concurrent model calls across reviews — settings.model_concurrency is per review, but the description ('model_concurrency at a time') sounds global."
+  },
+  {
+   "file": "src/review_agents/pipeline/run.py",
+   "line_start": 232,
+   "line_end": 247,
+   "severity": "important",
+   "title": "Step rows are written for timed-out dimensions from the main thread while worker threads may still be running (and possibly later record their own steps?)",
+   "why": "Worker threads do not write steps, so no double-write. But run_dimension may itself write steps or use meter callbacks that hit the DB (review_usage/UsageMeter). If UsageMeter writes usage rows (implied by summary_usage/review_usage functions), those writes happen concurrently from worker threads on their own connections; while the main thread does BEGIN IMMEDIATE ... COMMIT. SQLite BEGIN IMMEDIATE will fail with 'database is locked' if a worker holds a write lock, or the COMMIT will fail; the rollback-then-raise path then discards findings. Model calls triggered before timeout may finish after the main thread started the write transaction, causing lock contention."
+  },
+  {
+   "file": "src/review_agents/worker.py",
+   "line_start": 58,
+   "line_end": 68,
+   "severity": "important",
+   "title": "claim_next increments attempts but recovered 'queued' reviews reset to queued retain attempts; a review can exceed MAX_ATTEMPTS by requeues",
+   "why": "recover_interrupted requeues a running review if attempts < MAX_ATTEMPTS. MAX_ATTEMPTS=2: first claim sets attempts=1; restart with attempts=1 <2 → requeued; second claim attempts=2; next restart attempts=2 not <2 → fails. That works. But a queued review that is claimed repeatedly (e.g. handler raises after claim but before failure is recorded, or the worker crashes between claim and update) — worker's failure path presumably sets 'failed'. Worker not shown. Potential: a queued review with attempts already at MAX (e.g. inserted with attempts=2 externally via a failed run that got requeued before) can still be claimed — claim_next does not check attempts, so the max is only enforced by recovery. A crashed-then-requeued-by-D-021 review then can be claimed again after a crash that leaves it running. Actually recovery gates it. But nothing prevents an inserted queued review with attempts>=MAX from being claimed by claim_next. Minor."
+  },
+  {
+   "file": "src/review_agents/worker.py",
+   "line_start": 40,
+   "line_end": 61,
+   "severity": "important",
+   "title": "recover_interrupted updates two statements; the requeue UPDATE does not clear error and runs before the failure UPDATE which may then also affect the same row",
+   "why": "After the first UPDATE requeues rows (status='queued', started_at=NULL), the second UPDATE targets rows with status IN ('running','queued') and error... Let me inspect: the second UPDATE is 'UPDATE reviews SET status=\\'failed\\', error = CASE status WHEN \\'running\\' ...' WHERE ...'. The exact WHERE isn't shown in the diff (it was cut). If the WHERE selects status IN ('running','queued') AND has_token=1 OR attempts>=MAX, the requeued rows (status='queued', attempts<MAX, has_token=0) would be excluded. But if the WHERE is purely status-based with has_token, the requeued rows might be re-failed. The CASE uses status which after the first UPDATE is 'queued' for requeued rows, so the error message would be the 'queued' branch ('queued but … token … lost'?) — potentially overwriting the requeue. This is a real risk given the diff only shows partial context."
+  },
+  {
+   "file": "src/review_agents/pipeline/run.py",
+   "line_start": 128,
+   "line_end": 134,
+   "severity": "important",
+   "title": "summarize_in_background may start with model_for endpoint even though review budget was spent; the summary budget is separate but not coordinated with review deadline",
+   "why": "The background summary build has its own budget but no relation to the review's remaining time. If the review is almost out of time, summaries still consume model capacity (potentially exceeding per-service rate limits) concurrently with the dimension phase of the same review. Under model_concurrency limits enforced only per review, the background summarizer adds hidden concurrency against the model service — contradicts the stated D-022 goal."
+  },
+  {
+   "file": "src/review_agents/pipeline/run.py",
+   "line_start": 134,
+   "line_end": 142,
+   "severity": "important",
+   "title": "model_summarizer context_tokens uses window computed from settings.finder_model but model_for(REQUEST_TIMEOUT_SECONDS) called on every review spawns background build; multiple repos fine, but local `summarize` is created even if another thread already running (wasted model creation acceptable)",
+   "why": "Minor: model_for is invoked before summarize_in_background checks whether a build is running; creates unused model each review."
+  },
+  {
+   "file": "src/review_agents/pipeline/run.py",
+   "line_start": 75,
+   "line_end": 80,
+   "severity": "important",
+   "title": "_summaries dict never clears finished entries; unbounded growth per repo across repos",
+   "why": "_summaries[repo] = thread; replaced only if a new build starts. Entries persist for the process lifetime, retaining references to threads (minor) and preventing GC of thread objects. Unbounded per distinct repo — small leak but real on a long-lived service. Also wait_for_summaries joins threads already dead, fine."
+  },
+  {
+   "file": "src/review_agents/pipeline/run.py",
+   "line_start": 232,
+   "line_end": 248,
+   "severity": "important",
+   "title": "per_call recomputed per job using (deadline - clock()) / 3 — with many jobs started concurrently, all get similar per-call bounds, but there is no guarantee run_dimension finishes within per_call; deadline is passed to run_dimension for checks",
+   "why": "Not a bug per se given deadline passed. Skip."
+  },
+  {
+   "file": "src/review_agents/pipeline/run.py",
+   "line_start": 111,
+   "line_end": 116,
+   "severity": "robustness",
+   "title": "read_repo_config errors are recorded but config is used anyway; if config fails to parse an exception may propagate and skip getting code",
+   "why": "loaded.config is used even when loaded.errors is non-empty. If read_repo_config returns a default config on error, fine. If it raises on malformed YAML, the review fails entirely rather than recording a step and continuing with defaults — description says config step records errors. Depends on read_repo_config contract."
+  },
+  {
+   "file": "src/review_agents/config.py",
+   "line_start": 69,
+   "line_end": 76,
+   "severity": "important",
+   "title": "wrap_up_seconds is a float setting but used as if seconds; review_minutes from repo config — no validation that wrap_up_seconds < total",
+   "why": "dimension_deadline = deadline - min(reserve, total/3). If reserve=0 (allowed by ge=0), dimension_deadline = deadline. Deadline phase runs right up to deadline and then COMMIT occurs after deadline — exceeding review time. With wrap_up_seconds ge=0, a config that sets 0 leaves no wrap-up reserve even though the contract says it 'keeps a wrap-up reserve'."
+  },
+  {
+   "file": "src/review_agents/__main__.py",
+   "line_start": 14,
+   "line_end": 20,
+   "severity": "important",
+   "title": "review_handler built once with a fresh MirrorStore; no shutdown hook for background summary threads",
+   "why": "wait_for_summaries is exposed for orderly shutdown but not called in __main__. Daemon threads are killed abruptly on process exit while writing module summaries, potentially leaving partial cache rows. Also the handler's settings.start handler and MirrorStore are created without a stop path; the uvicorn run has no signal handler to drain."
+  },
+  {
+   "file": "src/review_agents/pipeline/run.py",
+   "line_start": 268,
+   "line_end": 288,
+   "severity": "important",
+   "title": "fingerprint for too-large/binary file uses line range only; two findings on the same line range in the same file but different code (file content changed) collide",
+   "why": "When read_text returns None, code is just 'lines a-b'. Two distinct findings with the same line range in a binary file (or oversized file) share a fingerprint and would be merged/deduped incorrectly. The test asserts two different line ranges give different fingerprints — it doesn't test same range. By design it's a fallback, but this loses the 'same problem at the same code' guarantee for unreadable files."
+  },
+  {
+   "file": "src/review_agents/pipeline/run.py",
+   "line_start": 168,
+   "line_end": 176,
+   "severity": "important",
+   "title": "skip paths list used both from repo config and effective_skip_paths; Snapshot and RepoTools receive skip but fingerprint does not normalize case/path separators",
+   "why": "Skip on Windows/repos with case differences can compute fingerprints or reads on the wrong file. Minor."
+  },
+  {
+   "file": "src/review_agents/pipeline/run.py",
+   "line_start": 232,
+   "line_end": 246,
+   "severity": "blocking",
+   "title": "AgentRun objects returned by workers after wait(); but futures dict iteration order and 'starts' mutation make step ordering nondeterministic; findings ordering depends on dict iteration but jobs is ordered — futures preserves insertion, so order is job submission order. OK."
+  },
+  {
+   "file": "src/review_agents/pipeline/run.py",
+   "line_start": 200,
+   "line_end": 212,
+   "severity": "important",
+   "title": "If COMMIT fails, ROLLBACK executes even if transaction already auto-rolled-back, raising and masking original error",
+   "why": "except BaseException: conn.execute('ROLLBACK'); raise — if the exception was from COMMIT itself (e.g. disk full), SQLite may have already left no transaction; 'ROLLBACK' then raises 'cannot rollback - no transaction is active', replacing the original exception. Use try/except around rollback or check in_transaction."
+  },
+  {
+   "file": "src/review_agents/pipeline/run.py",
+   "line_start": 200,
+   "line_end": 212,
+   "severity": "important",
+   "title": "No update of reviews.status to done/failed — run_review only sets limit_hit; contract unclear",
+   "why": "The handler's caller (worker) presumably marks status done/failed. But if run_review raises, steps done so far are committed? _step uses INSERT on same connection with no commit; if handler wraps with try/except and marks failed, fine. But if worker does not commit steps on error, the steps recorded prior to failure may be lost. Not shown. Skip."
+  },
+  {
+   "file": "src/review_agents/pipeline/run.py",
+   "line_start": 232,
+   "line_end": 248,
+   "severity": "important",
+   "title": "starts dict written by multiple worker threads without a lock → concurrent writes to Python dict are not thread-safe in general (CPython GIL makes single assignment atomic, but not guaranteed)",
+   "why": "While CPython assignment is atomic, this is fragile and nonportable; more importantly, `starts[job.node] = ...` may execute after the main thread's _step reads it, making the fallback timestamp not the job's real start. Root: lack of synchronization and late assignment."
+  }
+ ],
+ "content": null,
+ "error": null
+}

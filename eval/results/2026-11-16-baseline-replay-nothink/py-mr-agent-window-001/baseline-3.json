@@ -1,0 +1,149 @@
+{
+ "case": "py-mr-agent-window-001",
+ "run": 3,
+ "model": "deepseek-flash",
+ "thinking": "disabled",
+ "seconds": 23.5,
+ "usage": {
+  "prompt_tokens": 6472,
+  "completion_tokens": 3719,
+  "total_tokens": 10191,
+  "prompt_tokens_details": {
+   "cached_tokens": 6272
+  },
+  "prompt_cache_hit_tokens": 6272,
+  "prompt_cache_miss_tokens": 200
+ },
+ "findings": [
+  {
+   "file": "src/review_agents/pipeline/conversation.py",
+   "line_start": 103,
+   "line_end": 118,
+   "severity": "blocking",
+   "title": "Token accounting in fit() overcounts/undercounts by mixing whole-message and content-only estimates",
+   "why": "fit() computes total via conversation_tokens(messages) (which includes tool_calls and content), then for each replaced result adds estimate_tokens(new.content) - estimate_tokens(old.content). That delta is content-only, which is consistent with what changed. However _Result.text was already shortened to result_tokens//2 head/tail in answer(); when fit() calls shorten(result.text, ...) it re-shortens already-short text. More critically, conversation_tokens(str(message.content)) is used for all messages, but ToolMessage content re-wrapped in untrusted() has a growing wrapper; the loop may never reach total<=room if output_reserve + wrapper exceeds window, and the loop will exhaust _results without signaling. When a single message exceeds the window even after shortening to 500 tokens head+tail, fit() returns silently with total still > room; the subsequent model call then still overflows the window. There is no final guard/error."
+  },
+  {
+   "file": "src/review_agents/pipeline/conversation.py",
+   "line_start": 124,
+   "line_end": 145,
+   "severity": "important",
+   "title": "repeat reminder appended outside data block, and suffix lost/duplicated on re-wrap",
+   "why": "answer() appends suffix after untrusted(data block). In fit(), the new message is _message(tool, result.text, result.suffix, old.tool_call_id). If shorten() during fit changed anything it's fine, but if the result was not shortened by answer() (short text) and fit shortens it, result.suffix remains; however if shorten returns the same text, result.shortened=True is set anyway and content is re-wrapped. The bigger issue: the suffix (repeat reminder) is untrusted-external text that ends up outside the <untrusted> block, becoming trusted prompt content injected by the model's own tool loop — but more importantly it's a contract violation: tests assert content ends with </untrusted> for short results, yet the reminder is placed after it, contradicting the 'data block' invariant the design claims."
+  },
+  {
+   "file": "src/review_agents/pipeline/conversation.py",
+   "line_start": 60,
+   "line_end": 90,
+   "severity": "important",
+   "title": "shorten() character fallback can still exceed keep_tokens and does not bound note size",
+   "why": "The while loop halves `chars` until both head and tail estimates are <= keep_tokens, but the note string includes `total` tokens and `len(text)-2*chars`, which is unbounded. For a very large text the note itself can be long. Also if text has no newlines and is one line, splitlines returns one line; head=_take gets it if within budget else empty, and tail similarly; then left_out = 1 - len(head) - len(tail) could be 1-0-0=1, but the branch requires head and tail truthy so falls through to char cut — okay. But for texts with exactly two long lines, head and tail may both be empty, left_out=2, branch fails, char cut used. The char cut's note contains total tokens which for enormous input is fine. The real bug: chars starts at keep_tokens*3 = 1500 for 500 tokens; if estimate_tokens(text[:1500]) > 500 the loop halves. But estimate_tokens(text[-chars:]) on a multi-byte text — the loop condition uses max of both, good. However after the loop, note + text[:chars] + middle marker + text[-chars:] total may exceed keep_tokens because the note and markers aren't counted. Tests only assert <= 1200 for specific inputs."
+  },
+  {
+   "file": "src/review_agents/pipeline/conversation.py",
+   "line_start": 30,
+   "line_end": 45,
+   "severity": "important",
+   "title": "_take counts tokens per line plus 1 newline, but the newline estimate may underestimate for CJK",
+   "why": "estimate_tokens(line)+1 per line is a rough per-line overhead. For a head/tail of whole lines this is approximate; combined with the note the final result may exceed the intended keep_tokens. The contract 'result over N tokens keeps head and tail of about N/2 each' is only approximate, and the caller (answer) uses result_tokens//2 so total can be up to result_tokens + note; the test asserts <=1200 for a 1000-token limit, which happens to pass for ASCII but isn't guaranteed, e.g. many short CJK lines where estimate_tokens undercounts or the +1 overhead dominates."
+  },
+  {
+   "file": "src/review_agents/pipeline/agent.py",
+   "line_start": 182,
+   "line_end": 184,
+   "severity": "blocking",
+   "title": "conversation.fit() called before invoke but messages passed by reference may be mutated mid-iteration",
+   "why": "_answer now appends to messages (shared list) and updates conversation. fit(messages) mutates messages[result.index] in place before invoke. That's fine sequentially. But the real bug: fit() is called with `messages`, then bound.invoke(messages, ...). If the model client (LangChain) deep-copies or if callbacks observe, okay. The important issue: conversation_tokens counts AIMessage.tool_calls via json.dumps including 'id' and other fields; but _Result.index is len(messages) at answer time. Later, when a text-retry appends a HumanMessage or the loop appends SUBMIT_ONLY ToolMessages, indices of existing results remain valid because appends are at end. However if any code inserts/removes messages (it doesn't here) indices break. More concretely: when `final` is true, ToolMessage(SUBMIT_ONLY) is appended but not tracked; fine. No blocking bug here, but fit() can run and return without guaranteeing room."
+  },
+  {
+   "file": "src/review_agents/pipeline/agent.py",
+   "line_start": 245,
+   "line_end": 268,
+   "severity": "important",
+   "title": "_answer signature changed to None-returning; callers relying on return value broken",
+   "why": "Previously _answer returned a ToolMessage and the caller appended it. Now it returns None and appends internally. The diff updates the one call site, but any other caller (e.g. tests, other modules) or subclasses importing _answer will break. Within this diff only one call site exists, but it's a private function; still a contract change. More importantly, error paths in _answer append plain ToolMessage without untrusted() wrapping — same as before, so not new. But conversation tracking skips error/unknown-tool results, so fit() won't shorten them; a model that repeatedly calls a missing tool with huge args could accumulate unbounded error messages (args echoed? no, error includes exc which may be large for validation errors) and fit cannot shrink them, risking window overflow."
+  },
+  {
+   "file": "src/review_agents/pipeline/run.py",
+   "line_start": 336,
+   "line_end": 344,
+   "severity": "important",
+   "title": "ConversationLimits built once per _run_dimensions, but assert on finder_model may be None at runtime",
+   "why": "`assert settings.finder_model is not None` with noqa S101: if Python runs with -O, asserts are stripped and settings.finder_model could be None, then `.context_tokens` raises AttributeError. The comment says checked when review starts, but the assert is the check; under -O it disappears, yielding a crash with a confusing error. Also, if the model's context_tokens is smaller than output_reserve, room becomes negative and fit() will shorten every result to 500 tokens and still exceed; no validation that window > output_reserve."
+  },
+  {
+   "file": "src/review_agents/pipeline/run.py",
+   "line_start": 338,
+   "line_end": 344,
+   "severity": "important",
+   "title": "Per-dimension agents share the same limits but the window is the finder model's, not the judge/other models",
+   "why": "Only finder_model.context_tokens is used. If run_dimension is later reused with a different model (e.g., a verifier model with a smaller window), the wrong window applies. Within this PR, _run_dimensions uses finder_model for all dimension agents, so it's consistent today, but limits are a parameter defaulting to windowless (1e9) — any other caller of run_dimension (tests, future code) silently gets no window protection for truncation beyond per-result, and fit() never shortens. That's a latent bug: default ConversationLimits disables the conversation-fitting layer entirely."
+  },
+  {
+   "file": "src/review_agents/pipeline/conversation.py",
+   "line_start": 44,
+   "line_end": 48,
+   "severity": "robustness",
+   "title": "REPEAT_REMINDER_AT counts cumulative identical calls but key uses json.dumps of args with sort_keys",
+   "why": "json.dumps([tool, args], sort_keys=True) — sort_keys on a list has no effect; nested dicts are sorted since sort_keys applies recursively to dicts. But args with non-string keys or unhashable values are handled by default=str, fine. The counter is per-Conversation (per dimension run), correct. However the reminder triggers 'the third time an agent makes the exact same call' — code uses `times >= REPEAT_REMINDER_AT` so every call from the 3rd onward gets the reminder, matching 'the third time... remimd it'. But since counter persists for result index tracking, if a later fit() re-wraps, suffix preserved. Not a bug."
+  },
+  {
+   "file": "src/review_agents/pipeline/conversation.py",
+   "line_start": 82,
+   "line_end": 86,
+   "severity": "robustness",
+   "title": "shorten() char fallback note claims 'middle N characters' but head/tail are text[:chars] and text[-chars:] which may overlap or be wrong length due to multibyte",
+   "why": "len(text) - 2*chars assumes 2*chars <= len(text). Since the branch is taken only when total > 2*keep_tokens, and chars starts at keep_tokens*3, it's possible 2*chars > len(text) if text is large-token but short-char (e.g., CJK 1 token/char, total>1000 with 500 keep => text len ~1001, chars=1500, 2*chars=3000 > len 1001). Then the loop halves until estimates fit; it may reach chars=~500, 2*chars=1000 < 1001, so count positive. But it could compute a negative count (len - 2*chars) if text length is small and token density high. Negative 'characters left out' is nonsensical and the head+tail may overlap (text[:chars] and text[-chars:] overlap when 2*chars > len), duplicating content and inflating the result beyond keep_tokens. For a one-line CJK text of ~1001 chars / ~1000 tokens just over 2*500, chars must shrink to fit; loop halves from 1500 to 750 then 375; 2*375=750<1001 ok, count=251 positive. For a text of 200 tokens? not in branch. Edge cases with note overhead not counted can push estimate beyond the test's 1200."
+  },
+  {
+   "file": "src/review_agents/pipeline/conversation.py",
+   "line_start": 103,
+   "line_end": 120,
+   "severity": "robustness",
+   "title": "fit() skips already-shortened results, so if the window shrinks (or many results) it cannot free enough room",
+   "why": "Once result.shortened=True, it is skipped forever. If after shortening all tracked results the total still exceeds room, fit() returns having done nothing more. There is no second-level 'cut further' or 'drop oldest entirely', and no error. With many medium-sized results (each just under result_tokens but never triggering the >2*keep condition on the second pass) the conversation can still overflow. The design claims 'the oldest results are cut to a 500-token head and tail first' — first implies more fallbacks, but none exist here."
+  },
+  {
+   "file": "src/review_agents/pipeline/conversation.py",
+   "line_start": 120,
+   "line_end": 122,
+   "severity": "important",
+   "title": "replacing messages[result.index] during fit may invalidate other results' indices if indices refer to pre-compaction positions",
+   "why": "Indices are captured as len(messages) at answer() time. The main loop appends messages (AIMessage, ToolMessage, text-retry HumanMessage, SUBMIT_ONLY). All appends, no inserts, so stored indices stay valid for existing results. But text_retry path: when reply has no tool_calls and not final, the loop appends a HumanMessage reminder — still append. So indices remain valid. However if a ToolMessage is ever replaced with a different-length content, that's fine. Not a bug today but fragile; also conversation_tokens delta uses only content, but after fit(), the next iteration's `total` was already adjusted by delta; since conversation_tokens isn't recomputed, drift accumulates if estimate_tokens(str(new.content)) computation differs from what conversation_tokens used (it used str(content), same), okay."
+  },
+  {
+   "file": "src/review_agents/pipeline/conversation.py",
+   "line_start": 76,
+   "line_end": 80,
+   "severity": "robustness",
+   "title": "how text says 'read_file with start_line and end_line' even for read_file results that were themselves already line-ranged",
+   "why": "Shortened read_file results tell the model to re-read with start_line/end_line, but if the original call already used those args and the window is the limiting factor, re-reading produces another result that will also be shortened and (in fit) cut, leading to a loop. The reminder 'Change your approach' helps but the head/tail note actively encourages the loop for the very tool whose results dominate."
+  },
+  {
+   "file": "src/review_agents/pipeline/agent.py",
+   "line_start": 125,
+   "line_end": 129,
+   "severity": "important",
+   "title": "Mutable default argument ConversationLimits() evaluated once at import",
+   "why": "The noqa claims it is 'frozen, shared safely'. ConversationLimits is a frozen dataclass, so sharing is safe for equality, but each call to run_dimension uses the SAME default instance — fine since frozen. However dataclass frozen makes it hashable-ish but window=1e9 means any test or caller omitting limits gets NO conversation fitting and NO error, silently disabling the feature the PR advertises. The tests work around by passing limits, hiding the real production path only exercised via run.py. If _run_dimensions ever forgets to pass limits, the feature is off with no signal."
+  },
+  {
+   "file": "Dockerfile",
+   "line_start": 24,
+   "line_end": 27,
+   "severity": "important",
+   "title": "Installing 'apt' package at runtime is unnecessary and may pull unintended dependencies/versions",
+   "why": "The comment says apt is named to get a security fix (CVE-2026-109518), but apt/apt-get/dpkg are part of the base image's Debian and are not upgraded by `apt-get install apt` reliably; this can install the repo's latest apt which may conflict with the base image's libapt-pkg version or pull friendlier dependencies. Adding `apt` to --no-install-recommends can upgrade base packages, changing the pinned-base guarantee the comment describes. Not strictly in scope of the feature, but a real risk of build breakage or unexpected package upgrades at build time."
+  },
+  {
+   "file": "tests/test_pipeline_run.py",
+   "line_start": 568,
+   "line_end": 572,
+   "severity": "nit",
+   "title": "test asserts every tool result contains 'Shortened' but submit-only and error results won't",
+   "why": "The test filters m.type == 'tool' across all sent messages, which includes the SUBMIT_ONLY message ('only submit was offered' tool result) and any error results. Those won't contain 'Shortened', so the assertion `all(\"Shortened\" in r ...)` could fail depending on the script; with tool_result_tokens=10 even the read_file result gets shortened, but if the loop appends SUBMIT_ONLY (final=True path triggers when budget exhausted or deadline near) that message won't. Test may be flaky or over-broad; not a product bug."
+  }
+ ],
+ "content": null,
+ "error": null
+}

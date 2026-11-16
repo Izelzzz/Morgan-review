@@ -1,0 +1,63 @@
+{
+ "case": "py-mr-verify-schedule-001",
+ "run": 1,
+ "model": "deepseek-flash",
+ "seconds": 276.8,
+ "usage": {
+  "prompt_tokens": 17143,
+  "completion_tokens": 54817,
+  "total_tokens": 71960,
+  "prompt_tokens_details": {
+   "cached_tokens": 16896
+  },
+  "completion_tokens_details": {
+   "reasoning_tokens": 54159
+  },
+  "prompt_cache_hit_tokens": 16896,
+  "prompt_cache_miss_tokens": 247
+ },
+ "findings": [
+  {
+   "file": "src/review_agents/pipeline/run.py",
+   "line_start": 509,
+   "line_end": 514,
+   "severity": "blocking",
+   "title": "Queued future results are dropped when the deadline is reached",
+   "why": "The loop breaks as soon as `now` is past `submit_by`/`deadline` without draining `self.events`. A finder or verifier future that completed before the deadline but whose callback is still queued is never processed: agent findings are marked incomplete, and a verifier verdict is replaced by the synthetic 'deadline passed' run. If all verifier events are queued this way, the review incorrectly raises 'no finding could be verified'."
+  },
+  {
+   "file": "src/review_agents/pipeline/run.py",
+   "line_start": 516,
+   "line_end": 517,
+   "severity": "important",
+   "title": "Event wait ignores submit_by while a verification is pending",
+   "why": "When both `agents_out` and `checking` are true, the timeout is computed from `deadline`, so `events.get` can sleep past `submit_by` if no event arrives. Slow dimension agents then keep the review in `find_and_verify` until the final deadline instead of being cut off at `submit_by`, consuming the reserve and leaving no time for merge/write."
+  },
+  {
+   "file": "src/review_agents/pipeline/run.py",
+   "line_start": 469,
+   "line_end": 470,
+   "severity": "important",
+   "title": "Verifier threads pop checks before waiting for a slot, causing priority inversion",
+   "why": "Each `verify` task removes a check from `pending` before `run_verifier` waits on `Slots`. With as many verifier workers as slots, lower-priority checks can occupy every verifier thread while waiting for slots. A later blocking/important check stays in `pending` with no thread to pop it, so it cannot become a slot waiter and is delayed behind the lower-priority verifications, violating D-031."
+  },
+  {
+   "file": "src/review_agents/pipeline/run.py",
+   "line_start": 472,
+   "line_end": 476,
+   "severity": "robustness",
+   "title": "Verifier setup failures abort the whole review",
+   "why": "`UsageMeter(...)` and `verify_priority(...)` are outside the `try` that converts failures to a `VerificationRun`. If they raise, `verify()` raises, and the event loop calls `future.result()` without handling the exception. One verification failure then fails the entire review instead of being recorded as an incomplete verification, contrary to the comment and D-027/D-031."
+  },
+  {
+   "file": "src/review_agents/pipeline/run.py",
+   "line_start": 535,
+   "line_end": 544,
+   "severity": "robustness",
+   "title": "A merged verification keeps the first copy's priority",
+   "why": "When a same-dimension duplicate joins an existing `_Check`, only `members` is appended; the heap entry and the `Slots` priority remain based on `check.lead.finding.severity`, the first copy. If a later Deep-run copy reports a higher severity, its verification still runs at the lower priority, so a blocking finding can wait behind dimension turns."
+  }
+ ],
+ "content": null,
+ "error": null
+}

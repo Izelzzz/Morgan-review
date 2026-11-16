@@ -1,0 +1,62 @@
+{
+ "case": "py-mr-increment-001",
+ "run": 2,
+ "model": "deepseek-flash",
+ "seconds": 354.1,
+ "usage": {
+  "prompt_tokens": 3838,
+  "completion_tokens": 63048,
+  "total_tokens": 66886,
+  "prompt_tokens_details": {
+   "cached_tokens": 3584
+  },
+  "completion_tokens_details": {
+   "reasoning_tokens": 62087
+  },
+  "prompt_cache_hit_tokens": 3584,
+  "prompt_cache_miss_tokens": 254
+ },
+ "findings": [
+  {
+   "file": "src/review_agents/context/increment.py",
+   "line_start": 129,
+   "line_end": 133,
+   "severity": "important",
+   "title": "Taking-back removals are skipped when the same hunk also has a kept addition",
+   "why": "The removal check is in an `elif` after `if kept:`. A single `-U0` hunk can both remove PR-added lines (a revert) and add other PR-owned lines. In that case `kept` is non-empty, so the `elif` never runs and the `(hunk.at, hunk.at)` place for the removed line is omitted. Example: the previous PR changes two adjacent base lines to A and B; a later round restores the base line where A was and changes B to C. `now` contains C, so `kept` is `[C]`, and the restored A line is never added to `Increment.lines`. The reviewer misses the revert. Check `hunk.removed` independently of `kept`."
+  },
+  {
+   "file": "src/review_agents/context/increment.py",
+   "line_start": 20,
+   "line_end": 20,
+   "severity": "important",
+   "title": "Path parsing from `diff --git` can misattribute hunks",
+   "why": "`_FILE` assumes an unquoted `a/... b/...` header and greedily splits at the last ` b/`. `core.quotePath=false` only stops octal quoting of non-ASCII; Git still C-quotes paths containing quotes, backslashes, tabs/newlines, and the two-path header is ambiguous for ordinary paths containing ` b/`. When the regex misses, `old_path`/`new_path` remain from the previous file (lines 48-49), so later hunks are recorded under the wrong path; when it matches the wrong ` b/`, the split is also wrong. A user's `diff.noprefix`/`diff.mnemonicPrefix` config likewise breaks the `a/`/`b/` assumption. The consequence is silently wrong or missing review lines."
+  },
+  {
+   "file": "src/review_agents/context/increment.py",
+   "line_start": 47,
+   "line_end": 47,
+   "severity": "important",
+   "title": "`splitlines()` lets file content inject fake diff headers",
+   "why": "`str.splitlines()` also splits on `\\v`, `\\f`, `\\r`, U+2028, etc., not just `\\n`. The diff is untrusted PR content; a changed line containing such a character followed by text like `diff --git a/x b/x` or `@@ -1 +1 @@` becomes a new physical line that matches `_FILE`/`_HUNK`. That resets the current path or adds a fake hunk, so an author can hide or misattribute changes in a later round. Splitting only on `\\n` avoids this."
+  },
+  {
+   "file": "src/review_agents/context/increment.py",
+   "line_start": 59,
+   "line_end": 59,
+   "severity": "important",
+   "title": "Deleted/emptied files get a line 1 that is not in the head tree",
+   "why": "For a pure deletion hunk `new_count` is 0, so `new_start` is 0 (whole-file deletion) or the line before the removal; `max(new_start, 1)` turns a whole-file deletion/emptying into `at=1`. If that hunk removes lines the PR previously added, the taking-back branch at line 133 emits `{path: [(1,1)]}` even though `path` does not exist (or is empty) at `head`. `Increment.lines` is documented as head-side lines, so downstream comment/range lookup will fail or point at an unrelated line. Deleting a file the PR added is a common way to take it back, so this is reachable."
+  },
+  {
+   "file": "src/review_agents/context/increment.py",
+   "line_start": 104,
+   "line_end": 113,
+   "severity": "robustness",
+   "title": "Textconv is not disabled, so hunk line numbers can refer to converted text",
+   "why": "`--no-ext-diff` only disables external diff helpers. Git still runs configured `diff.<driver>.textconv` filters and emits hunks for the converted representation. The line numbers then do not correspond to the file at `head`, so `Increment.lines` can point at lines that do not exist (or are the wrong code) when a path has a textconv driver. Add `--no-textconv` or otherwise reject textconv."
+  }
+ ],
+ "content": null
+}

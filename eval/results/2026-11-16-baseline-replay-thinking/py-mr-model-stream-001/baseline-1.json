@@ -1,0 +1,54 @@
+{
+ "case": "py-mr-model-stream-001",
+ "run": 1,
+ "model": "deepseek-flash",
+ "seconds": 285.3,
+ "usage": {
+  "prompt_tokens": 9830,
+  "completion_tokens": 54333,
+  "total_tokens": 64163,
+  "prompt_tokens_details": {
+   "cached_tokens": 0
+  },
+  "completion_tokens_details": {
+   "reasoning_tokens": 53431
+  },
+  "prompt_cache_hit_tokens": 0,
+  "prompt_cache_miss_tokens": 9830
+ },
+ "findings": [
+  {
+   "file": "src/review_agents/models.py",
+   "line_start": 196,
+   "line_end": 201,
+   "severity": "important",
+   "title": "Deadline abort leaves the in-flight request running: callbacks fire after the run ended and threads/sockets leak",
+   "why": "`cancelled` is only polled between chunks, and the abort never closes the response (`stream.close()` happens only when `until_cancelled` is finally closed, i.e. after the next chunk or the read timeout). For `stream_replies=False` nothing is cancelled at all, and for a stream whose next chunk is far away the daemon worker keeps reading for up to `idle_seconds` (300s default) after the deadline. `BaseChatModel._generate_helper` has already called `run_manager.on_llm_error(DeadlinePassedError)` in the calling thread, so the abandoned worker's later `on_llm_new_token` calls hit the same callback manager after the run ended and from another thread; the abandoned request also burns model tokens that never reach `UsageMeter`, so the token budget is under-counted, and every abandoned call leaves a thread plus an HTTP connection alive beyond the deadline."
+  },
+  {
+   "file": "src/review_agents/models.py",
+   "line_start": 169,
+   "line_end": 169,
+   "severity": "important",
+   "title": "A stream that yields no chunk raises ValueError instead of EmptyReplyError, so it is never retried",
+   "why": "`generate_from_stream` raises `ValueError(\"No generations found in stream.\")` when the iterator is empty (a 200 whose SSE body has only comments/heartbeats and `[DONE]`, or is empty). `_check_not_empty` only sees a returned `ChatResult`, so D-030's \"an empty reply with no finish reason is retried\" is not applied: `retry_wait` returns None for a `ValueError`, the attempt is not retried, and a bare `ValueError` escapes where callers (and their error handling for `EmptyReplyError`/openai errors) expect a model error, losing the dimension."
+  },
+  {
+   "file": "src/review_agents/models.py",
+   "line_start": 222,
+   "line_end": 228,
+   "severity": "robustness",
+   "title": "`WHOLE_REPLY_SECONDS` is only a per-read timeout, so a non-streamed reply is not limited to two minutes",
+   "why": "The value is passed as `httpx2.Timeout(wait)`, which httpx applies per read/write operation, not to the whole response; nothing else bounds the attempt, because `_within_deadline` uses the call's `deadline` (the whole review's remaining time, or `inf` for summaries) and not `now + WHOLE_REPLY_SECONDS`. A service that trickles the JSON body therefore keeps a `stream=False` call alive far past D-029's two minutes, and with `time_left=inf` (summaries) it is not bounded at all, contrary to the stated contract."
+  },
+  {
+   "file": "src/review_agents/pipeline/agent.py",
+   "line_start": 155,
+   "line_end": 158,
+   "severity": "robustness",
+   "title": "New DeadlinePassedError/EmptyReplyError types are raised but handled nowhere",
+   "why": "The model layer now raises `DeadlinePassedError` (a plain `TimeoutError`, so not an `openai` error) and `EmptyReplyError`, and the diff adds no handler for either. The old `max(1.0, min(...))` guaranteed a positive bound; now a turn whose `deadline - now` is zero or negative gets a deadline already in the past and `chat_model` aborts before any attempt with `DeadlinePassedError`, and an empty reply that exhausts its retries raises `EmptyReplyError`. Neither is `BudgetExceededError`, the only exception `run_dimension` handles at the call site, so these paths escape the \"recorded reason it stopped\" contract and fail the dimension/review instead of degrading."
+  }
+ ],
+ "content": null
+}

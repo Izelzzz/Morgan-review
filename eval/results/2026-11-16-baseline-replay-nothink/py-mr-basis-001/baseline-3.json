@@ -1,0 +1,133 @@
+{
+ "case": "py-mr-basis-001",
+ "run": 3,
+ "model": "deepseek-flash",
+ "thinking": "disabled",
+ "seconds": 14.3,
+ "usage": {
+  "prompt_tokens": 14967,
+  "completion_tokens": 2239,
+  "total_tokens": 17206,
+  "prompt_tokens_details": {
+   "cached_tokens": 14720
+  },
+  "prompt_cache_hit_tokens": 14720,
+  "prompt_cache_miss_tokens": 247
+ },
+ "findings": [
+  {
+   "file": "src/review_agents/migrations/0008_basis.sql",
+   "line_start": 4,
+   "line_end": 4,
+   "severity": "blocking",
+   "title": "Dropping evidence breaks existing rows and old code paths",
+   "why": "The migration adds basis with default '[]' then drops evidence. Any pre-existing findings lose their evidence content and rows that relied on it become basis=[]. Also, SQLite DROP COLUMN requires 3.35+, and the migration has no backfill converting evidence into basis, so historical findings end up with no basis and (in quick mode) can no longer be published, and API/UI consumers relying on evidence break silently."
+  },
+  {
+   "file": "src/review_agents/pipeline/agent.py",
+   "line_start": 343,
+   "line_end": 343,
+   "severity": "important",
+   "title": "check_basis replaces model-supplied check only after placement check, but timeout path loses source-correction",
+   "why": "When _place_problem or _source_problem raises ToolTimeoutError mid-loop, the function returns early with an 'unchecked' check and does not re-check other places/source. More importantly the loop computes problems lazily; a timeout in one place masks later places and the source check, so the verifier sees 'unchecked' even when other bases could be proven failed/ok. Also the model's own check value is only overwritten in the success/failure paths — fine — but the tool-timeout branch uses model_copy which keeps the model's originally-submitted 'check' field if any? No: update sets check, so it is overwritten. The real issue is the short-circuit hiding results."
+  },
+  {
+   "file": "src/review_agents/pipeline/basis.py",
+   "line_start": 150,
+   "line_end": 165,
+   "severity": "important",
+   "title": "_source_problem silently accepts a quote that overlaps the given range at any position",
+   "why": "When lines_given is present and the found quote (start..end) is contained in given_start..given_end, the basis is marked ok without verifying that the exact given lines are right. A model can give a wide range (e.g. file:1-9999) and any quote anywhere within it passes, defeating the point of checking lines. The check should require the found lines to match the given range, not merely be contained in it."
+  },
+  {
+   "file": "src/review_agents/pipeline/basis.py",
+   "line_start": 118,
+   "line_end": 133,
+   "severity": "robustness",
+   "title": "_find can return wrong line numbers for quotes spanning partial lines or with boundary whitespace",
+   "why": "The algorithm joins squashed lines with single spaces and finds the quote in that concatenation. A quote that begins mid-line or that includes trailing whitespace boundaries can match across a line boundary that does not correspond to source lines, and bisect mapping of an offset in the joined string to a line index is only correct when parts are non-empty. An empty source line produces part='' and starts that don't advance, skewing bisect results. This can report incorrect/corrected lines, or mark a quote 'corrected' to wrong lines."
+  },
+  {
+   "file": "src/review_agents/pipeline/basis.py",
+   "line_start": 159,
+   "line_end": 168,
+   "severity": "important",
+   "title": "A file source with no lines gives 'corrected' even when quote is found, masking a missing source spec",
+   "why": "When lines_given is None (source like 'docs/refunds.md'), the code falls through to the moved branch and returns a 'corrected' source. That is intended per tests. But the same branch is taken when lines_given exists AND the found range is NOT contained. The problem: if the found quote spans lines that are partially outside the given range, it's 'corrected' rather than 'failed'; that is arguably fine, but the larger issue is that the model's original range is never validated as an overlap — a quote found anywhere in the file is accepted as 'corrected'. Combined with the containment check above, a model gets credit for any quote that exists anywhere in the file, so quoting real-but-irrelevant text passes the program's check and is handed to the verifier as 'corrected/ok'."
+  },
+  {
+   "file": "src/review_agents/pipeline/run.py",
+   "line_start": 530,
+   "line_end": 531,
+   "severity": "important",
+   "title": "continue skips candidate bookkeeping (runs/published.reported) for quick-mode unpublished findings",
+   "why": "When _publishable_unverified returns False, the loop `continue`s before adding to published.reported and accepted. But the call site is inside the block that also assigns runs[item]=run and iterates candidates. Skipping means the candidate is never recorded as reported; depending on how _step counters and downstream dedup/merge use published.reported, an unpublished candidate can later be re-emitted or mis-scored. At minimum the 'not published' path should still record the decision so fingerprints/votes are consistent. Also note `verifying` may be False for quick mode but the branch checks `not verifying` — verify the flag semantics match 'has verifier'."
+  },
+  {
+   "file": "src/review_agents/pipeline/run.py",
+   "line_start": 604,
+   "line_end": 620,
+   "severity": "robustness",
+   "title": "Note key basis.{dropped} counts only dropped findings and collides with other step naming",
+   "why": "Using `basis.{self.dropped}` as a step key means keys are 1..N of drops across the whole review; if _step enforces unique keys or other steps use numeric suffixes, collisions or ordering issues can arise. Also position in steps depends on arrival order, making notes non-deterministic across runs. Not fatal but fragile."
+  },
+  {
+   "file": "src/review_agents/pipeline/verify.py",
+   "line_start": 158,
+   "line_end": 161,
+   "severity": "nit",
+   "title": "Empty basis list renders 'basis: none given' twice for nit findings",
+   "why": "For findings without basis the block emits a 'basis: none given' line plus no describes; that's fine, but combined with description text it duplicates the concept of 'no basis'. Minor."
+  },
+  {
+   "file": "src/review_agents/pipeline/basis.py",
+   "line_start": 78,
+   "line_end": 90,
+   "severity": "important",
+   "title": "Basis.check is a field the model can submit; it is trusted in describe and merge before being overwritten",
+   "why": "check is SkipJsonSchema but still a normal model field a model can fill via JSON (SkipJsonSchema affects schema generation, not validation). run_dimension overwrites it after parsing, so agent-submitted values are replaced — good. But merge._lead and describe also read basis.check. If any code path constructs Finding without passing through run_dimension's overwrite (e.g. tests, verifier inputs, or future code), a model-supplied 'ok' could be trusted to decide publication in quick mode. supported() would then return True on a forged checked status. Defense-in-depth: mark check as excluded from parsing (e.g. Field(exclude=True) or a private attr) so a model cannot fabricate it."
+  },
+  {
+   "file": "src/review_agents/migrations/0008_basis.sql",
+   "line_start": 3,
+   "line_end": 4,
+   "severity": "important",
+   "title": "No backfill of existing evidence into basis before dropping the column",
+   "why": "Existing findings in production lose their evidence entirely and become basis='[]'. For quick mode this means any existing blocking/important findings lose their support and could be treated as unsupported on re-publication; for the API, consumers see empty basis. A backfill converting evidence into a single path/spec basis (or at least preserving text) is needed."
+  },
+  {
+   "file": "src/review_agents/pipeline/agent.py",
+   "line_start": 330,
+   "line_end": 330,
+   "severity": "robustness",
+   "title": "sources.text caches tools.text per-call but errors on a path are remembered as None only inside tools.text",
+   "why": "functools.cache around tools.text means a transient non-timeout failure (e.g. GitError from a transient issue) returns None and is cached for the whole dimension run, so a later check on the same file will wrongly report 'not in the reviewed commit'. Only timeouts bypass caching by raising. GitError is also treated as 'missing file' inside tools.text, which conflates transient git failures with absence and is then cached."
+  },
+  {
+   "file": "src/review_agents/tools.py",
+   "line_start": 226,
+   "line_end": 228,
+   "severity": "robustness",
+   "title": "text() treats any GitError as 'file does not exist'",
+   "why": "Only a specific 'not found' error should yield None; other GitErrors (corrupt object, missing commit, permission) are silently mapped to 'not in the reviewed commit' and then cached by pack_sources, producing misleading basis problems that the verifier is told are authoritative-false."
+  },
+  {
+   "file": "src/review_agents/pipeline/basis.py",
+   "line_start": 60,
+   "line_end": 60,
+   "severity": "nit",
+   "title": "Place.file validator uses clean_path but Basis.source path is only cleaned in checker, not validated at parse time",
+   "why": "Source is a free string validated later; a malformed source (path traversal etc.) only fails at check time. Not a security hole (clean_path rejects), but it means model errors surface as 'failed' checks passed to the verifier instead of a parse error. Minor."
+  },
+  {
+   "file": "src/review_agents/skills/_shared.md",
+   "line_start": 47,
+   "line_end": 47,
+   "severity": "nit",
+   "title": "Example basis schema omits that 'check' is program-filled and must not be sent",
+   "why": "The output section tells the model the fields; it does not say check is program-only. Since Basis accepts check from input (then overwrites), a model may attempt to provide it. Documenting that the field is ignored avoids wasted tokens/attempts."
+  }
+ ],
+ "content": null,
+ "error": null
+}
