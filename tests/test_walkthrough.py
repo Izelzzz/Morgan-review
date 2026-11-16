@@ -4,6 +4,7 @@ from typing import Any
 
 import pytest
 from gitrepo import Upstream, git
+from langchain_core.messages import AIMessage, ToolMessage
 from scripted import ScriptedModel, call
 
 from review_agents.context.pack import SHARED_RULES, ContextPack
@@ -105,6 +106,24 @@ def test_the_walkthrough_follows_the_reviewers_opening_and_its_language(
     task = str(sent[2].content)
     assert "walkthrough" in task and "`submit_walkthrough`" in task
     assert task.rsplit("\n\n", 1)[-1].startswith("Write the walkthrough in English.")
+
+
+def test_a_walkthrough_whose_arguments_are_not_json_is_asked_again(
+    repo_tools: RepoTools,
+) -> None:
+    cut = AIMessage(
+        content="",
+        invalid_tool_calls=[
+            {"name": WALKTHROUGH_TOOL, "args": '{"summary": "Refu', "id": "w0", "error": None}
+        ],
+    )
+    model = ScriptedModel(script=[cut, call(WALKTHROUGH_TOOL, answer())])
+
+    result = run(model, repo_tools)
+
+    # Answered, or the service refuses the next request (issue #96).
+    assert result.status == "done"
+    assert any(isinstance(m, ToolMessage) and m.tool_call_id == "w0" for m in model.sent[1])
 
 
 @pytest.mark.parametrize(
