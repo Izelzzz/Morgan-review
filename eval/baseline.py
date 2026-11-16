@@ -11,6 +11,7 @@ Each run is written to `<out>/<case>/baseline-<n>.json`; judging is a separate s
 """
 
 import argparse
+import http.client
 import json
 import subprocess
 import sys
@@ -96,7 +97,7 @@ def main(argv: list[str] | None = None) -> int:
                     findings = parsed["findings"]
                 else:
                     error = "the reply is not a findings object"
-            except (OSError, ValueError, KeyError, IndexError) as exc:
+            except (OSError, http.client.HTTPException, ValueError, KeyError, IndexError) as exc:
                 # A failed run is written down, and the case's other runs still go ahead.
                 error = f"{type(exc).__name__}: {exc}"
             result = {
