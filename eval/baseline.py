@@ -50,12 +50,14 @@ def diff(eval_repo: Path, case: str) -> str:
     return subprocess.run(args, check=True, capture_output=True, text=True).stdout  # noqa: S603
 
 
-def call(base_url: str, model: str, prompt: str) -> dict[str, Any]:
-    body = {
+def call(base_url: str, model: str, prompt: str, thinking: str) -> dict[str, Any]:
+    body: dict[str, Any] = {
         "model": model,
         "messages": [{"role": "user", "content": prompt}],
         "response_format": {"type": "json_object"},
     }
+    if thinking != "default":  # as the service sends it (issue #93)
+        body["thinking"] = {"type": thinking}
     request = urllib.request.Request(  # noqa: S310 - fixed https endpoint
         base_url.rstrip("/") + "/chat/completions",
         data=json.dumps(body).encode(),
@@ -76,6 +78,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--base-url", default="https://api.deepseek.com")
     parser.add_argument("--model", default="deepseek-flash")
     parser.add_argument("--runs", type=int, default=RUNS)
+    parser.add_argument("--thinking", choices=["default", "enabled", "disabled"], default="default")
     parser.add_argument("--first", type=int, default=1, help="number of the first run")
     args = parser.parse_args(argv)
     for case_id in args.cases:
@@ -90,7 +93,7 @@ def main(argv: list[str] | None = None) -> int:
             findings: list[Any] | None = None
             error: str | None = None
             try:
-                reply = call(args.base_url, args.model, prompt)
+                reply = call(args.base_url, args.model, prompt, args.thinking)
                 content = reply["choices"][0]["message"]["content"]
                 parsed = json.loads(content or "")
                 if isinstance(parsed, dict) and isinstance(parsed.get("findings"), list):
@@ -104,6 +107,7 @@ def main(argv: list[str] | None = None) -> int:
                 "case": case_id,
                 "run": n,
                 "model": args.model,
+                "thinking": args.thinking,
                 "seconds": round(time.monotonic() - started, 1),
                 "usage": reply.get("usage"),
                 "findings": findings,
