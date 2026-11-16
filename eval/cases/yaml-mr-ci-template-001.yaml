@@ -1,0 +1,87 @@
+id: yaml-mr-ci-template-001
+tier: hard
+split: exam
+kind: replay
+source:
+  repo: Izelzzz/Morgan-review
+  pr: 78
+  base: 58bb6a2e6fbd635449879c52c6dc061881802ed2
+  head: 5d17132c4c8b59090230c35715aead1762f09629
+  fix_commits:
+  - 25bc7a0979a0f55db9d690b843aa617656f2ec14
+  - 6f9f844f190680dc44ff7160c246cb3e0b822411
+  - c0833e111ec1144697efecd3f26d33981ea07392
+pr:
+  title: 'feat(ci): CI template that submits the review, posts both comments and sets red or green'
+  body: "feat(ci): two actions and a workflow template post the review and set red or green\n\nIssue #14,\
+    \ decisions D-021, D-033, D-037; CI design doc.\n\n- ci/review: with the job's read-only GITHUB_TOKEN,\
+    \ checks that the PR's head is still\n  this run's commit (an older run is not sent), submits the\
+    \ signed review, waits up to\n  45 minutes and keeps the result as an artifact. A /review comment\
+    \ starts a manual\n  review, from collaborators only.\n- ci/post: with a token that only writes comments\
+    \ and never leaves GitHub, updates the\n  walkthrough and the summary in place (the bot's own comments\
+    \ only), posts the inline\n  comments not posted yet by fingerprint, and puts the ones GitHub rejects\
+    \ into the\n  summary. A failed review replaces the last summary. Red unless the review finished\n\
+    \  with no \U0001F534.\n- ci/review-agents.yml: the template to copy, on pull_request_target and issue_comment,\n\
+    \  never checking out the PR's code; review-lab's actions are pinned by the user, others\n  by commit.\n\
+    - One script, standard library only; HTTPS only. The template's permissions, pins and\n  triggers\
+    \ are checked by tests; ci/ is type-checked.\n\nfeat(config): retire block_on_critical; merging is\
+    \ blocked in GitHub's branch protection\n\nD-037: whether a red result blocks merging is GitHub's\
+    \ setting, so the option is gone. A\nconfig that still has it is not rejected (which would drop the\
+    \ rest of it, D-001): it is\nignored, and the report says where to set it now.\n\ndocs(readme): explain\
+    \ how to hook a repository up to the CI template\n"
+tags:
+  language: python+yaml
+  stack: service
+  dimension: robustness
+  difficulty:
+  - concurrency
+  - ci
+expected:
+- id: e1
+  must: true
+  severity_min: important
+  file: ci/review_agents_ci.py
+  lines:
+  - 288
+  - 345
+  root_cause: 'post() writes the comments for the result''s commit without checking the PR''s current
+    head, and the post job has no concurrency group of its own: an older run''s post that finishes after
+    a newer push''s puts the old conclusion and comments back on the PR.'
+  evidence: https://github.com/Izelzzz/Morgan-review/commit/c0833e111ec1144697efecd3f26d33981ea07392
+  same_as:
+  - file: ci/review-agents.yml
+    lines:
+    - 50
+    - 62
+- id: e2
+  must: true
+  severity_min: important
+  file: ci/review-agents.yml
+  lines:
+  - 24
+  - 37
+  root_cause: 'The review job''s concurrency group is shared by pushes and /review comments with cancel-in-progress,
+    and concurrency applies before the action checks who commented: anyone''s /review comment cancels
+    the push''s review in progress and leaves that push with no conclusion.'
+  evidence: https://github.com/Izelzzz/Morgan-review/commit/25bc7a0979a0f55db9d690b843aa617656f2ec14
+- id: e3
+  must: false
+  severity_min: robustness
+  file: ci/review_agents_ci.py
+  lines:
+  - 47
+  - 72
+  root_cause: urlopen follows redirects to any host (and from HTTPS to HTTP), forwarding the request's
+    token or signature headers.
+  evidence: https://github.com/Izelzzz/Morgan-review/commit/c0833e111ec1144697efecd3f26d33981ea07392
+- id: e4
+  must: false
+  severity_min: robustness
+  file: ci/review_agents_ci.py
+  lines:
+  - 347
+  - 380
+  root_cause: A run that breaks early (missing secrets, a crash) writes a result with no head, so the
+    post job cannot say the review failed.
+  evidence: https://github.com/Izelzzz/Morgan-review/commit/6f9f844f190680dc44ff7160c246cb3e0b822411
+allowed: []

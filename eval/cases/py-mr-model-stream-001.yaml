@@ -1,0 +1,103 @@
+id: py-mr-model-stream-001
+tier: hard
+split: exam
+kind: replay
+source:
+  repo: Izelzzz/Morgan-review
+  pr: 61
+  base: fafc7c4e2b5fb85d92ee16a85dd38f0abf1e9fd9
+  head: 16501e5fb2385d9fe60eebbd8f5787bc1c230eee
+  fix_commits:
+  - 6df4698100509515cb1870d18d7ece01ffb108fe
+  - 910d420fce07c12b180795bb5b32b55a40a6d57e
+pr:
+  title: 'feat(models): 模型调用改流式，按 D-030 规则重试'
+  body: 'feat(models): stream replies and retry by the review''s own rules
+
+
+    Decisions D-029 and D-030. Replies stream, and a stream that sends no data
+
+    at all, heartbeats included, for five minutes is stalled; a reply that keeps
+
+    coming is never cut, so a hard per-call deadline now gives up an attempt
+
+    still running when its time is up. Each model can turn streaming off, and
+
+    then a whole reply must arrive within two minutes.
+
+
+    The client''s own retries are off. Rate limits, server errors, stalls,
+
+    broken connections and an empty reply with no finish reason are retried up
+
+    to four times, waiting from half a second, doubling, at most ten seconds,
+
+    ±10%, or the service''s Retry-After up to thirty; no wait runs past the
+
+    deadline. Request and permission errors, and an empty reply cut by the
+
+    output limit, are not retried.
+
+
+    Callers now pass the seconds left to the deadline instead of dividing them
+
+    among the client''s retries. The SDK''s HTTP client is httpx2, so its types
+
+    are used for the timeout and headers.
+
+    '
+tags:
+  language: python
+  stack: service
+  dimension: robustness
+  difficulty:
+  - timing
+  - protocol
+expected:
+- id: e1
+  must: true
+  severity_min: robustness
+  file: src/review_agents/models.py
+  lines:
+  - 210
+  - 232
+  root_cause: 'With streaming off, the "whole reply within two minutes" rule is only an httpx read timeout,
+    which bounds the gap between bytes, not the whole reply: a reply trickling in never times out and
+    is never retried.'
+  evidence: https://github.com/Izelzzz/Morgan-review/commit/6df4698100509515cb1870d18d7ece01ffb108fe
+- id: e2
+  must: true
+  severity_min: robustness
+  file: src/review_agents/models.py
+  lines:
+  - 121
+  - 145
+  root_cause: An empty reply is retried, but the thrown-away attempt was billed by the service and never
+    reaches the UsageMeter (it only sees the last attempt's result), so the budget and the usage table
+    undercount by up to four calls.
+  evidence: https://github.com/Izelzzz/Morgan-review/commit/910d420fce07c12b180795bb5b32b55a40a6d57e
+  same_as:
+  - file: src/review_agents/models.py
+    lines:
+    - 338
+    - 360
+- id: e3
+  must: false
+  severity_min: robustness
+  file: src/review_agents/models.py
+  lines:
+  - 174
+  - 210
+  root_cause: A given-up attempt stops reading only at the next piece of model content, so a stream sending
+    only heartbeats keeps its request and thread alive past the deadline.
+  evidence: https://github.com/Izelzzz/Morgan-review/commit/6df4698100509515cb1870d18d7ece01ffb108fe
+- id: e4
+  must: false
+  severity_min: nit
+  file: src/review_agents/models.py
+  lines:
+  - 54
+  - 63
+  root_cause: A Retry-After given as an HTTP date is ignored and the backoff used instead.
+  evidence: https://github.com/Izelzzz/Morgan-review/commit/6df4698100509515cb1870d18d7ece01ffb108fe
+allowed: []

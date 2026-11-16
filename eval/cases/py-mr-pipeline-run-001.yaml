@@ -1,0 +1,92 @@
+id: py-mr-pipeline-run-001
+tier: hard
+split: exam
+kind: replay
+source:
+  repo: Izelzzz/Morgan-review
+  pr: 54
+  base: c3b311b346d939cf358af04beac385663f4767fb
+  head: 2b4a5d3af11d0132e4158e7d493428ee75afeb92
+  fix_commits:
+  - 74cd332ca4a5bc2e6f2a522200f5d323ecb9840e
+  - c6c19b67fe260d9ddd536b30390e61f29197830b
+pr:
+  title: 'feat(pipeline): 一次审查从领取到写入——并行维度、截止时间与隔离（issue #9 第 2 部分）'
+  body: 'feat(pipeline): run a review end to end, dimensions side by side under a deadline
+
+
+    run_review takes a claimed review from mirror sync and config to stored
+
+    findings: the repository and PR layers, the context packs, then every
+
+    enabled dimension of every group in parallel (model_concurrency at a time)
+
+    until the dimension deadline, which keeps a wrap-up reserve of up to a third
+
+    of the review. A dimension that fails or runs out of time ends alone and is
+
+    recorded in steps; the review''s limit_hit names the most severe limit any
+
+    dimension hit. All findings are written in one transaction, with a
+
+    fingerprint of their file and code. Between steps a review superseded by a
+
+    newer push stops without writing anything (D-010).
+
+
+    Missing module summaries are written in a background thread, so a
+
+    repository''s first review does not spend its time on them. After a restart
+
+    a review without a token is queued once more (D-021); the worker counts
+
+    attempts. The service runs the pipeline when a finder model is configured.
+
+    The steps run in plain Python, without LangGraph (D-023).
+
+
+    Refs #9
+
+    '
+tags:
+  language: python
+  stack: service
+  dimension: robustness
+  difficulty:
+  - cross_file
+  - timing
+expected:
+- id: e1
+  must: true
+  severity_min: important
+  file: src/review_agents/pipeline/run.py
+  lines:
+  - 245
+  - 258
+  root_cause: The findings commit in their own transaction and the review is marked done later, by the
+    worker's finish() in a second commit. The same PR now queues a running review without a token again
+    after a restart, so a crash between the two commits runs the review again and stores its findings
+    twice.
+  evidence: https://github.com/Izelzzz/Morgan-review/commit/74cd332ca4a5bc2e6f2a522200f5d323ecb9840e
+  same_as:
+  - file: src/review_agents/worker.py
+    lines:
+    - 56
+    - 82
+- id: e2
+  must: true
+  severity_min: robustness
+  file: src/review_agents/pipeline/run.py
+  lines:
+  - 286
+  - 292
+  root_cause: per_call is computed once, when the job starts, and the same model is used for every turn
+    of the agent; later calls are not bounded by the time left, so a job left behind at the deadline can
+    run up to three full attempts past it, adding to the next review's concurrency and cost.
+  evidence: https://github.com/Izelzzz/Morgan-review/commit/c6c19b67fe260d9ddd536b30390e61f29197830b
+  same_as:
+  - file: src/review_agents/pipeline/agent.py
+    lines:
+    - 118
+    - 152
+allowed: []

@@ -1,0 +1,59 @@
+id: py-mr-agent-window-001
+tier: medium
+split: practice
+kind: replay
+source:
+  repo: Izelzzz/Morgan-review
+  pr: 63
+  base: fafc7c4e2b5fb85d92ee16a85dd38f0abf1e9fd9
+  head: afa8a873ccc0f86e8ed4eacc35b90649ab77f821
+  fix_commits:
+  - 3bddd5bcf7065ef065417685f753494a9af1ff19
+  - 7ec029bad9c656e9887ec03f1a8d1fb1f42ed480
+pr:
+  title: 'feat(agents): 工具结果截长、对话快满时截短、绕圈提醒'
+  body: "feat(agents): keep tool results within the model's window\n\nDecision D-030, items 3 and 4. A\
+    \ context pack may take four fifths of the\nwindow, which leaves a 128k model about 25k tokens for\
+    \ all tool results,\nwhile one read_file may return 200 KB: a single read could overflow the\nwindow\
+    \ and fail the agent.\n\n- A tool result over 10,000 tokens keeps its head and tail by whole lines,\n\
+    \  with a note on what was left out and, for read_file, how to read it by\n  line range. Lines too\
+    \ long to keep whole are cut by characters, bounded\n  for scripts of more than a token a byte.\n\
+    - Before each model call, when the conversation and a 4,000-token reply\n  would not fit the window,\
+    \ the oldest results are cut to a 500-token head\n  and tail first. Results are re-wrapped in their\
+    \ data block, so a cut never\n  breaks it; nothing calls a model or summarises.\n- The third time\
+    \ an agent makes the exact same call, the result reminds it\n  to change course or submit.\n\nThe\
+    \ three numbers are server settings.\n"
+tags:
+  language: python
+  stack: service
+  dimension: robustness
+  difficulty:
+  - boundary
+expected:
+- id: e1
+  must: true
+  severity_min: robustness
+  file: src/review_agents/pipeline/conversation.py
+  lines:
+  - 126
+  - 141
+  root_cause: fit() returns quietly once every result has been shortened even if the conversation still
+    does not fit, and the agent calls the model anyway with a request that can exceed the window or eat
+    the room kept for the reply.
+  evidence: https://github.com/Izelzzz/Morgan-review/commit/3bddd5bcf7065ef065417685f753494a9af1ff19
+- id: e2
+  must: false
+  severity_min: robustness
+  file: src/review_agents/pipeline/conversation.py
+  lines:
+  - 126
+  - 129
+  root_cause: The room ignores the tool definitions sent with every request, so a conversation counted
+    as fitting can still overflow.
+  evidence: https://github.com/Izelzzz/Morgan-review/commit/7ec029bad9c656e9887ec03f1a8d1fb1f42ed480
+  same_as:
+  - file: src/review_agents/pipeline/agent.py
+    lines:
+    - 136
+    - 160
+allowed: []

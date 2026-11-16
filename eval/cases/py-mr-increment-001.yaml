@@ -1,0 +1,59 @@
+id: py-mr-increment-001
+tier: medium
+split: practice
+kind: replay
+source:
+  repo: Izelzzz/Morgan-review
+  pr: 86
+  base: 58bb6a2e6fbd635449879c52c6dc061881802ed2
+  head: da0b6d58a6dd10c10044680848b0227babe7f410
+  fix_commits:
+  - 8ccfa68b0a8fe073ca99bce4b5bf0a240ff4d531
+pr:
+  title: 'feat(context): work out what a later round reviews'
+  body: 'feat(context): work out what a later round reviews
+
+
+    Issue #12, D-026. `increment()` gives the head-side lines to review since
+
+    the previously reviewed head: the lines changed between the two heads that
+
+    are also the PR''s own changes against the default branch. What a merge or
+
+    a rebase brings in from the default branch drops out; a place where the
+
+    author took back something the PR had added counts, as one line where it
+
+    was. An empty increment means nothing new to review; without the previous
+
+    head (force-pushed away, never fetched) it returns None, a full review.
+
+
+    Not wired into the pipeline yet: that follows PR #84, which changes the
+
+    same code.
+
+    '
+tags:
+  language: python
+  stack: service
+  dimension: edge_cases
+  difficulty:
+  - edge_case
+expected:
+- id: e1
+  must: true
+  severity_min: robustness
+  file: src/review_agents/context/increment.py
+  lines:
+  - 24
+  - 33
+  root_cause: The increment only holds text hunks, so a round whose only change is a binary file or a
+    file mode comes out empty and would reuse the previous result.
+  evidence: https://github.com/Izelzzz/Morgan-review/commit/8ccfa68b0a8fe073ca99bce4b5bf0a240ff4d531
+  same_as:
+  - file: src/review_agents/context/increment.py
+    lines:
+    - 95
+    - 135
+allowed: []

@@ -1,0 +1,88 @@
+id: py-mr-basis-001
+tier: medium
+split: exam
+kind: replay
+source:
+  repo: Izelzzz/Morgan-review
+  pr: 70
+  base: 78544d7d742906d9e896bb0074ddfef6467c73dc
+  head: db3a1d064d5687ae293097773746cb98fa2536ec
+  fix_commits:
+  - 93de81df8906a1ad4f5f20590f7d69c46478c45c
+  - ac21753b6fba765cb26e276cb249797d23b982e5
+  - ebcc0c0a515d3df4b690520f886993a4f0d9e881
+pr:
+  title: 'feat(basis): 发现改用可核对的依据（结构化依据第 1 部分）'
+  body: 'feat(basis): every finding states its basis, and the program checks each one
+
+
+    D-036: a finding''s free-text evidence becomes a list of bases, each a quoted
+
+    rule (spec, contract, convention) or a traced path, with the code it points at.
+
+    The program checks every basis when the dimension agent hands in: files and
+
+    lines exist, the quote is in its source (a file, the PR description or a linked
+
+    issue). A quote found at other lines of its file gets those lines; a basis that
+
+    does not check out says why and goes to the verifier, which sees each basis and
+
+    its check. Quick mode, which has no verifier, publishes a blocking or important
+
+    finding only on a basis that checked out. The shared rules ask for bases; the
+
+    findings table stores them in place of evidence.
+
+
+    Refs #68
+
+    '
+tags:
+  language: python
+  stack: service
+  dimension: edge_cases
+  difficulty:
+  - algorithm
+expected:
+- id: e1
+  must: true
+  severity_min: robustness
+  file: src/review_agents/pipeline/basis.py
+  lines:
+  - 155
+  - 166
+  root_cause: The quote is searched in the whole file first, and only its first occurrence is compared
+    with the lines given; a quote that also appears earlier in the file is "corrected" to the wrong lines
+    even when the lines given were right.
+  evidence: https://github.com/Izelzzz/Morgan-review/commit/ebcc0c0a515d3df4b690520f886993a4f0d9e881
+- id: e2
+  must: true
+  severity_min: robustness
+  file: src/review_agents/pipeline/basis.py
+  lines:
+  - 104
+  - 117
+  root_cause: _find joins the squashed lines with a space each, so a blank line adds an extra space; a
+    quote that spans a blank line never matches.
+  evidence: https://github.com/Izelzzz/Morgan-review/commit/ac21753b6fba765cb26e276cb249797d23b982e5
+- id: e3
+  must: false
+  severity_min: robustness
+  file: src/review_agents/pipeline/basis.py
+  lines:
+  - 140
+  - 166
+  root_cause: Any quote that appears in a file checks out, even a single word or the very code the basis
+    points at, and Quick mode publishes on a basis that checked out.
+  evidence: https://github.com/Izelzzz/Morgan-review/commit/ac21753b6fba765cb26e276cb249797d23b982e5
+- id: e4
+  must: false
+  severity_min: robustness
+  file: src/review_agents/pipeline/merge.py
+  lines:
+  - 270
+  - 285
+  root_cause: The merge judge no longer sees a candidate's evidence now that evidence became bases.
+  evidence: https://github.com/Izelzzz/Morgan-review/commit/93de81df8906a1ad4f5f20590f7d69c46478c45c
+allowed: []

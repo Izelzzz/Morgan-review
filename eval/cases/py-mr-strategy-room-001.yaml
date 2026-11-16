@@ -1,0 +1,41 @@
+id: py-mr-strategy-room-001
+tier: medium
+split: practice
+kind: replay
+source:
+  repo: Izelzzz/Morgan-review
+  pr: 84
+  base: 58bb6a2e6fbd635449879c52c6dc061881802ed2
+  head: 5c301415728ea418629e4c7251271bfe2a140390
+  fix_commits:
+  - 75b0d48762536a5d02a56396972616da6346188f
+pr:
+  title: 'refactor(pipeline): make who writes the findings a replaceable strategy'
+  body: "refactor(pipeline): make who writes the findings a replaceable strategy\n\nD-038: the pipeline\
+    \ splits into writing (who writes the findings and the\nwalkthrough) and what follows (verify as each\
+    \ agent hands in, merge, rank,\nreport), which every strategy shares. REVIEW_AGENTS_STRATEGY picks\
+    \ one:\n\n- dimensions (default, unchanged): an agent per enabled dimension.\n- general: one agent\
+    \ holding every enabled dimension's rules, which tags\n  each finding with its dimension; a tag outside\
+    \ them is not trusted.\n- walkthrough_first: the same agent, carrying on from the walkthrough's\n\
+    \  conversation once it is written (first group only: the walkthrough\n  reads that group).\n\nModes\
+    \ keep their meaning: Quick gives edge cases and security only, Deep\nruns the writing agents three\
+    \ times. The default stays until #17 compares\nthe strategies.\n\nCloses #83\n"
+tags:
+  language: python
+  stack: service
+  dimension: robustness
+  difficulty:
+  - cross_file
+expected:
+- id: e1
+  must: true
+  severity_min: robustness
+  file: src/review_agents/context/pack.py
+  lines:
+  - 94
+  - 103
+  root_cause: fixed_tokens counts the general agent's task (every dimension's rules) for every strategy,
+    so the default dimensions strategy reserves about 1,400 more tokens than before and a PR near the
+    limit splits into one more group.
+  evidence: https://github.com/Izelzzz/Morgan-review/commit/75b0d48762536a5d02a56396972616da6346188f
+allowed: []

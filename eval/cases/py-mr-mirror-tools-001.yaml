@@ -1,0 +1,103 @@
+id: py-mr-mirror-tools-001
+tier: medium
+split: practice
+kind: replay
+source:
+  repo: Izelzzz/Morgan-review
+  pr: 37
+  base: 9fa6de4aa25c2e498e80624ecb751777f3c123c0
+  head: 93de3203b76400122c5a889496dbec911bc98819
+  fix_commits:
+  - 0af6765a667312b1c7d7b5d02d6da8412bc07989
+  - 6a9a7ff3e56081465c71218c1fdbfe9495e27550
+  - e2c0cddbbf4278ba1e2a98e75d2110bef7ccc1ed
+pr:
+  title: 'feat(mirror): 仓库镜像与只读工具'
+  body: 'feat(mirror): keep one bare git mirror per repository
+
+
+    Each review fetches only the refs it needs into /data/repos/<owner>/<name>.git,
+
+    so later reviews transfer only new objects. The read-only token reaches git
+
+    through GIT_CONFIG_* environment variables: it is never written to the mirror,
+
+    a remote URL or the process arguments, and is masked in git error messages.
+
+
+    Refs #6
+
+
+    feat(tools): add the agents'' read-only repository tools
+
+
+    read_file, list_dir, search_code, git_log and read_issue read straight from git
+
+    objects at the reviewed commit, so no files are checked out and a symlink in a
+
+    pull request cannot reach the host. Skip rules, the 200 KB limit and binary
+
+    detection apply to every tool, and a budget stops an agent after 25 calls.
+
+
+    Refs #6
+
+
+    build: install git in the runtime image
+
+
+    The mirror and the repository tools call git.
+
+
+    Refs #6
+
+    '
+tags:
+  language: python
+  stack: service
+  dimension: robustness
+  difficulty:
+  - contract
+  - robustness
+expected:
+- id: e1
+  must: true
+  severity_min: robustness
+  file: src/review_agents/tools.py
+  lines:
+  - 116
+  - 131
+  root_cause: list_dir lists the entries of a directory the skip rules exclude (it only marks them "(skipped)"),
+    while every other tool refuses skipped paths; the skip list is not enforced for directories.
+  evidence: https://github.com/Izelzzz/Morgan-review/commit/0af6765a667312b1c7d7b5d02d6da8412bc07989
+- id: e2
+  must: true
+  severity_min: robustness
+  file: src/review_agents/mirror.py
+  lines:
+  - 53
+  - 72
+  root_cause: 'run_git has no timeout: a stuck fetch or a slow git command in a tool hangs the review
+    forever, and transient fetch failures are not retried.'
+  evidence: https://github.com/Izelzzz/Morgan-review/commit/e2c0cddbbf4278ba1e2a98e75d2110bef7ccc1ed
+- id: e3
+  must: false
+  severity_min: robustness
+  file: src/review_agents/tools.py
+  lines:
+  - 76
+  - 90
+  root_cause: RepoTools takes its commit unchecked and passes it into git arguments, while MirrorStore
+    requires a full 40-character sha.
+  evidence: https://github.com/Izelzzz/Morgan-review/commit/0af6765a667312b1c7d7b5d02d6da8412bc07989
+- id: e4
+  must: false
+  severity_min: robustness
+  file: src/review_agents/mirror.py
+  lines:
+  - 30
+  - 45
+  root_cause: git_env keeps only PATH from the environment, so a service behind a proxy or trusting its
+    own CAs cannot fetch (found later in the end-to-end smoke run).
+  evidence: https://github.com/Izelzzz/Morgan-review/commit/6a9a7ff3e56081465c71218c1fdbfe9495e27550
+allowed: []

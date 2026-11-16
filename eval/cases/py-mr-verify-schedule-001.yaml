@@ -1,0 +1,101 @@
+id: py-mr-verify-schedule-001
+tier: hard
+split: exam
+kind: replay
+source:
+  repo: Izelzzz/Morgan-review
+  pr: 66
+  base: d426d0c9715344741151302e571a4258a7682d4f
+  head: 76fafb1f964859d103e64b21a34d570d27a14939
+  fix_commits:
+  - 2963ab4bbe8495643a000ab47c2581354db60d88
+pr:
+  title: 'feat(review): 边交边验、按优先级分配模型调用、汇总后置（验证第 2 部分）'
+  body: 'feat(schedule): share a review''s model calls by value; agents wait for a slot per call
+
+
+    Slots hands a freed model call to the most valuable waiter: verify a blocking
+
+    finding, verify an important one, a dimension agent''s next turn, verify a
+
+    robustness one (D-031). The tool loop holds a slot around each model call and
+
+    measures the time left once it has one. Not yet used by the review.
+
+
+    Refs #10
+
+
+    feat(review): verify findings as each dimension hands in, then merge what holds
+
+
+    D-031: the dimension agents and one verifier per finding share the review''s
+
+    model calls by value; a dimension''s findings are verified as soon as it hands
+
+    in, while the others still work. The agents hand in by `after_submit_seconds`
+
+    before the end (renamed from wrap_up_seconds); what is unverified at the end is
+
+    not published. Same-dimension copies (Deep runs) wait on one verification.
+
+    Only findings that hold, at the verifier''s level, and nits are merged and
+
+    written, with the reported level and the verdict; Quick mode verifies nothing.
+
+    A review none of whose findings could be verified fails (D-027).
+
+
+    D-032: the service refuses a verifier model with a smaller window than the
+
+    finder model''s, since a verifier reads the same context pack.
+
+
+    Refs #10
+
+
+    docs(schedule): say "priority", not "value", for how model calls are shared out
+
+
+    From review: the order is a priority with a stated order (verify blocking,
+
+    verify important, a dimension agent''s next turn, verify robustness), so the
+
+    comments and test names say so.
+
+    '
+tags:
+  language: python
+  stack: service
+  dimension: robustness
+  difficulty:
+  - concurrency
+expected:
+- id: e1
+  must: true
+  severity_min: important
+  file: src/review_agents/pipeline/run.py
+  lines:
+  - 465
+  - 500
+  root_cause: 'Verifications run on a ThreadPoolExecutor of model_concurrency threads. Checks already
+    started hold every thread until they finish, so a blocking finding handed in later waits behind robustness
+    checks however Slots orders model calls: the priority only applies among calls, not to who gets a
+    thread.'
+  evidence: https://github.com/Izelzzz/Morgan-review/commit/2963ab4bbe8495643a000ab47c2581354db60d88
+  same_as:
+  - file: src/review_agents/pipeline/run.py
+    lines:
+    - 540
+    - 560
+- id: e2
+  must: false
+  severity_min: robustness
+  file: src/review_agents/pipeline/run.py
+  lines:
+  - 345
+  - 357
+  root_cause: The "no finding could be verified" failure is raised before the supersede check, so a review
+    a newer push replaced is recorded as failed instead of superseded.
+  evidence: https://github.com/Izelzzz/Morgan-review/commit/2963ab4bbe8495643a000ab47c2581354db60d88
+allowed: []

@@ -1,0 +1,71 @@
+id: py-mr-context-markup-001
+tier: medium
+split: exam
+kind: replay
+source:
+  repo: Izelzzz/Morgan-review
+  pr: 43
+  base: 1dd76882aa0e13bd3ca5eee42d0c54db92dc65a4
+  head: d02cfd3faafa72d8e652cf7411e140a177c37a4b
+  fix_commits:
+  - e24773cb6b8090ea5649a6da43a85e61e1c90c8c
+pr:
+  title: 'feat(context): 上下文包 · 仓库层与模块摘要（#7 第 1/3 部分）'
+  body: 'refactor(models): let callers choose where model usage is recorded
+
+
+    UsageMeter now takes a record function. review_usage() keeps writing to the
+
+    per-review usage table; summary_usage() writes to a new summary_usage table for
+
+    model calls that belong to no single review, such as module summaries.
+
+
+    Refs #7
+
+
+    feat(context): build the repository layer of the context pack
+
+
+    The layer is read from the default branch: convention files (root and nested
+
+    AGENTS.md / CLAUDE.md), a directory tree with file counts, and a summary of
+
+    every module. It is cached under the branch''s tree id, so a README edit
+
+    rebuilds it. Modules are directories of at most 50 files, split further when
+
+    larger or when a package marker sits below them; each module''s summary is
+
+    written by the finder model and cached by the content of its files, so only
+
+    changed modules are summarised again. A failed summary falls back to git
+
+    stats; a used-up summary budget stops further summaries. Repository content
+
+    is wrapped in data blocks whose closing tag cannot be forged.
+
+
+    Refs #7
+
+    '
+tags:
+  language: python
+  stack: service
+  dimension: security
+  difficulty:
+  - security
+  - injection
+expected:
+- id: e1
+  must: true
+  severity_min: robustness
+  file: src/review_agents/context/markup.py
+  lines:
+  - 8
+  - 11
+  root_cause: The source name goes into the data block's attribute unescaped; a path containing a double
+    quote or a > closes the attribute or the tag, so repository content can forge the block's markup the
+    closing-tag defence is meant to protect.
+  evidence: https://github.com/Izelzzz/Morgan-review/commit/e24773cb6b8090ea5649a6da43a85e61e1c90c8c
+allowed: []
