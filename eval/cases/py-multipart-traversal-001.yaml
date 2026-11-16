@@ -1,0 +1,37 @@
+id: py-multipart-traversal-001
+tier: must_pass
+split: practice
+kind: reverse_fix            # base = the fix, head = the fix taken back
+source:
+  repo: Kludex/python-multipart
+  license: Apache-2.0
+  fix_commit: 9433f4bbc9652bdde82bbe380984e32f8cfc89c4   # CVE-2026-24486
+  base: 9433f4bbc9652bdde82bbe380984e32f8cfc89c4
+  head: 9433f4bbc9652bdde82bbe380984e32f8cfc89c4^1
+  merged_at: 2026-01-25
+pr:
+  title: Simplify how File derives its base name and extension
+  body: |
+    `File.__init__` ran the file name through `os.path.basename` before splitting off
+    the extension. `os.path.splitext` already handles the whole name, so the extra
+    step is gone, along with the test that only exercised it.
+tags: {language: python, stack: library, dimension: security}
+expected:
+  - id: e1
+    must: true
+    severity_min: important
+    file: python_multipart/multipart.py
+    lines: [376, 380]
+    root_cause: >-
+      The uploaded file name is no longer reduced to its base name, so with
+      UPLOAD_KEEP_FILENAME and UPLOAD_DIR set, a name containing ../ (or an absolute
+      path) is joined into the upload path and the file is written outside UPLOAD_DIR
+      (path traversal, arbitrary file write).
+    evidence: https://advisories.gitlab.com/pypi/python-multipart/CVE-2026-24486/
+  - id: e2
+    must: false
+    severity_min: robustness
+    file: tests/test_file.py
+    lines: [1, 60]
+    root_cause: The regression test for the traversal is deleted, so nothing guards it.
+allowed: []

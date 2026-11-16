@@ -1,0 +1,21 @@
+id: py-multipart-cte-001
+tier: clean
+split: practice
+kind: clean                  # merged over six months ago; its lines were never fixed
+source:
+  repo: Kludex/python-multipart
+  license: Apache-2.0
+  pr: 258
+  base: 9a1ecbd074801fcd3911266f3f4442181d10ab92^
+  head: 9a1ecbd074801fcd3911266f3f4442181d10ab92
+  merged_at: 2026-04-10
+pr:
+  title: Handle CTE values case-insensitively
+  # The original description could not be copied verbatim; this restates it.
+  body: |
+    Normalize the Content-Transfer-Encoding value before comparing it with the
+    supported encodings: RFC 2045 section 6.1 says these values are case-insensitive.
+    Adds parametrized regression tests for lowercase, uppercase and mixed-case base64.
+tags: {language: python, stack: library, dimension: spec_drift}
+expected: []                 # no 🔴 in any run
+allowed: []

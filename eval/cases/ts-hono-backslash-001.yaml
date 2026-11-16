@@ -1,0 +1,37 @@
+id: ts-hono-backslash-001
+tier: medium
+split: practice
+kind: introduced             # a real PR that introduced a bug fixed later
+source:
+  repo: honojs/hono
+  license: MIT
+  pr: 1642
+  base: d1ff3d89c7819b164c9ecfb6b4d7a676ea1b406a
+  head: 48dc87dfd542b9b8f1a442c2d0abab5d13ed4a3b
+  merged_at: 2023-11-04
+  fixed_by: https://github.com/honojs/hono/pull/4962
+pr:
+  title: "fix(utils/filepath): filepath supports Windows"
+  body: |
+    This PR makes `filepath` util supports Windows and prevents the path traversal on Windows.
+
+    ### Author should do the followings, if applicable
+
+    - [x] Add tests
+    - [x] Run tests
+    - [x] `yarn denoify` to generate files for Deno
+tags: {language: typescript, stack: backend, dimension: edge_cases}
+expected:
+  - id: e1
+    must: true
+    severity_min: robustness
+    file: src/utils/filepath.ts
+    lines: [24, 27]
+    root_cause: >-
+      filename.replace(/\\/, '/') has no g flag, so only the first backslash becomes a
+      slash; a path with several segments such as foo\bar\baz.txt keeps mixed
+      separators and resolves to the wrong file, a 404, or past the traversal check on
+      Windows.
+    evidence: https://github.com/honojs/hono/pull/4962
+    same_as: [{file: deno_dist/utils/filepath.ts, lines: [24, 27]}]   # the generated copy
+allowed: []
