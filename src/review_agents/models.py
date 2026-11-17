@@ -183,10 +183,10 @@ class ReviewChatModel(ChatOpenAI):
         payload: dict[str, Any] = super()._get_request_payload(input_, stop=stop, **kwargs)
         # LangChain names the limit `max_completion_tokens`; OpenAI-compatible services
         # document `max_tokens`, which OpenAI still takes for its chat models.
-        payload.pop("max_completion_tokens", None)
-        payload.pop("max_tokens", None)
-        if self.output_limit is not None:
-            payload["max_tokens"] = self.output_limit
+        given = payload.pop("max_completion_tokens", None) or payload.pop("max_tokens", None)
+        limit = self.output_limit if self.output_limit is not None else given
+        if limit is not None:
+            payload["max_tokens"] = limit
         return payload
 
     def _attempt(
@@ -200,8 +200,10 @@ class ReviewChatModel(ChatOpenAI):
         if not self.stream_replies:
             return super()._generate(messages, stop=stop, run_manager=run_manager, **kwargs)
         stream = self._stream(messages, stop=stop, run_manager=run_manager, **kwargs)
-        arguments: dict[int, str] = {}  # each tool call's arguments as sent, by index
-        ids: dict[int, str] = {}
+        # Each tool call's arguments as sent, joined as LangChain joins them: by index,
+        # while a piece without an index is a call of its own.
+        arguments: dict[object, str] = {}
+        ids: dict[object, str] = {}
 
         def until_cancelled() -> Iterator[ChatGenerationChunk]:
             try:
@@ -209,10 +211,11 @@ class ReviewChatModel(ChatOpenAI):
                     if cancelled.is_set():
                         return  # given up: stop reading, which closes the connection
                     for part in getattr(piece.message, "tool_call_chunks", None) or []:
-                        index = part.get("index") or 0
-                        arguments[index] = arguments.get(index, "") + (part.get("args") or "")
+                        index = part.get("index")
+                        key: object = index if index is not None else object()
+                        arguments[key] = arguments.get(key, "") + (part.get("args") or "")
                         if part.get("id"):
-                            ids[index] = part["id"]
+                            ids.setdefault(key, part["id"])
                     yield piece
             finally:
                 close = getattr(stream, "close", None)  # a generator: closing ends the request

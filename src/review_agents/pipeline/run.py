@@ -162,7 +162,14 @@ def _step(
         "INSERT INTO steps (review_id, node, started_at, finished_at, status, error, note)"
         " VALUES (?, ?, ?, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), ?, ?, ?)",
         # Masked: an error may quote a token or a key (issue #15).
-        (review_id, node, started, "error" if error else "ok", REDACT.optional(error), note),
+        (
+            review_id,
+            node,
+            started,
+            "error" if error else "ok",
+            REDACT.optional(error),
+            REDACT.optional(note),  # a note may quote what a model wrote
+        ),
     )
 
 

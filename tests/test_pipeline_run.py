@@ -1490,6 +1490,17 @@ def test_an_error_carrying_a_secret_is_stored_masked(setup: Setup) -> None:
     assert LEAKED not in error and "***" in error
 
 
+def test_a_secret_in_a_dropped_finding_is_stored_masked(setup: Setup) -> None:
+    review_id = setup.queue()
+    leak = finding("security", title=f"Token {LEAKED} is committed", line_end=99)
+    model = ByDimension(scripts={"security": [submit(leak)]})
+
+    setup.run(review_id, model)
+
+    note = setup.notes(review_id)["dimension.security.dropped.1"] or ""
+    assert LEAKED not in note and "***" in note
+
+
 def test_a_secret_quoted_in_a_finding_is_masked_in_the_report(setup: Setup) -> None:
     review_id = setup.queue()
     leak = finding("security", why=f"The token {LEAKED} is committed.")

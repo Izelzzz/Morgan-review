@@ -11,7 +11,9 @@ from pathlib import Path
 
 import openai
 import pytest
-from langchain_core.messages import AIMessage
+from langchain_core.messages import AIMessage, AIMessageChunk
+from langchain_core.messages.tool import tool_call_chunk
+from langchain_core.outputs import ChatGenerationChunk
 from pydantic import SecretStr, ValidationError
 
 from review_agents import models
@@ -627,3 +629,30 @@ def test_an_output_limit_below_one_token_is_refused() -> None:
         ModelEndpoint.model_validate(
             {"base_url": "http://127.0.0.1/v1", "model": "m", "max_output_tokens": 0}
         )
+
+
+def test_a_limit_given_to_the_model_another_way_is_kept() -> None:
+    model = models.ReviewChatModel.model_validate(
+        {"base_url": "http://127.0.0.1/v1", "api_key": "k", "max_tokens": 5}
+    )
+
+    assert model._get_request_payload("hi")["max_tokens"] == 5
+
+
+def test_calls_streamed_without_an_index_are_checked_one_by_one() -> None:
+    # LangChain keeps calls without an index apart; each one's own text decides.
+    def two_calls(*args: object, **kwargs: object) -> Iterator[ChatGenerationChunk]:
+        for call_id, text in (("a", '{"x": 1}'), ("b", '{"y": 2}')):
+            part = tool_call_chunk(name="read_file", args=text, id=call_id, index=None)
+            yield ChatGenerationChunk(message=AIMessageChunk(content="", tool_call_chunks=[part]))
+
+    model = models.ReviewChatModel.model_validate(
+        {"base_url": "http://127.0.0.1/v1", "api_key": "k"}
+    )
+    object.__setattr__(model, "_stream", two_calls)
+
+    reply = model.invoke("review")
+
+    assert isinstance(reply, AIMessage)
+    assert [c["id"] for c in reply.tool_calls] == ["a", "b"]
+    assert reply.invalid_tool_calls == []
