@@ -9,7 +9,7 @@ import json
 import re
 import urllib.error
 import urllib.request
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from functools import cache
 from http.client import HTTPException
 from pathlib import Path, PurePosixPath
@@ -25,6 +25,8 @@ from review_agents.repo_config import MAX_FILE_BYTES
 
 GIT_TIMEOUT_SECONDS = 30.0
 MAX_SEARCH_MATCHES = 100
+# A matching line longer than this is cut in the search result.
+MAX_MATCH_CHARS = 300
 MAX_LOG_ENTRIES = 50
 MAX_ISSUE_CHARS = 20_000
 _BINARY_PROBE_BYTES = 8_000
@@ -139,11 +141,12 @@ class RepoTools:
             raise ToolError(f"{clean} is in the skip list and is not read")
         target = f"{self._commit}:{clean}" if clean else f"{self._commit}^{{tree}}"
         try:
-            output = self._git("ls-tree", "-l", target).decode("utf-8", "replace")
+            # -z: names as they are, not quoted, so the skip list sees the real ones.
+            output = self._git("ls-tree", "-l", "-z", target).decode("utf-8", "replace")
         except GitError:
             raise ToolError(f"{clean or '.'} is not a directory at this commit") from None
         entries = []
-        for line in output.splitlines():
+        for line in filter(None, output.split("\0")):
             meta, name = line.split("\t", 1)
             _, kind, _, size = meta.split()
             full = f"{clean}/{name}" if clean else name
@@ -157,25 +160,28 @@ class RepoTools:
             raise ToolError("give a pattern to search for")
         try:
             # Exit code 1 means no match.
+            # -z ends the path with a NUL: git neither quotes it nor lets a colon in it
+            # pass for the separator, so the skip list is checked against the real name.
             output = self._git(
                 "grep",
                 "-n",
+                "-z",
                 "-I",
                 "-E",
                 "-e",
                 pattern,
                 self._commit,
                 ok_codes=(0, 1),
-            ).decode("utf-8", "replace")
+            )
         except GitError as exc:
             raise ToolError(f"search failed: {exc}") from None
         matches = []
-        for line in output.splitlines():
-            location = line.removeprefix(f"{self._commit}:")
-            path = location.split(":", 1)[0]
+        for path, number, text in _grep_matches(output, self._commit):
             if self.is_skipped(path) or (path_glob and not glob_match(path_glob, path)):
                 continue
-            matches.append(location)
+            if len(text) > MAX_MATCH_CHARS:  # a minified file is one very long line
+                text = f"{text[:MAX_MATCH_CHARS]} …(line cut; read_file shows it all)"
+            matches.append(f"{path}:{number}:{text}")
             if len(matches) == MAX_SEARCH_MATCHES:
                 matches.append(f"(stopped after {MAX_SEARCH_MATCHES} matches; narrow the search)")
                 break
@@ -280,3 +286,28 @@ class ToolBudget:
 def agent_tools(tools: RepoTools, budget: ToolBudget) -> dict[str, Callable[..., str]]:
     """The complete tool set one agent receives. Nothing here writes or executes."""
     return {name: budget.wrap(getattr(tools, name)) for name in RepoTools.NAMES}
+
+
+def _grep_matches(output: bytes, commit: str) -> Iterator[tuple[str, str, str]]:
+    """Path, line number and text of each `git grep -n -z <commit>` match.
+
+    Each match is `<commit>:<path>\0<number>\0<text>\n`; a path may hold any byte but
+    NUL, so it is read up to the NUL rather than split on colons or newlines.
+    """
+    prefix = f"{commit}:".encode()
+    at = 0
+    while at < len(output):
+        start = at + len(prefix) if output.startswith(prefix, at) else at
+        path_end = output.find(b"\0", start)
+        number_end = output.find(b"\0", path_end + 1)
+        text_end = output.find(b"\n", number_end + 1)
+        if path_end < 0 or number_end < 0:
+            return
+        if text_end < 0:
+            text_end = len(output)
+        yield (
+            output[start:path_end].decode("utf-8", "replace"),
+            output[path_end + 1 : number_end].decode("ascii", "replace"),
+            output[number_end + 1 : text_end].decode("utf-8", "replace"),
+        )
+        at = text_end + 1

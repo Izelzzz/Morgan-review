@@ -107,6 +107,59 @@ def test_search_code_filters_by_path_and_reports_no_matches(tools: RepoTools) ->
     assert tools.search_code("--output") == "no matches"
 
 
+def test_search_code_reads_paths_with_colons_quotes_and_non_ascii(tmp_path: Path) -> None:
+    upstream = Upstream(tmp_path)
+    head = upstream.commit(
+        {
+            "conf/a:b.env": "TOKEN=1\n",  # skipped by its extension, whatever the colon
+            'docs/q"x.md': "TOKEN in a quoted name\n",
+            "docs/中.md": "TOKEN in a non-ASCII name\n",
+        },
+        "init",
+    )
+    git_dir = MirrorStore(tmp_path / "repos", remote_base=str(upstream.base)).sync(
+        "octo/app", ["refs/heads/main"], [head], token=None
+    )
+    tools = RepoTools(git_dir, "octo/app", head, ["**/*.env"])
+
+    result = tools.search_code("TOKEN")
+
+    # git quotes such names and a colon splits wrongly: either way the skip list
+    # was checked against the wrong path and the agent got a name that is not there.
+    assert sorted(result.splitlines()) == [
+        'docs/q"x.md:1:TOKEN in a quoted name',
+        "docs/中.md:1:TOKEN in a non-ASCII name",
+    ]
+
+
+def test_list_dir_shows_quoted_and_non_ascii_names_as_they_are(tmp_path: Path) -> None:
+    upstream = Upstream(tmp_path)
+    head = upstream.commit(
+        {'docs/q"x.md': "a\n", "docs/中.md": "b\n", 'docs/s"y.env': "TOKEN=1\n"}, "init"
+    )
+    git_dir = MirrorStore(tmp_path / "repos", remote_base=str(upstream.base)).sync(
+        "octo/app", ["refs/heads/main"], [head], token=None
+    )
+
+    listing = RepoTools(git_dir, "octo/app", head, ["**/*.env"]).list_dir("docs")
+
+    names = [line.split(maxsplit=2)[2] for line in listing.splitlines()]
+    assert names == ['docs/q"x.md', 'docs/s"y.env (skipped)', "docs/中.md"]
+
+
+def test_search_code_cuts_a_very_long_matching_line(tmp_path: Path) -> None:
+    upstream = Upstream(tmp_path)
+    head = upstream.commit({"dist.js": "var total=1;" + "x" * 100_000 + "\n"}, "init")
+    git_dir = MirrorStore(tmp_path / "repos", remote_base=str(upstream.base)).sync(
+        "octo/app", ["refs/heads/main"], [head], token=None
+    )
+
+    result = RepoTools(git_dir, "octo/app", head, []).search_code("total")
+
+    assert result.startswith("dist.js:1:var total=1;")
+    assert len(result) < 1_000 and "cut" in result
+
+
 def test_git_log_shows_history_for_a_path(tools: RepoTools) -> None:
     assert "add util" in tools.git_log()
     assert "add util" not in tools.git_log("src/app.py")
