@@ -121,3 +121,12 @@ def test_the_review_strategy_defaults_to_dimension_agents(monkeypatch: pytest.Mo
     monkeypatch.setenv("REVIEW_AGENTS_STRATEGY", "five_more")
     with pytest.raises(ValidationError):
         Settings()
+
+
+def test_format_retries_default_to_two_and_stay_small() -> None:
+    from review_agents.config import ModelEndpoint
+
+    base = {"base_url": "http://127.0.0.1/v1", "model": "m"}
+    assert ModelEndpoint.model_validate(base).format_retries == 2
+    with pytest.raises(ValidationError):
+        ModelEndpoint.model_validate({**base, "format_retries": 6})

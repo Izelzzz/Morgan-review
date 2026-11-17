@@ -19,11 +19,12 @@ from langchain_core.callbacks import BaseCallbackHandler
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage
 from langchain_core.tools import StructuredTool
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from review_agents.context.markup import untrusted
 from review_agents.context.pack import ContextPack, language_note
 from review_agents.pipeline.agent import (
+    FORMAT_RETRIES,
     Finding,
     Severity,
     Slot,
@@ -76,6 +77,8 @@ VERIFY_NOW = (
 
 
 class Answer(BaseModel):
+    model_config = ConfigDict(extra="forbid")  # a misspelt field is said, not dropped
+
     holds: bool = Field(description="Whether the finding holds, confirmed in the code.")
     severity: Severity | None = Field(
         default=None, description="The level it deserves when it holds; omit to keep it."
@@ -164,6 +167,7 @@ def run_verifier(
     clock: Callable[[], float],
     limits: ConversationLimits = ConversationLimits(),  # noqa: B008 - frozen, shared safely
     slot: Slot = nullcontext,
+    retries: int = FORMAT_RETRIES,
 ) -> VerificationRun:
     """Verify one finding, or record why it could not be verified."""
     sources = pack_sources(pack, tools)
@@ -197,6 +201,7 @@ def run_verifier(
         clock=clock,
         limits=limits,
         slot=slot,
+        retries=retries,
     )
     run = VerificationRun(
         finding,

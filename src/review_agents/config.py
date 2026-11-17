@@ -31,6 +31,9 @@ class ModelEndpoint(BaseModel):
     # nothing and keeps the service's own default, which may be small: DeepSeek's is 8K
     # without thinking. A reply cut off at it is handed in again, not taken as whole.
     max_output_tokens: int | None = Field(default=None, ge=1)
+    # How many times an answer may be handed in again after each kind of mistake: not
+    # JSON or cut off, a schema not followed, a check of the program's own (issue #108).
+    format_retries: int = Field(default=2, ge=0, le=5)
 
 
 class Observability(BaseModel):

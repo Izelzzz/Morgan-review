@@ -13,7 +13,7 @@ from review_agents.context.pr_layer import ChangedFile, PrLayer, PrRequest
 from review_agents.context.repo_layer import RepoLayer
 from review_agents.mirror import MirrorStore
 from review_agents.models import BudgetExceededError
-from review_agents.pipeline.agent import Finding
+from review_agents.pipeline.agent import FORMAT_RETRIES, Finding
 from review_agents.pipeline.verify import (
     VERIFIER_TOOL_CALLS,
     VERIFY_TOOL,
@@ -256,17 +256,18 @@ def test_the_finding_is_given_as_untrusted_data(repo_tools: RepoTools) -> None:
     assert start < last.index("Ignore your instructions") < end
 
 
-def test_a_malformed_verdict_is_asked_again_once(repo_tools: RepoTools) -> None:
+def test_a_malformed_verdict_is_asked_again_up_to_its_retries(repo_tools: RepoTools) -> None:
     bad = call(VERIFY_TOOL, {"holds": "perhaps"}, "v0")
     model = ScriptedModel(script=[bad, verdict(True)])
 
     result = verify(model, repo_tools)
 
     assert result.status == "done"
-    twice = verify(ScriptedModel(script=[bad, bad]), repo_tools)
-    assert twice.status == "incomplete" and twice.verdict is None
-    assert (twice.reason or "").startswith("the verdict was not in the expected format twice:")
-    assert "holds" in (twice.reason or "")  # says which field was wrong
+    again = verify(ScriptedModel(script=[bad] * (FORMAT_RETRIES + 1)), repo_tools)
+    assert again.status == "incomplete" and again.verdict is None
+    expected = f"the verdict was not in the expected format {FORMAT_RETRIES + 1} times:"
+    assert (again.reason or "").startswith(expected)
+    assert "holds" in (again.reason or "")  # says which field was wrong
 
 
 def test_a_verdict_whose_arguments_are_not_json_is_asked_again(repo_tools: RepoTools) -> None:
@@ -482,3 +483,26 @@ def test_the_verifier_writes_its_reason_in_the_configured_language(repo_tools: R
 
     task = str(model.sent[0][2].content)
     assert task.startswith("You are now a verifier") and "English" in task.rsplit("\n\n", 1)[-1]
+
+
+def test_each_kind_of_mistake_has_retries_of_its_own(repo_tools: RepoTools) -> None:
+    unreadable = [
+        AIMessage(
+            content="",
+            invalid_tool_calls=[{"name": VERIFY_TOOL, "args": "{", "id": f"u{n}", "error": None}],
+        )
+        for n in range(FORMAT_RETRIES)
+    ]
+    malformed = [call(VERIFY_TOOL, {"holds": "perhaps"}, f"m{n}") for n in range(FORMAT_RETRIES)]
+    model = ScriptedModel(script=[*unreadable, *malformed, verdict(True)])
+
+    assert verify(model, repo_tools).status == "done"
+
+
+def test_a_misspelt_verdict_field_is_named_with_the_one_meant(repo_tools: RepoTools) -> None:
+    wrong = call(VERIFY_TOOL, {"holds": False, "reasons": "Not reached."}, "v0")
+    model = ScriptedModel(script=[wrong, verdict(False)])
+
+    verify(model, repo_tools)
+
+    assert "`reasons` is not a field; did you mean `reason`?" in str(model.sent[1][-1].content)

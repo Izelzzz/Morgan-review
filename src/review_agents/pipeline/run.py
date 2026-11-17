@@ -478,7 +478,8 @@ def run_review(
     # with no findings would pass CI while the model service is down (issue #91). An
     # agent the deadline told to submit early did hand in (status "done"); one the
     # deadline cut off before it submitted did not. The walkthrough writes no findings.
-    if runs and not any(r.status == "done" for r in runs):
+    # One that did not finish may still have handed in findings one by one (#108).
+    if runs and not any(r.status == "done" or r.findings for r in runs):
         first = next((r.reason for r in runs if r.reason), "incomplete")
         raise RuntimeError(f"no agent handed in its findings ({len(runs)} agents): {first}")
     # D-004 as D-027 has it: findings that needed a verifier, none of which got a verdict,
@@ -651,6 +652,8 @@ class _Work:
         finder_limits = self._limits(settings.finder_model.context_tokens)
         verifier = settings.verifier_model or settings.finder_model
         verifier_limits = self._limits(verifier.context_tokens)
+        # How often an answer may be handed in again, by the model that writes it.
+        finder_retries = settings.finder_model.format_retries
 
         def find(job: Job) -> AgentRun:
             opening = carried = None
@@ -681,6 +684,7 @@ class _Work:
                 dimensions=job.dimensions or None,
                 opening=opening,
                 carried=carried,
+                retries=finder_retries,
             )
 
         def write() -> WalkthroughRun:
@@ -698,6 +702,7 @@ class _Work:
                 clock=self.clock,
                 limits=finder_limits,
                 slot=lambda: self.slots.held(DIMENSION_TURN),
+                retries=finder_retries,
             )
 
         def verify(check: _Check) -> None:
@@ -721,6 +726,7 @@ class _Work:
                     clock=self.clock,
                     limits=verifier_limits,
                     slot=lambda: self.slots.held(priority),
+                    retries=verifier.format_retries,
                 )
             except Exception as exc:  # one verification failing must not fail the review
                 run = VerificationRun(

@@ -21,12 +21,12 @@ from langchain_core.callbacks import BaseCallbackHandler
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import BaseMessage, HumanMessage, ToolMessage
 from langchain_core.tools import StructuredTool
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from review_agents.context.pack import LANGUAGE_NAMES, ContextPack
 from review_agents.context.pr_layer import GIT_TIMEOUT_SECONDS, PrLayer
 from review_agents.mirror import run_git
-from review_agents.pipeline.agent import Slot, Submit, tool_loop
+from review_agents.pipeline.agent import FORMAT_RETRIES, Slot, Submit, tool_loop
 from review_agents.pipeline.conversation import Conversation, ConversationLimits
 from review_agents.repo_config import Language
 from review_agents.report import defused
@@ -56,32 +56,44 @@ CHECK_TRIES = 2
 
 
 class Card(BaseModel):
+    model_config = ConfigDict(extra="forbid")  # a misspelt field is said, not dropped
+
     headline: str = Field(min_length=1, description="One sentence.")
     points: list[str] = Field(min_length=2, max_length=4, description="One line each.")
 
 
 class Problem(BaseModel):
+    model_config = ConfigDict(extra="forbid")  # a misspelt field is said, not dropped
+
     title: str = Field(min_length=1)
     explanation: str = Field(min_length=1)
 
 
 class Change(BaseModel):
+    model_config = ConfigDict(extra="forbid")  # a misspelt field is said, not dropped
+
     title: str = Field(min_length=1)
     body: str = Field(min_length=1, description="Markdown: a table, a Mermaid diagram, a list.")
 
 
 class Impact(BaseModel):
+    model_config = ConfigDict(extra="forbid")  # a misspelt field is said, not dropped
+
     aspect: str = Field(min_length=1)
     text: str = Field(min_length=1)
 
 
 class Tradeoff(BaseModel):
+    model_config = ConfigDict(extra="forbid")  # a misspelt field is said, not dropped
+
     situation: str = Field(min_length=1)
     choice: str = Field(min_length=1)
     reason: str = Field(min_length=1)
 
 
 class Walkthrough(BaseModel):
+    model_config = ConfigDict(extra="forbid")  # a misspelt field is said, not dropped
+
     summary: str = Field(min_length=1, description="The whole change in one sentence.")
     why: Card
     what: Card
@@ -210,6 +222,7 @@ def run_walkthrough(
     clock: Callable[[], float],
     limits: ConversationLimits = ConversationLimits(),  # noqa: B008 - frozen, shared safely
     slot: Slot = nullcontext,
+    retries: int = FORMAT_RETRIES,
 ) -> WalkthroughRun:
     """Write the walkthrough, or record why it could not be written."""
     line_count = functools.cache(tools.line_count)  # a timeout raises, so it is not kept
@@ -239,6 +252,7 @@ def run_walkthrough(
             clock=clock,
             limits=limits,
             slot=slot,
+            retries=retries,
         )
     except _Unchecked as exc:
         return WalkthroughRun("incomplete", reason=f"its references could not be checked: {exc}")

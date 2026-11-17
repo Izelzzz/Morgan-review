@@ -656,3 +656,35 @@ def test_calls_streamed_without_an_index_are_checked_one_by_one() -> None:
     assert isinstance(reply, AIMessage)
     assert [c["id"] for c in reply.tool_calls] == ["a", "b"]
     assert reply.invalid_tool_calls == []
+
+
+def test_a_streamed_call_cut_off_inside_an_optional_field_is_not_whole(
+    service: FakeService,
+) -> None:
+    # Review nit on PR #107: cut inside `suggestion`, which may be left out.
+    cut = ['{"findings": [{"title": "a", "why": "w", "suggestion": "Clamp to']
+    service.plans = [Plan(content="", tool_args=cut, finish="length")]
+
+    reply = chat_model(endpoint(service)).invoke("review")
+
+    assert isinstance(reply, AIMessage)
+    assert reply.tool_calls == [] and len(reply.invalid_tool_calls) == 1
+
+
+def test_a_streamed_call_without_an_id_is_matched_to_its_text_by_place() -> None:
+    # Review nit on PR #107: with no id to match by, a cut-off call is not taken as whole.
+    def no_id(*args: object, **kwargs: object) -> Iterator[ChatGenerationChunk]:
+        for text in ('{"findings": [', '{"title": "a"}, '):
+            part = tool_call_chunk(name="submit_findings", args=text, id=None, index=0)
+            yield ChatGenerationChunk(message=AIMessageChunk(content="", tool_call_chunks=[part]))
+
+    model = models.ReviewChatModel.model_validate(
+        {"base_url": "http://127.0.0.1/v1", "api_key": "k"}
+    )
+    object.__setattr__(model, "_stream", no_id)
+
+    reply = model.invoke("review")
+
+    assert isinstance(reply, AIMessage)
+    assert reply.tool_calls == []
+    assert [c["args"] for c in reply.invalid_tool_calls] == ['{"findings": [{"title": "a"}, ']

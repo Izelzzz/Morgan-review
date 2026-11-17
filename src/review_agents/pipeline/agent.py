@@ -1,23 +1,28 @@
-"""One dimension agent: read the code with read-only tools, then submit findings.
+"""One dimension agent: read the code with read-only tools, then hand in findings.
 
 The loop is shared with the verifier, which hands in a verdict instead of findings.
 
+A dimension agent hands in each finding with its own call (issue #108): one that does
+not check out is refused alone, and the model is told why; the others stay. It then
+says it is done, with how many it handed in.
+
 Two layers make sure an agent stops (agent tools doc §5). The tool layer refuses calls
-past the limit. The loop layer offers only the submit tool once the tool calls are
-used up or the deadline is close, and gives up after `MAX_TURNS_AFTER_TOOLS` more
-turns than tool calls: the submit turn and one retry each for a text reply and for a
-malformed submission.
+past the limit. The loop layer offers only the hand-in tools once the tool calls are
+used up or the deadline is close, and gives up after a few more turns than tool calls:
+the submit turn, a retry for a text reply, and the retries of each kind of malformed
+answer. Turns that only hand in findings do not count, up to a limit of their own.
 A failure ends this agent only; the pipeline carries on with the other dimensions.
 """
 
+import difflib
 import functools
 import json
 import math
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from contextlib import AbstractContextManager, nullcontext
 from copy import deepcopy
 from dataclasses import dataclass, field, replace
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 from langchain_core.callbacks import BaseCallbackHandler
 from langchain_core.language_models import BaseChatModel
@@ -48,10 +53,14 @@ from review_agents.tools import (
 # Held around each model call: the review's share of the model service (decision D-031).
 Slot = Callable[[], AbstractContextManager[object]]
 
+ADD_TOOL = "add_finding"
 SUBMIT_TOOL = "submit_findings"
-# Turns beyond the tool calls: one to submit, one retry for a reply in text, one for a
-# malformed submission.
-MAX_TURNS_AFTER_TOOLS = 3
+# How many times one answer may be handed in again after each kind of mistake: arguments
+# that are not JSON or were cut off, a schema not followed, a check of the program's own.
+FORMAT_RETRIES = 2
+Mistake = Literal["unreadable", "schema", "check"]
+# A safety net, not a design limit: findings one agent may hand in.
+MAX_FINDINGS = 100
 # Below this much time before the deadline, the agent may only submit.
 SUBMIT_MARGIN_SECONDS = 30.0
 # The answer to a call whose arguments are not JSON (issue #96).
@@ -64,9 +73,17 @@ CUT_OFF_REASON = "the reply was cut off at the output limit"
 CUT_OFF_ANSWER = f"error: {CUT_OFF_REASON}; call it again with a shorter answer."
 
 SUBMIT_NOW = (
-    f"Stop investigating. Call {SUBMIT_TOOL} now with the findings you have; an empty"
-    " list is a valid review."
+    f"Stop investigating. Hand in each finding you have not handed in yet with its own"
+    f" {ADD_TOOL} call, then call {SUBMIT_TOOL} with how many you handed in; none is a"
+    " valid review."
 )
+
+
+def turns_after_tools(retries: int) -> int:
+    """Turns an agent has beyond its tool calls: one to submit, one retry for a reply in
+    text, one to answer a count that did not match, and the retries of each kind of
+    mistake."""
+    return 3 + 3 * retries
 
 
 Severity = Literal["blocking", "important", "robustness", "nit"]
@@ -75,7 +92,8 @@ Severity = Literal["blocking", "important", "robustness", "nit"]
 class Finding(BaseModel):
     """One candidate finding, in the fields the shared rules define."""
 
-    model_config = ConfigDict(extra="ignore")
+    # A misspelt field is said, not dropped: `suggestions` would leave the fix out.
+    model_config = ConfigDict(extra="forbid")
 
     title: str = Field(min_length=1)
     # Set to the agent's own dimension: a model's spelling of it is not checked.
@@ -97,8 +115,10 @@ class Finding(BaseModel):
         return " ".join(value.split())
 
 
-class Submission(BaseModel):
-    findings: list[Finding] = Field(description="Every finding; an empty list if none.")
+class Done(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    count: int = Field(ge=0, description=f"How many findings you handed in with {ADD_TOOL}.")
 
 
 @dataclass
@@ -106,22 +126,36 @@ class AgentRun:
     dimension: str
     status: Literal["done", "incomplete"]
     findings: list[Finding] = field(default_factory=list)
-    # Findings the program refused, each with its title and the reason.
+    # Findings left out, each with its title and the reason.
     dropped: list[str] = field(default_factory=list)
     reason: str | None = None
     limit_hit: Literal["time", "tokens", "tool_calls"] | None = None
     tool_calls: int = 0
 
 
+def _add_tool() -> StructuredTool:
+    def add_finding(**kwargs: Any) -> str:
+        return "received"
+
+    return StructuredTool.from_function(
+        add_finding,
+        name=ADD_TOOL,
+        description="Hand in one finding. Call it once for each finding; several calls in"
+        " one turn are fine. A finding that does not check out is refused alone, with why.",
+        args_schema=Finding,
+    )
+
+
 def _submit_tool() -> StructuredTool:
-    def submit_findings(findings: list[Finding]) -> str:
+    def submit_findings(count: int) -> str:
         return "received"
 
     return StructuredTool.from_function(
         submit_findings,
         name=SUBMIT_TOOL,
-        description="Submit your findings for this dimension and finish the review.",
-        args_schema=Submission,
+        description=f"Finish the review once every finding is handed in with {ADD_TOOL}:"
+        " say how many you handed in. None is a valid review.",
+        args_schema=Done,
     )
 
 
@@ -142,6 +176,18 @@ def check(finding: Finding, line_count: Callable[[str], int | None]) -> str | No
 
 
 @dataclass(frozen=True)
+class Collect[I]:
+    """Answers handed in one by one before the submit call: the tool and how each is read."""
+
+    tool: StructuredTool
+    parse: Callable[[dict[str, Any]], I]  # raises ValueError, said to the model
+
+    @property
+    def name(self) -> str:
+        return self.tool.name
+
+
+@dataclass(frozen=True)
 class Submit[T]:
     """How an agent hands in its answer: the tool, how its arguments are read, and words."""
 
@@ -149,6 +195,8 @@ class Submit[T]:
     parse: Callable[[dict[str, Any]], T]  # raises ValueError on a malformed answer
     what: str  # what is handed in, a noun taking "was": "findings list", "verdict"
     now: str  # told once only the submit tool is left
+    # Items handed in one call each before it; `parse` then reads how many there were.
+    collect: Collect[Any] | None = None
 
     @property
     def name(self) -> str:
@@ -167,6 +215,55 @@ class LoopEnd[T]:
     submit_id: str | None = None
     # Its tool results, so an agent carrying on can still cut them to fit its window.
     conversation: Conversation | None = None
+    # Items handed in one by one and kept, and those left out with their reason.
+    collected: list[Any] = field(default_factory=list)
+    dropped: list[str] = field(default_factory=list)
+
+
+def _field_names(tools: Sequence[StructuredTool]) -> list[str]:
+    """Every field name in the tools' schemas, nested ones included."""
+
+    def walk(node: object) -> Iterator[str]:
+        if isinstance(node, dict):
+            properties = node.get("properties")
+            if isinstance(properties, dict):
+                yield from properties
+            for value in node.values():
+                yield from walk(value)
+        elif isinstance(node, list):
+            for value in node:
+                yield from walk(value)
+
+    return sorted({n for t in tools for n in walk(convert_to_openai_tool(t))})
+
+
+def describe(exc: ValueError, fields: Sequence[str]) -> str:
+    """What is wrong with an answer, field by field, in words a model can act on."""
+    if not isinstance(exc, ValidationError):
+        return str(exc)
+    parts = []
+    for error in exc.errors()[:10]:
+        where = ".".join(map(str, error["loc"]))
+        if error["type"] == "extra_forbidden":
+            name = str(error["loc"][-1])
+            close = difflib.get_close_matches(name, fields, n=1)
+            hint = f"; did you mean `{close[0]}`?" if close else ""
+            parts.append(f"{where}: `{name}` is not a field{hint}")
+        else:
+            parts.append(f"{where}: {error['msg']}")
+    return "; ".join(parts)
+
+
+def _mistake(exc: ValueError) -> Mistake:
+    return "schema" if isinstance(exc, ValidationError) else "check"
+
+
+def _key(args: dict[str, Any]) -> tuple[str, str]:
+    """What tells one finding from another as it is handed in again: its title and file.
+    A generic title is common across files; the lines may be what gets corrected."""
+    title, file = args.get("title"), args.get("file")
+    title = " ".join(title.split()) if isinstance(title, str) and title.strip() else "(untitled)"
+    return title, file if isinstance(file, str) else ""
 
 
 def tool_loop[T](
@@ -182,17 +279,22 @@ def tool_loop[T](
     limits: ConversationLimits,
     slot: Slot = nullcontext,
     carried: Conversation | None = None,
+    retries: int = FORMAT_RETRIES,
 ) -> LoopEnd[T]:
     """Let a model read the code with read-only tools until it hands in its answer.
 
     `model_for` builds the model for each turn from the seconds left to the deadline, so
-    no call, nor a wait before one of its retries, runs past it.
+    no call, nor a wait before one of its retries, runs past it. `retries` is how many
+    times an answer may be handed in again after each kind of mistake.
     """
     budget = ToolBudget(tool_calls)
     available = agent_tools(tools, budget)
     schemas = [StructuredTool.from_function(f, name=n) for n, f in available.items()]
-    definitions = [convert_to_openai_tool(t) for t in [*schemas, submit.tool]]
+    collect = submit.collect
+    hand_in = [collect.tool, submit.tool] if collect is not None else [submit.tool]
+    definitions = [convert_to_openai_tool(t) for t in [*schemas, *hand_in]]
     overhead = estimate_tokens(json.dumps(definitions))
+    fields = _field_names(hand_in)
     if carried is not None:
         # The messages carry on from that conversation: its results stay cuttable, under
         # this loop's window and with this loop's tool definitions. A copy of its own:
@@ -201,12 +303,58 @@ def tool_loop[T](
     else:
         conversation = Conversation(limits, overhead=overhead)
     end: LoopEnd[T] = LoopEnd(conversation=conversation)
-    # One retry each: a reply in text instead of a call, and a malformed answer.
+    only = "Not run: only " + " and ".join(t.name for t in hand_in) + " can be called now."
     text_retry_used = False
-    format_retry_used = False
+    mistakes: dict[Mistake, int] = {"unreadable": 0, "schema": 0, "check": 0}
     told_to_submit = False
+    count_checked = False
+    # Items handed in one by one: refused ones by title, until resent or left out.
+    failures: dict[tuple[str, str], int] = {}
+    refused: dict[tuple[str, str], str] = {}
+    left_out: set[tuple[str, str]] = set()
+    add_calls = 0
+    turns = 0
+    max_turns = tool_calls + turns_after_tools(retries)
 
-    for _ in range(tool_calls + MAX_TURNS_AFTER_TOOLS):
+    def leave_out(key: tuple[str, str], why: str) -> None:
+        left_out.add(key)
+        refused.pop(key, None)
+        end.dropped.append(f"{key[0]}: {why}")
+
+    def add(args: object, unreadable: str | None) -> str:
+        """Read one item handed in; what the model is told about it."""
+        assert collect is not None  # noqa: S101 - only called with items to collect
+        if len(end.collected) >= MAX_FINDINGS:
+            return f"Not added: at most {MAX_FINDINGS} can be handed in. Call {submit.name}."
+        if unreadable is not None or not isinstance(args, dict):
+            # Nothing to tell it by: each one is answered, and a count that does not
+            # match says what never came.
+            why = unreadable or NOT_JSON_REASON
+            return f"Not added ({why}). Call {collect.name} again; the ones added are kept."
+        key = _key(args)
+        if key in left_out:
+            return "Not added: this one was already left out after too many tries."
+        try:
+            item = collect.parse(args)
+        except ValueError as exc:
+            why = describe(exc, fields)
+        else:
+            end.collected.append(item)
+            refused.pop(key, None)
+            failures.pop(key, None)
+            return f"Added ({len(end.collected)} so far)."
+        failures[key] = failures.get(key, 0) + 1
+        if failures[key] > retries:
+            failures.pop(key)
+            leave_out(key, why)
+            return f"Left out after {retries + 1} tries ({why}). Go on with the others."
+        refused[key] = why
+        return (
+            f"Not added ({why}). Fix it and call {collect.name} again; the ones already"
+            " added are kept."
+        )
+
+    while turns < max_turns:
         now = clock()
         if now >= deadline:
             end.reason, end.limit_hit = "the review's deadline passed", "time"
@@ -221,7 +369,7 @@ def tool_loop[T](
         except ConversationTooLong as exc:  # sending it would only fail at the service
             end.reason = str(exc)
             return end
-        offered = [submit.tool] if final else [*schemas, submit.tool]
+        offered = hand_in if final else [*schemas, *hand_in]
         # The review's model calls are shared out by priority (D-031); the time spent
         # waiting for one counts, so the time left is measured once it is ours.
         with slot():
@@ -246,6 +394,15 @@ def tool_loop[T](
             return end
         messages.append(reply)
         cut_off = reply.response_metadata.get("finish_reason") in CUT_OFF
+        names = [c["name"] for c in reply.tool_calls] + [
+            b.get("name") for b in reply.invalid_tool_calls
+        ]
+        # A turn that only hands in items is free, up to a limit of its own: an agent
+        # with forty findings may hand in one a turn.
+        if not (collect is not None and names and set(names) == {collect.name}) or (
+            add_calls + len(names) > MAX_FINDINGS * (retries + 1)
+        ):
+            turns += 1
 
         submitted: ToolCall | None = None
         for tool_call in reply.tool_calls:
@@ -255,9 +412,13 @@ def tool_loop[T](
                     messages.append(ToolMessage(ignored, tool_call_id=submitted["id"]))
                 submitted = tool_call
                 continue
+            if collect is not None and tool_call["name"] == collect.name:
+                add_calls += 1
+                told = add(tool_call["args"], None)
+                messages.append(ToolMessage(told, tool_call_id=tool_call["id"]))
+                continue
             end.tool_calls += 1
             if final:  # only submit was offered: a tool must not eat the time that is left
-                only = f"Not run: only {submit.name} is available now."
                 messages.append(ToolMessage(only, tool_call_id=tool_call["id"]))
             else:
                 _answer(tool_call, available, budget, messages, conversation)
@@ -270,19 +431,23 @@ def tool_loop[T](
             call_id = bad.get("id")
             if call_id is None:  # nothing to answer it by; services always give one
                 continue
+            answered_bad = True
             if bad.get("name") == submit.name and submitted is None and unreadable is None:
                 unreadable = call_id
-                answered_bad = True
+                continue
+            if collect is not None and bad.get("name") == collect.name:
+                add_calls += 1
+                why = CUT_OFF_REASON if cut_off else NOT_JSON_REASON
+                messages.append(ToolMessage(add(None, why), tool_call_id=call_id))
                 continue
             answer = CUT_OFF_ANSWER if cut_off else NOT_JSON
             if bad.get("name") != submit.name:
                 end.tool_calls += 1
                 if final:  # as for a readable call: retrying the tool would not run it
-                    answer = f"Not run: only {submit.name} is available now."
+                    answer = only
                 elif budget.used < budget.limit:
                     budget.used += 1  # counted like a call with wrong arguments
             messages.append(ToolMessage(answer, tool_call_id=call_id))
-            answered_bad = True
 
         if not reply.tool_calls and not answered_bad:  # no call that got an answer
             if text_retry_used:
@@ -293,7 +458,9 @@ def tool_loop[T](
             continue
         if submitted is None and unreadable is None:
             continue
+        reply_to = submitted["id"] if submitted is not None else unreadable
         problems: str | None = None
+        mistake: Mistake = "unreadable"
         if cut_off:  # not taken, however whole it reads
             problems = CUT_OFF_REASON
         elif submitted is None:
@@ -302,19 +469,17 @@ def tool_loop[T](
             try:
                 end.answer = submit.parse(submitted["args"])
             except ValueError as exc:  # ValidationError, or a check of the program's own
-                problems = (
-                    "; ".join(
-                        f"{'.'.join(map(str, e['loc']))}: {e['msg']}" for e in exc.errors()[:10]
-                    )
-                    if isinstance(exc, ValidationError)
-                    else str(exc)
-                )
+                problems, mistake = describe(exc, fields), _mistake(exc)
         if problems is not None:
+            end.answer = None
             # Said in the reason too, so a dimension that failed can be looked into.
-            if format_retry_used:
-                end.reason = f"the {submit.what} was not in the expected format twice: {problems}"
+            if mistakes[mistake] >= retries:
+                end.reason = (
+                    f"the {submit.what} was not in the expected format"
+                    f" {mistakes[mistake] + 1} times: {problems}"
+                )
                 return end
-            format_retry_used = True
+            mistakes[mistake] += 1
             again = (
                 f"Call {submit.name} again with a shorter {submit.what}: fewer or briefer entries."
                 if cut_off
@@ -324,11 +489,33 @@ def tool_loop[T](
                 ToolMessage(
                     f"The {submit.what} you submitted is not in the expected format"
                     f" ({problems}). {again}",
-                    tool_call_id=submitted["id"] if submitted is not None else unreadable,
+                    tool_call_id=reply_to,
                 )
             )
             continue
         assert submitted is not None  # noqa: S101 - parsed above
+        if collect is not None:
+            said = cast(int, end.answer)  # the count, with items handed in one by one
+            kept = len(end.collected)
+            if said != kept and not count_checked:
+                # Asked once: a finding refused and never sent again, or one not sent.
+                count_checked = True
+                end.answer = None
+                waiting = "".join(f"\n- {t}: {why}" for (t, _), why in refused.items())
+                messages.append(
+                    ToolMessage(
+                        f"Not finished: you said {said}, and {kept} were added."
+                        + (f" Refused and not sent again:{waiting}" if waiting else "")
+                        + f"\nHand in what is missing with {collect.name}, or call"
+                        f" {submit.name} with count {kept} to finish with what was added.",
+                        tool_call_id=submitted["id"],
+                    )
+                )
+                continue
+            for key, why in list(refused.items()):
+                leave_out(key, f"refused and not sent again: {why}")
+            if said != kept:
+                end.dropped.append(f"(count): said {said}, {kept} were added")
         end.submit_id = submitted["id"]
         # A forced answer is complete but cut short; the report says by what.
         if budget.used >= tool_calls:
@@ -337,10 +524,7 @@ def tool_loop[T](
             end.limit_hit = "time"
         return end
 
-    end.reason = (
-        f"the agent did not submit its {submit.what} within"
-        f" {tool_calls + MAX_TURNS_AFTER_TOOLS} turns"
-    )
+    end.reason = f"the agent did not submit its {submit.what} within {max_turns} turns"
     end.limit_hit = "tool_calls"
     return end
 
@@ -370,6 +554,7 @@ def run_dimension(
     dimensions: tuple[str, ...] | None = None,
     opening: Sequence[BaseMessage] | None = None,
     carried: Conversation | None = None,
+    retries: int = FORMAT_RETRIES,
 ) -> AgentRun:
     """Run one agent to its findings, or to a recorded reason it stopped.
 
@@ -382,7 +567,39 @@ def run_dimension(
     messages = list(pack.messages(dimension, held))
     if opening is not None:
         messages = [*opening, messages[-1]]
-    submit = Submit(_submit_tool(), Submission.model_validate, "findings list", SUBMIT_NOW)
+    line_count = functools.cache(tools.line_count)
+    sources = pack_sources(pack, tools)
+
+    def one(args: dict[str, Any]) -> Finding:
+        """A finding as kept, or ValueError with why it cannot be: said to the model."""
+        item = Finding.model_validate(args)
+        # A general agent tags each finding; a tag outside what it holds is not trusted.
+        if len(held) == 1 or item.dimension not in held:
+            item.dimension = dimension
+        try:
+            # The same file must be spelled the same in every finding, as git spells
+            # it: merging compares paths, and GitHub rejects others in comments.
+            item.file = clean_path(item.file)
+        except ToolError as exc:
+            raise ValueError(str(exc)) from None
+        # Checked, not judged: a basis that does not check out says why, for the verifier.
+        item.basis = [check_basis(b, sources) for b in item.basis]
+        try:
+            problem = check(item, line_count)
+        except ToolTimeoutError:
+            # Not known to be wrong, only not checked now; the verifier reads it again.
+            problem = None
+        if problem is not None:
+            raise ValueError(problem)
+        return item
+
+    submit = Submit(
+        _submit_tool(),
+        lambda args: Done.model_validate(args).count,
+        "findings count",
+        SUBMIT_NOW,
+        collect=Collect(_add_tool(), one),
+    )
     end = tool_loop(
         model_for,
         messages,
@@ -395,41 +612,20 @@ def run_dimension(
         limits=limits,
         slot=slot,
         carried=carried if opening is not None else None,
+        retries=retries,
     )
     run = AgentRun(
         dimension,
         "incomplete",
+        dropped=list(end.dropped),
         reason=end.reason,
         limit_hit=end.limit_hit,
         tool_calls=end.tool_calls,
     )
-    if end.answer is None:
-        return run
-    line_count = functools.cache(tools.line_count)
-    sources = pack_sources(pack, tools)
-    for item in end.answer.findings:
-        # A general agent tags each finding; a tag outside what it holds is not trusted.
-        if len(held) == 1 or item.dimension not in held:
-            item.dimension = dimension
-        try:
-            # The same file must be spelled the same in every finding, as git spells
-            # it: merging compares paths, and GitHub rejects others in comments.
-            item.file = clean_path(item.file)
-        except ToolError as exc:
-            run.dropped.append(f"{item.title}: {exc}")
-            continue
-        # Checked, not judged: a basis that does not check out says why, for the verifier.
-        item.basis = [check_basis(b, sources) for b in item.basis]
-        try:
-            problem = check(item, line_count)
-        except ToolTimeoutError:
-            # Not known to be wrong, only not checked now; the verifier reads it again.
-            problem = None
-        if problem is None:
-            run.findings.append(item)
-        else:
-            run.dropped.append(f"{item.title}: {problem}")
-    run.status = "done"
+    # Kept however the agent ended: each one passed every check (review on PR-B).
+    run.findings = list(end.collected)
+    if end.answer is not None:
+        run.status = "done"
     return run
 
 
