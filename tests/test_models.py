@@ -8,6 +8,7 @@ from datetime import UTC, datetime, timedelta
 from email.utils import format_datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from typing import Any, cast
 
 import openai
 import pytest
@@ -688,3 +689,50 @@ def test_a_streamed_call_without_an_id_is_matched_to_its_text_by_place() -> None
     assert isinstance(reply, AIMessage)
     assert reply.tool_calls == []
     assert [c["args"] for c in reply.invalid_tool_calls] == ['{"findings": [{"title": "a"}, ']
+
+
+def a_tool(path: str = "", limit: int = 5) -> str:
+    """Read something."""
+    return ""
+
+
+def test_tools_are_sent_as_they_were_unless_strict_is_set(service: FakeService) -> None:
+    from langchain_core.utils.function_calling import convert_to_openai_tool
+
+    chat_model(endpoint(service)).bind_tools([a_tool]).invoke("review")
+
+    [sent] = cast(list[dict[str, Any]], service.bodies[0]["tools"])
+    assert sent == convert_to_openai_tool(a_tool)
+    assert "strict" not in sent["function"]
+
+
+def test_with_strict_set_every_tool_is_sent_strict(service: FakeService) -> None:
+    chat_model(endpoint(service, strict_tools=True)).bind_tools([a_tool]).invoke("review")
+
+    [sent] = cast(list[dict[str, Any]], service.bodies[0]["tools"])
+    assert sent["function"]["strict"] is True
+    parameters = sent["function"]["parameters"]
+    assert sorted(parameters["required"]) == ["limit", "path"]
+    assert parameters["additionalProperties"] is False
+
+
+def test_with_strict_set_null_arguments_reach_the_tool_as_left_out(service: FakeService) -> None:
+    service.plans = [
+        Plan(content="", tool_args=['{"title": "a", "why": null}'], finish="tool_calls")
+    ]
+
+    reply = chat_model(endpoint(service, strict_tools=True)).invoke("review")
+
+    assert isinstance(reply, AIMessage)
+    assert reply.tool_calls[0]["args"] == {"title": "a"}
+
+
+def test_without_strict_null_arguments_are_left_as_sent(service: FakeService) -> None:
+    service.plans = [
+        Plan(content="", tool_args=['{"title": "a", "why": null}'], finish="tool_calls")
+    ]
+
+    reply = chat_model(endpoint(service)).invoke("review")
+
+    assert isinstance(reply, AIMessage)
+    assert reply.tool_calls[0]["args"] == {"title": "a", "why": None}

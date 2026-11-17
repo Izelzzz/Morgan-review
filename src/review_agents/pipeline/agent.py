@@ -497,7 +497,9 @@ def tool_loop[T](
         if collect is not None:
             said = cast(int, end.answer)  # the count, with items handed in one by one
             kept = len(end.collected)
-            if said != kept and not count_checked:
+            # Counted with or without those left out after too many tries (#110 nit).
+            matches = said in (kept, kept + len(left_out))
+            if not matches and not count_checked:
                 # Asked once: a finding refused and never sent again, or one not sent.
                 count_checked = True
                 end.answer = None
@@ -514,7 +516,7 @@ def tool_loop[T](
                 continue
             for key, why in list(refused.items()):
                 leave_out(key, f"refused and not sent again: {why}")
-            if said != kept:
+            if not matches:
                 end.dropped.append(f"(count): said {said}, {kept} were added")
         end.submit_id = submitted["id"]
         # A forced answer is complete but cut short; the report says by what.
