@@ -37,6 +37,8 @@ class ModelEndpoint(BaseModel):
     # Send every tool for the service's strict mode (`"strict": true`), which keeps the
     # arguments in shape (issue #109). Off by default: services take different parts of
     # JSON Schema, so only what they share is sent; answers are still checked in full.
+    # OpenAI does not hold several calls in one turn to the schema; findings come that
+    # way, so there they are checked only as before.
     strict_tools: bool = False
 
 

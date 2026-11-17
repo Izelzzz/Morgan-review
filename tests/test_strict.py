@@ -7,6 +7,8 @@ import pytest
 from langchain_core.tools import StructuredTool
 from langchain_core.utils.function_calling import convert_to_openai_tool
 
+from review_agents.pipeline import merge as merge_module
+from review_agents.pipeline import nits as nits_module
 from review_agents.pipeline.agent import _add_tool, _submit_tool
 from review_agents.pipeline.verify import _verdict_tool
 from review_agents.strict import UNSUPPORTED, drop_nulls, strict_tool
@@ -22,7 +24,27 @@ def read_tools() -> list[StructuredTool]:
     ]
 
 
-ALL = [_add_tool(), _submit_tool(), _verdict_tool(), walkthrough_tool(), *read_tools()]
+def merge_tools() -> list[StructuredTool]:
+    """The judge's and the nit merge's tools, built as their modules build them."""
+
+    def merge(**kwargs: Any) -> str:
+        """Merge."""
+        return ""
+
+    return [
+        StructuredTool.from_function(merge, name="merge", args_schema=merge_module._MergeArgs),
+        StructuredTool.from_function(merge, name="merge_nits", args_schema=nits_module._Args),
+    ]
+
+
+ALL = [
+    _add_tool(),
+    _submit_tool(),
+    _verdict_tool(),
+    walkthrough_tool(),
+    *read_tools(),
+    *merge_tools(),
+]
 
 
 def objects(node: object) -> Iterator[dict[str, Any]]:
@@ -118,3 +140,28 @@ def test_a_field_named_like_a_keyword_is_kept() -> None:
 
     assert sorted(parameters["properties"]) == ["path", "pattern"]
     assert sorted(parameters["required"]) == ["path", "pattern"]
+
+
+@pytest.mark.parametrize(
+    "build",
+    [
+        lambda: {
+            "type": "object",
+            "properties": {"m": {"type": "object", "additionalProperties": {"type": "string"}}},
+        },
+        lambda: {"type": "object", "properties": {"k": {"const": "x"}}},
+        lambda: {
+            "type": "object",
+            "properties": {"x": {"anyOf": [{"type": "string"}, {"type": "null"}]}},
+            "required": ["x"],
+        },
+    ],
+    ids=["a map", "a constant", "a field that must be sent as null"],
+)
+def test_a_schema_strict_modes_cannot_take_as_meant_is_refused(build: Any) -> None:
+    # A map would come back empty, a constant is not in every subset, and a null sent on
+    # purpose would read as left out: better to fail where the tool is defined.
+    definition = {"type": "function", "function": {"name": "t", "parameters": build()}}
+
+    with pytest.raises(ValueError, match="strict"):
+        strict_tool(definition)

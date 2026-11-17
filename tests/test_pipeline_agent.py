@@ -1050,3 +1050,20 @@ def test_a_count_with_the_findings_left_out_counted_is_taken(repo_tools: RepoToo
     assert result.status == "done" and len(result.findings) == 1
     assert not any("Not finished" in str(m.content) for m in model.sent[-1][-1:])
     assert result.dropped == ["Nowhere: payments/refund.py has only 3 lines"]
+
+
+def test_a_count_with_the_left_out_counted_is_asked_about_while_one_waits(
+    repo_tools: RepoTools,
+) -> None:
+    # Review on PR-C: one left out, one refused and not sent again; the count reads both.
+    bad = finding(title="Nowhere", line_end=99)
+    tries = [add(bad, f"a{n}") for n in range(FORMAT_RETRIES + 1)]
+    waiting = finding(title="Waiting", severity="huge")
+    model = ScriptedModel(
+        script=[add(finding(), "g1"), *tries, add(waiting, "w1"), done(2, "d2"), done(1, "d3")]
+    )
+
+    run(model, repo_tools)
+
+    told = {m.tool_call_id: str(m.content) for m in model.sent[-1] if isinstance(m, ToolMessage)}
+    assert told["d2"].startswith("Not finished") and "Waiting" in told["d2"]

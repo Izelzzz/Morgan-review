@@ -52,6 +52,7 @@ def _tighten(node: Any) -> Any:
         return [_tighten(n) for n in node]
     if not isinstance(node, dict):
         return node
+    _refuse_what_cannot_be_meant(node)
     said = [f"{key} {node[key]}" for key in sorted(_SAID) if key in node]
     # Under `properties` the keys are field names, which may well be `pattern`.
     node = {
@@ -72,6 +73,22 @@ def _tighten(node: Any) -> Any:
         described = node.get("description", "")
         node["description"] = f"{described} ({'; '.join(said)})".strip()
     return node
+
+
+def _refuse_what_cannot_be_meant(node: dict[str, Any]) -> None:
+    """Fail where a tool is defined rather than send a schema that reads otherwise: a map
+    could only come back empty, a constant is not in every strict subset, and a null
+    sent on purpose would read as left out."""
+    if isinstance(node.get("additionalProperties"), dict):
+        raise ValueError("a map of any keys cannot be sent for strict mode")
+    if "const" in node:
+        raise ValueError("a constant cannot be sent for strict mode in every service")
+    for name in node.get("required") or []:
+        field = (node.get("properties") or {}).get(name, {})
+        if {"type": "null"} in field.get("anyOf", []):
+            raise ValueError(
+                f"{name} must be sent as null at times, which strict mode reads as left out"
+            )
 
 
 def _nullable(node: dict[str, Any]) -> dict[str, Any]:
