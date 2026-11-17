@@ -56,6 +56,10 @@ SUBMIT_TOOL = "submit_findings"
 MAX_TURNS_AFTER_TOOLS = 3
 # Below this much time before the deadline, the agent may only submit.
 SUBMIT_MARGIN_SECONDS = 30.0
+# The answer to a call whose arguments are not JSON (issue #96).
+NOT_JSON_REASON = "its arguments are not valid JSON"
+NOT_JSON = f"error: {NOT_JSON_REASON}; call it again with valid JSON arguments."
+
 SUBMIT_NOW = (
     f"Stop investigating. Call {SUBMIT_TOOL} now with the findings you have; an empty"
     " list is a valid review."
@@ -253,36 +257,67 @@ def tool_loop[T](
                 messages.append(ToolMessage(only, tool_call_id=tool_call["id"]))
             else:
                 _answer(tool_call, available, budget, messages, conversation)
+        # Calls whose arguments are not JSON land here, not in tool_calls, yet they go back
+        # to the service with the reply: one left unanswered makes it refuse the next
+        # request (issue #96). An unreadable submission is a malformed one.
+        unreadable: str | None = None
+        answered_bad = False
+        for bad in reply.invalid_tool_calls:
+            call_id = bad.get("id")
+            if call_id is None:  # nothing to answer it by; services always give one
+                continue
+            if bad.get("name") == submit.name and submitted is None and unreadable is None:
+                unreadable = call_id
+                answered_bad = True
+                continue
+            answer = NOT_JSON
+            if bad.get("name") != submit.name:
+                end.tool_calls += 1
+                if final:  # as for a readable call: retrying the tool would not run it
+                    answer = f"Not run: only {submit.name} is available now."
+                elif budget.used < budget.limit:
+                    budget.used += 1  # counted like a call with wrong arguments
+            messages.append(ToolMessage(answer, tool_call_id=call_id))
+            answered_bad = True
 
-        if submitted is None and not reply.tool_calls:
+        if not reply.tool_calls and not answered_bad:  # no call that got an answer
             if text_retry_used:
                 end.reason = f"the model answered in text twice instead of calling {submit.name}"
                 return end
             text_retry_used = True
             messages.append(HumanMessage(f"Report your {submit.what} by calling {submit.name}."))
             continue
-        if submitted is None:
+        if submitted is None and unreadable is None:
             continue
-        try:
-            end.answer = submit.parse(submitted["args"])
-        except ValueError as exc:  # ValidationError, or a check of the program's own
+        problems: str | None = None
+        if submitted is None:
+            problems = NOT_JSON_REASON
+        else:
+            try:
+                end.answer = submit.parse(submitted["args"])
+            except ValueError as exc:  # ValidationError, or a check of the program's own
+                problems = (
+                    "; ".join(
+                        f"{'.'.join(map(str, e['loc']))}: {e['msg']}" for e in exc.errors()[:10]
+                    )
+                    if isinstance(exc, ValidationError)
+                    else str(exc)
+                )
+        if problems is not None:
+            # Said in the reason too, so a dimension that failed can be looked into.
             if format_retry_used:
-                end.reason = f"the {submit.what} was not in the expected format twice"
+                end.reason = f"the {submit.what} was not in the expected format twice: {problems}"
                 return end
             format_retry_used = True
-            problems = (
-                "; ".join(f"{'.'.join(map(str, e['loc']))}: {e['msg']}" for e in exc.errors()[:10])
-                if isinstance(exc, ValidationError)
-                else str(exc)
-            )
             messages.append(
                 ToolMessage(
                     f"The {submit.what} you submitted is not in the expected format"
                     f" ({problems}). Call {submit.name} again with every required field.",
-                    tool_call_id=submitted["id"],
+                    tool_call_id=submitted["id"] if submitted is not None else unreadable,
                 )
             )
             continue
+        assert submitted is not None  # noqa: S101 - parsed above
         end.submit_id = submitted["id"]
         # A forced answer is complete but cut short; the report says by what.
         if budget.used >= tool_calls:
