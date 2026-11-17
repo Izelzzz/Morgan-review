@@ -10,6 +10,7 @@ import threading
 from collections import defaultdict
 from pathlib import Path
 
+from review_agents import observability as obs
 from review_agents.context.modules import MODULE_TOKENS, SUMMARY_VERSION, Summarize
 from review_agents.context.repo_layer import RepoLayer, build_repo_layer
 from review_agents.redact import REDACT
@@ -46,23 +47,24 @@ def repo_layer_for_review(
     review's steps show whether it reused another review's work.
     """
     started = _now(conn)
-    try:
-        with repo_lock(repo):
-            layer = build_repo_layer(
-                conn,
-                repo,
-                git_dir,
-                default_branch,
-                skip_paths,
-                summarize,
-                memories,
-                memory_version,
-                module_tokens=module_tokens,
-            )
-            prune(conn, repo)
-    except Exception as exc:
-        _step(conn, review_id, "context.repo_layer", started, f"{type(exc).__name__}: {exc}")
-        raise
+    with obs.span("context.repo_layer"):
+        try:
+            with repo_lock(repo):
+                layer = build_repo_layer(
+                    conn,
+                    repo,
+                    git_dir,
+                    default_branch,
+                    skip_paths,
+                    summarize,
+                    memories,
+                    memory_version,
+                    module_tokens=module_tokens,
+                )
+                prune(conn, repo)
+        except Exception as exc:
+            _step(conn, review_id, "context.repo_layer", started, f"{type(exc).__name__}: {exc}")
+            raise
     node = "context.repo_layer.cache_hit" if layer.cache_hit else "context.repo_layer"
     _step(conn, review_id, node, started, None)
     return layer
@@ -72,9 +74,16 @@ def _step(
     conn: sqlite3.Connection, review_id: int, node: str, started: str, error: str | None
 ) -> None:
     conn.execute(
-        "INSERT INTO steps (review_id, node, started_at, finished_at, status, error)"
-        " VALUES (?, ?, ?, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), ?, ?)",
-        (review_id, node, started, "error" if error else "ok", REDACT.optional(error)),
+        "INSERT INTO steps (review_id, node, started_at, finished_at, status, error, trace_id)"
+        " VALUES (?, ?, ?, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), ?, ?, ?)",
+        (
+            review_id,
+            node,
+            started,
+            "error" if error else "ok",
+            REDACT.optional(error),
+            obs.current_trace_id(),
+        ),
     )
 
 
