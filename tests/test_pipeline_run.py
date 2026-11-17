@@ -347,6 +347,23 @@ def test_a_finding_dropped_by_the_programs_checks_is_recorded_in_the_steps(
     assert len(setup.findings(review_id)) == 1
 
 
+def test_findings_kept_by_agents_that_did_not_finish_are_still_reviewed(
+    setup: Setup,
+) -> None:
+    review_id = setup.queue()
+    adding = AIMessage(
+        "", tool_calls=[{"name": "add_finding", "args": finding("edge_cases"), "id": "a"}]
+    )
+    text = AIMessage(content="done")
+    scripts = {d: [text, text] for d in ALL}
+    scripts["edge_cases"] = [adding, text, text]
+
+    setup.run(review_id, ByDimension(scripts=scripts))
+
+    assert setup.review(review_id)["status"] != "failed"
+    assert len(setup.findings(review_id)) == 1
+
+
 def test_only_the_dimensions_the_repository_enables_run(setup: Setup) -> None:
     config = "dimensions:\n  spec_drift: false\n  maintainability: false\n  verifiability: false\n"
     review_id = setup.queue(config)

@@ -81,8 +81,9 @@ SUBMIT_NOW = (
 
 def turns_after_tools(retries: int) -> int:
     """Turns an agent has beyond its tool calls: one to submit, one retry for a reply in
-    text, and the retries of each kind of mistake."""
-    return 2 + 3 * retries
+    text, one to answer a count that did not match, and the retries of each kind of
+    mistake."""
+    return 3 + 3 * retries
 
 
 Severity = Literal["blocking", "important", "robustness", "nit"]
@@ -257,9 +258,12 @@ def _mistake(exc: ValueError) -> Mistake:
     return "schema" if isinstance(exc, ValidationError) else "check"
 
 
-def _title(args: object) -> str:
-    title = args.get("title") if isinstance(args, dict) else None
-    return " ".join(title.split()) if isinstance(title, str) and title.strip() else "(untitled)"
+def _key(args: dict[str, Any]) -> tuple[str, str]:
+    """What tells one finding from another as it is handed in again: its title and file.
+    A generic title is common across files; the lines may be what gets corrected."""
+    title, file = args.get("title"), args.get("file")
+    title = " ".join(title.split()) if isinstance(title, str) and title.strip() else "(untitled)"
+    return title, file if isinstance(file, str) else ""
 
 
 def tool_loop[T](
@@ -305,48 +309,46 @@ def tool_loop[T](
     told_to_submit = False
     count_checked = False
     # Items handed in one by one: refused ones by title, until resent or left out.
-    failures: dict[str, int] = {}
-    refused: dict[str, str] = {}
-    left_out: set[str] = set()
+    failures: dict[tuple[str, str], int] = {}
+    refused: dict[tuple[str, str], str] = {}
+    left_out: set[tuple[str, str]] = set()
     add_calls = 0
     turns = 0
     max_turns = tool_calls + turns_after_tools(retries)
 
-    def leave_out(title: str, why: str) -> None:
-        left_out.add(title)
-        refused.pop(title, None)
-        end.dropped.append(f"{title}: {why}")
+    def leave_out(key: tuple[str, str], why: str) -> None:
+        left_out.add(key)
+        refused.pop(key, None)
+        end.dropped.append(f"{key[0]}: {why}")
 
-    def add(call_id: str, args: object, unreadable: str | None) -> str:
+    def add(args: object, unreadable: str | None) -> str:
         """Read one item handed in; what the model is told about it."""
         assert collect is not None  # noqa: S101 - only called with items to collect
         if len(end.collected) >= MAX_FINDINGS:
             return f"Not added: at most {MAX_FINDINGS} can be handed in. Call {submit.name}."
-        title = "(unreadable)" if unreadable is not None else _title(args)
-        if title in left_out and unreadable is None:
-            return "Not added: this one was already left out after too many tries."
-        if unreadable is None and isinstance(args, dict):
-            try:
-                item = collect.parse(args)
-            except ValueError as exc:
-                why = describe(exc, fields)
-            else:
-                end.collected.append(item)
-                refused.pop(title, None)
-                failures.pop(title, None)
-                return f"Added ({len(end.collected)} so far)."
-        else:
+        if unreadable is not None or not isinstance(args, dict):
+            # Nothing to tell it by: each one is answered, and a count that does not
+            # match says what never came.
             why = unreadable or NOT_JSON_REASON
-        failures[title] = failures.get(title, 0) + 1
-        if failures[title] > retries:
-            failures.pop(title)
-            if unreadable is not None:
-                end.dropped.append(f"{title}: {why}")
-            else:
-                leave_out(title, why)
+            return f"Not added ({why}). Call {collect.name} again; the ones added are kept."
+        key = _key(args)
+        if key in left_out:
+            return "Not added: this one was already left out after too many tries."
+        try:
+            item = collect.parse(args)
+        except ValueError as exc:
+            why = describe(exc, fields)
+        else:
+            end.collected.append(item)
+            refused.pop(key, None)
+            failures.pop(key, None)
+            return f"Added ({len(end.collected)} so far)."
+        failures[key] = failures.get(key, 0) + 1
+        if failures[key] > retries:
+            failures.pop(key)
+            leave_out(key, why)
             return f"Left out after {retries + 1} tries ({why}). Go on with the others."
-        if unreadable is None:
-            refused[title] = why
+        refused[key] = why
         return (
             f"Not added ({why}). Fix it and call {collect.name} again; the ones already"
             " added are kept."
@@ -412,7 +414,7 @@ def tool_loop[T](
                 continue
             if collect is not None and tool_call["name"] == collect.name:
                 add_calls += 1
-                told = add(tool_call["id"] or "", tool_call["args"], None)
+                told = add(tool_call["args"], None)
                 messages.append(ToolMessage(told, tool_call_id=tool_call["id"]))
                 continue
             end.tool_calls += 1
@@ -436,7 +438,7 @@ def tool_loop[T](
             if collect is not None and bad.get("name") == collect.name:
                 add_calls += 1
                 why = CUT_OFF_REASON if cut_off else NOT_JSON_REASON
-                messages.append(ToolMessage(add(call_id, None, why), tool_call_id=call_id))
+                messages.append(ToolMessage(add(None, why), tool_call_id=call_id))
                 continue
             answer = CUT_OFF_ANSWER if cut_off else NOT_JSON
             if bad.get("name") != submit.name:
@@ -499,7 +501,7 @@ def tool_loop[T](
                 # Asked once: a finding refused and never sent again, or one not sent.
                 count_checked = True
                 end.answer = None
-                waiting = "".join(f"\n- {t}: {why}" for t, why in refused.items())
+                waiting = "".join(f"\n- {t}: {why}" for (t, _), why in refused.items())
                 messages.append(
                     ToolMessage(
                         f"Not finished: you said {said}, and {kept} were added."
@@ -510,8 +512,8 @@ def tool_loop[T](
                     )
                 )
                 continue
-            for title, why in list(refused.items()):
-                leave_out(title, f"refused and not sent again: {why}")
+            for key, why in list(refused.items()):
+                leave_out(key, f"refused and not sent again: {why}")
             if said != kept:
                 end.dropped.append(f"(count): said {said}, {kept} were added")
         end.submit_id = submitted["id"]
@@ -620,10 +622,10 @@ def run_dimension(
         limit_hit=end.limit_hit,
         tool_calls=end.tool_calls,
     )
-    if end.answer is None:
-        return run
+    # Kept however the agent ended: each one passed every check (review on PR-B).
     run.findings = list(end.collected)
-    run.status = "done"
+    if end.answer is not None:
+        run.status = "done"
     return run
 
 

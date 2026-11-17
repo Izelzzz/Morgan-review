@@ -478,7 +478,8 @@ def run_review(
     # with no findings would pass CI while the model service is down (issue #91). An
     # agent the deadline told to submit early did hand in (status "done"); one the
     # deadline cut off before it submitted did not. The walkthrough writes no findings.
-    if runs and not any(r.status == "done" for r in runs):
+    # One that did not finish may still have handed in findings one by one (#108).
+    if runs and not any(r.status == "done" or r.findings for r in runs):
         first = next((r.reason for r in runs if r.reason), "incomplete")
         raise RuntimeError(f"no agent handed in its findings ({len(runs)} agents): {first}")
     # D-004 as D-027 has it: findings that needed a verifier, none of which got a verdict,

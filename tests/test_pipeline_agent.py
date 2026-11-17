@@ -995,3 +995,45 @@ def test_the_task_says_how_findings_are_handed_in() -> None:
     task = str(pack().messages("edge_cases")[-1].content)
 
     assert f"`{ADD_TOOL}`" in task and f"`{SUBMIT_TOOL}`" in task
+
+
+def test_findings_added_before_an_unclean_end_are_kept(repo_tools: RepoTools) -> None:
+    # They passed every check; only finishing failed (review on PR-B).
+    text = AIMessage(content="I am done.")
+    model = ScriptedModel(script=[add(finding()), text, text])
+
+    result = run(model, repo_tools)
+
+    assert result.status == "incomplete"
+    assert [f.title for f in result.findings] == ["A refund can exceed the paid amount"]
+
+
+def test_a_finding_left_out_does_not_block_one_of_the_same_title_elsewhere(
+    repo_tools: RepoTools,
+) -> None:
+    bad = finding(title="Unchecked value", line_end=99)
+    tries = [add(bad, f"a{n}") for n in range(FORMAT_RETRIES + 1)]
+    elsewhere = finding(title="Unchecked value", file="README.md", line_start=1, line_end=1)
+    model = ScriptedModel(script=[*tries, add(elsewhere, "b1"), done(1)])
+
+    result = run(model, repo_tools)
+
+    assert [f.file for f in result.findings] == ["README.md"]
+    assert len(result.dropped) == 1
+
+
+def test_unreadable_findings_each_get_tries_of_their_own(repo_tools: RepoTools) -> None:
+    three = AIMessage(
+        content="",
+        invalid_tool_calls=[
+            {"name": ADD_TOOL, "args": '{"title": "cut', "id": f"u{n}", "error": None}
+            for n in range(FORMAT_RETRIES + 1)
+        ],
+    )
+    model = ScriptedModel(script=[three, done(0)])
+
+    run(model, repo_tools)
+
+    told = [str(m.content) for m in model.sent[1] if isinstance(m, ToolMessage)]
+    assert len(told) == FORMAT_RETRIES + 1
+    assert all(t.startswith("Not added") for t in told)
