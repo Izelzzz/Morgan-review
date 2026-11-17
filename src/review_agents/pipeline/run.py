@@ -93,6 +93,9 @@ _summaries_guard = threading.Lock()
 
 # When one review hits several limits, the report names the most severe.
 _LIMIT_ORDER = ("time", "tokens", "tool_calls")
+# Of the time left before the latest submit time, the most an agent carrying on from
+# the walkthrough's conversation waits for it (strategy walkthrough_first).
+CARRY_ON_WAIT_SHARE = 0.5
 
 
 class ReviewSuperseded(RuntimeError):
@@ -735,13 +738,16 @@ class _Work:
         parent = obs.current_context()
 
         def find(job: Job) -> AgentRun:
-            opening = None
+            opening = carried = None
             if job.after_walkthrough:
-                # Waits for the walkthrough, queued first, at most until the latest submit
-                # time; without it the agent opens its own conversation.
-                wait([written], timeout=max(0.0, submit_by - self.clock()))
+                # Waits for the walkthrough, queued first, for at most half the time left
+                # before the latest submit time: waiting it all out would leave the agent
+                # none of its own. Without the walkthrough it opens its own conversation.
+                left = submit_by - self.clock()
+                wait([written], timeout=max(0.0, left * CARRY_ON_WAIT_SHARE))
                 if written.done() and not written.cancelled() and written.exception() is None:
                     opening = written.result().transcript
+                    carried = written.result().conversation
             self.starts[job.node] = _utc_now()  # when the job runs, not when it was queued
             meter = UsageMeter(
                 self.budget, review_usage(settings.db_path, self.review_id, job.dimension)
@@ -760,6 +766,7 @@ class _Work:
                     slot=lambda: self.slots.held(DIMENSION_TURN),
                     dimensions=job.dimensions or None,
                     opening=opening,
+                    carried=carried,
                 )
                 if run.status != "done":
                     obs.failed(current, REDACT(run.reason or "incomplete"))

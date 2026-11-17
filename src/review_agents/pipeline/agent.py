@@ -15,7 +15,8 @@ import json
 import math
 from collections.abc import Callable, Sequence
 from contextlib import AbstractContextManager, nullcontext
-from dataclasses import dataclass, field
+from copy import deepcopy
+from dataclasses import dataclass, field, replace
 from typing import Any, Literal
 
 from langchain_core.callbacks import BaseCallbackHandler
@@ -157,6 +158,8 @@ class LoopEnd[T]:
     tool_calls: int = 0
     # The submit call the answer came in, for a conversation that carries on after it.
     submit_id: str | None = None
+    # Its tool results, so an agent carrying on can still cut them to fit its window.
+    conversation: Conversation | None = None
 
 
 def tool_loop[T](
@@ -171,6 +174,7 @@ def tool_loop[T](
     clock: Callable[[], float],
     limits: ConversationLimits,
     slot: Slot = nullcontext,
+    carried: Conversation | None = None,
 ) -> LoopEnd[T]:
     """Let a model read the code with read-only tools until it hands in its answer.
 
@@ -181,8 +185,15 @@ def tool_loop[T](
     available = agent_tools(tools, budget)
     schemas = [StructuredTool.from_function(f, name=n) for n, f in available.items()]
     definitions = [convert_to_openai_tool(t) for t in [*schemas, submit.tool]]
-    conversation = Conversation(limits, overhead=estimate_tokens(json.dumps(definitions)))
-    end: LoopEnd[T] = LoopEnd()
+    overhead = estimate_tokens(json.dumps(definitions))
+    if carried is not None:
+        # The messages carry on from that conversation: its results stay cuttable, under
+        # this loop's window and with this loop's tool definitions. A copy of its own:
+        # Deep mode's runs all carry on from the same walkthrough.
+        conversation = replace(deepcopy(carried), limits=limits, overhead=overhead)
+    else:
+        conversation = Conversation(limits, overhead=overhead)
+    end: LoopEnd[T] = LoopEnd(conversation=conversation)
     # One retry each: a reply in text instead of a call, and a malformed answer.
     text_retry_used = False
     format_retry_used = False
@@ -312,6 +323,7 @@ def run_dimension(
     slot: Slot = nullcontext,
     dimensions: tuple[str, ...] | None = None,
     opening: Sequence[BaseMessage] | None = None,
+    carried: Conversation | None = None,
 ) -> AgentRun:
     """Run one agent to its findings, or to a recorded reason it stopped.
 
@@ -336,6 +348,7 @@ def run_dimension(
         clock=clock,
         limits=limits,
         slot=slot,
+        carried=carried if opening is not None else None,
     )
     run = AgentRun(
         dimension,

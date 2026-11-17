@@ -132,7 +132,9 @@ def directory_tree(snapshot: Snapshot, max_tokens: int = TREE_TOKENS) -> str:
 
 
 def _key(snapshot: Snapshot, memory_version: str, tree_tokens: int) -> str:
-    raw = f"{LAYER_VERSION}:{snapshot.tree_id}:{memory_version}:{tree_tokens}"
+    # The skip rules too: the service's own change with an upgrade, not with the tree.
+    skip = json.dumps(sorted(snapshot.skip_paths))
+    raw = f"{LAYER_VERSION}:{snapshot.tree_id}:{memory_version}:{tree_tokens}:{skip}"
     return "layer:" + hashlib.sha256(raw.encode()).hexdigest()
 
 

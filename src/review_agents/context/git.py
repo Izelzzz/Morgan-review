@@ -28,6 +28,10 @@ class Snapshot:
         self._files: list[Entry] | None = None
         self._by_path: dict[str, Entry] = {}
 
+    @property
+    def skip_paths(self) -> tuple[str, ...]:
+        return self._skip_paths
+
     @classmethod
     def at_branch(cls, git_dir: Path, branch: str, skip_paths: tuple[str, ...]) -> "Snapshot":
         sha = run_git(
