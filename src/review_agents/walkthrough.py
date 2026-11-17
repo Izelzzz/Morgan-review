@@ -27,7 +27,7 @@ from review_agents.context.pack import LANGUAGE_NAMES, ContextPack
 from review_agents.context.pr_layer import GIT_TIMEOUT_SECONDS, PrLayer
 from review_agents.mirror import run_git
 from review_agents.pipeline.agent import Slot, Submit, tool_loop
-from review_agents.pipeline.conversation import ConversationLimits
+from review_agents.pipeline.conversation import Conversation, ConversationLimits
 from review_agents.repo_config import Language
 from review_agents.report import defused
 from review_agents.tools import RepoTools, ToolTimeoutError
@@ -124,6 +124,8 @@ class WalkthroughRun:
     # The conversation once the walkthrough is in, its submission answered, for an agent
     # to carry on from (strategy walkthrough_first, D-038); None if it was not handed in.
     transcript: list[BaseMessage] | None = None
+    # Its tool results, kept with the transcript so the agent can cut them (issue #103).
+    conversation: Conversation | None = None
 
 
 def reference_problems(
@@ -240,9 +242,10 @@ def run_walkthrough(
         )
     except _Unchecked as exc:
         return WalkthroughRun("incomplete", reason=f"its references could not be checked: {exc}")
-    transcript = None
+    transcript = conversation = None
     if end.answer is not None and end.submit_id is not None:
         transcript = [*messages, ToolMessage("received", tool_call_id=end.submit_id)]
+        conversation = end.conversation
     return WalkthroughRun(
         "done" if end.answer is not None else "incomplete",
         walkthrough=end.answer,
@@ -250,6 +253,7 @@ def run_walkthrough(
         limit_hit=end.limit_hit,
         tool_calls=end.tool_calls,
         transcript=transcript,
+        conversation=conversation,
     )
 
 

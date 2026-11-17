@@ -133,6 +133,7 @@ class ByDimension(BaseChatModel):
         wrote = last(lambda text: WALKTHROUGH_TASK in text)
         asked = last(lambda text: bool(DIMENSION.search(text)) or GENERAL_TASK in text)
         if wrote > asked:
+            time.sleep(self.delay.get("walkthrough", 0.0))
             with self.lock:
                 self.order.append("walkthrough")
                 said = self.walkthrough.pop(0) if self.walkthrough else AIMessage("It clamps.")
@@ -1223,6 +1224,26 @@ def test_walkthrough_first_still_finds_problems_when_the_walkthrough_fails(setup
     assert not any(WALKTHROUGH_TASK in str(m.content) for m in sent)  # a fresh opening
     status, error = setup.steps(review_id)["walkthrough"]
     assert status == "error" and error is not None
+
+
+def test_walkthrough_first_does_not_wait_for_a_slow_walkthrough_until_nothing_is_left(
+    setup: Setup,
+) -> None:
+    with_strategy(setup, "walkthrough_first")
+    review_id = setup.queue()
+    model = ByDimension(
+        scripts={GENERAL: [submit(finding("security"))]},
+        walkthrough=[walkthrough_answer()],
+        delay={"walkthrough": 6.0},  # still writing when the agents must hand in
+    )
+
+    setup.run(review_id, model, review_seconds=3.0)
+
+    # It opened its own conversation with time left, instead of waiting until the
+    # latest submit time and having none.
+    [written] = setup.findings(review_id)
+    assert written["primary_dimension"] == "security"
+    assert setup.steps(review_id)["dimension.general"] == ("ok", None)
 
 
 # --- every writer failing (issue #91) --------------------------------------------

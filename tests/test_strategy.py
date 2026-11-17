@@ -12,6 +12,7 @@ from scripted import ScriptedModel, call
 from review_agents.context.pack import DIMENSIONS, GENERAL, SKILLS, task
 from review_agents.mirror import MirrorStore
 from review_agents.pipeline.agent import SUBMIT_TOOL, run_dimension
+from review_agents.pipeline.conversation import ConversationLimits, conversation_tokens
 from review_agents.pipeline.run import plan_jobs
 from review_agents.pipeline.strategy import Author, plan
 from review_agents.repo_config import RepoConfig
@@ -159,6 +160,64 @@ def test_an_agent_can_carry_on_from_the_walkthrough_s_conversation(tools: RepoTo
     [sent] = finder.sent
     assert sent[: len(written.transcript)] == written.transcript
     assert sent[-1].content == walkthrough_tests.pack().messages(GENERAL, DIMENSIONS)[-1].content
+
+
+def test_what_the_walkthrough_read_can_be_cut_when_the_agent_runs_short(
+    tmp_path: Path,
+) -> None:
+    upstream = Upstream(tmp_path, "octo/shop")
+    big = "".join(f"line {n} of a long generated table\n" for n in range(1500))
+    head = upstream.commit({**walkthrough_tests.FILES, "table.txt": big}, "init")
+    git_dir = MirrorStore(tmp_path / "repos", remote_base=str(upstream.base)).sync(
+        "octo/shop", ["refs/heads/main"], [head], None
+    )
+    tools = RepoTools(git_dir, "octo/shop", head, [])
+    writer = ScriptedModel(
+        script=[
+            call("read_file", {"path": "table.txt"}, "r1"),
+            call(WALKTHROUGH_TOOL, walkthrough_tests.answer(), "w1"),
+        ]
+    )
+    written = run_walkthrough(
+        lambda left: writer,
+        walkthrough_tests.pack(),
+        tools,
+        tool_calls=10,
+        callbacks=[],
+        clock=lambda: 0.0,
+    )
+    assert written.transcript is not None
+    # A window the agent's conversation fits only once the table it carries is cut.
+    window = conversation_tokens(
+        [*written.transcript, *walkthrough_tests.pack().messages(GENERAL, DIMENSIONS)[-1:]]
+    )
+    # Deep mode: several runs carry on from the same walkthrough, each cutting its own.
+    for _ in range(2):
+        finder = ScriptedModel(script=[call(SUBMIT_TOOL, {"findings": []}, "f1")])
+
+        def model_for(left: float, finder: ScriptedModel = finder) -> ScriptedModel:
+            return finder
+
+        run = run_dimension(
+            model_for,
+            walkthrough_tests.pack(),
+            GENERAL,
+            tools,
+            tool_calls=10,
+            callbacks=[],
+            clock=lambda: 0.0,
+            limits=ConversationLimits(window=window, output_reserve=0),
+            dimensions=DIMENSIONS,
+            opening=written.transcript,
+            carried=written.conversation,
+        )
+
+        assert run.status == "done", run.reason
+        [sent] = finder.sent
+        table = next(m for m in sent if isinstance(m, ToolMessage) and m.tool_call_id == "r1")
+        # Shortened to its head and tail, as the first run's was, not removed outright.
+        assert len(str(table.content)) < len(big) / 4
+        assert "line 0 of" in str(table.content) and "Removed" not in str(table.content)
 
 
 def test_a_walkthrough_not_handed_in_leaves_no_conversation_to_carry_on(
