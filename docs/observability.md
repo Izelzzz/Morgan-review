@@ -110,6 +110,7 @@ SELECT node, status, error, note FROM steps WHERE review_id = ? ORDER BY id;
 
 ## 常见问题
 
-- **平台里看不到 trace**：先看服务日志有没有导出失败的记录；再核对 `ENDPOINT` 的区域和路径（Langfuse 要带 `/api/public/otel`），以及认证头。span 批量发送（每次最多 32 个，`full` 档的 span 较大），审查结束后几秒内到达；服务停止时会发完剩下的。
+- **平台里看不到 trace**：先看服务日志有没有导出失败的记录；再核对 `ENDPOINT` 的区域和路径（Langfuse 要带 `/api/public/otel`），以及认证头。span 批量发送（每次最多 32 个，`full` 档的 span 较大），审查结束后几秒内发出；服务停止时会发完剩下的。Langfuse 入库有延迟（实测一两分钟，负载高时可能更久），刚结束时 trace 可能缺几个 span，稍后刷新即可。
 - **只有 `summaries`、没有 `review`**：后台摘要和审查是两条 trace，按时间找审查那条。
 - **trace 里没有提示词**：默认 `metadata` 档不记录内容，要看请设 `CONTENT=full`。
+- **Langfuse 里没有费用**：token 数照常记录，但 Langfuse 没有 `deepseek-flash` 等模型的内置价格。在 Langfuse 的 Models 设置里按模型名添加价格后，新 trace 会算出费用；缓存命中的输入单独记为 `input_cached_tokens`，要另填它的价格。
