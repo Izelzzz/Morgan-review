@@ -5,7 +5,7 @@ from typing import Any
 
 import pytest
 from gitrepo import Upstream
-from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 from scripted import ScriptedModel, call
 
 from review_agents.context.pack import SHARED_RULES, ContextPack
@@ -265,7 +265,24 @@ def test_a_malformed_verdict_is_asked_again_once(repo_tools: RepoTools) -> None:
     assert result.status == "done"
     twice = verify(ScriptedModel(script=[bad, bad]), repo_tools)
     assert twice.status == "incomplete" and twice.verdict is None
-    assert twice.reason == "the verdict was not in the expected format twice"
+    assert (twice.reason or "").startswith("the verdict was not in the expected format twice:")
+    assert "holds" in (twice.reason or "")  # says which field was wrong
+
+
+def test_a_verdict_whose_arguments_are_not_json_is_asked_again(repo_tools: RepoTools) -> None:
+    cut = AIMessage(
+        content="",
+        invalid_tool_calls=[
+            {"name": VERIFY_TOOL, "args": '{"holds": tr', "id": "v0", "error": None}
+        ],
+    )
+    model = ScriptedModel(script=[cut, verdict(True)])
+
+    result = verify(model, repo_tools)
+
+    # Answered, or the service refuses the next request (issue #96).
+    assert result.status == "done"
+    assert any(isinstance(m, ToolMessage) and m.tool_call_id == "v0" for m in model.sent[1])
 
 
 def test_a_verifier_out_of_tool_calls_must_answer(repo_tools: RepoTools) -> None:

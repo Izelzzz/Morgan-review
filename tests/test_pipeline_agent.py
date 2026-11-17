@@ -5,7 +5,7 @@ from typing import Any
 
 import pytest
 from gitrepo import Upstream
-from langchain_core.messages import AIMessage, BaseMessage, ToolMessage
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, ToolMessage
 from scripted import ScriptedModel, call
 
 from review_agents.context.pack import SHARED_RULES, ContextPack
@@ -346,6 +346,101 @@ def test_every_submit_call_in_a_turn_gets_an_answer(repo_tools: RepoTools) -> No
     assert result.status == "done"
     answered = {m.tool_call_id for m in model.sent[1] if isinstance(m, ToolMessage)}
     assert answered == {"s1", "s2"}  # the ignored one and the malformed one
+
+
+def unparsable(name: str, call_id: str = "bad1") -> AIMessage:
+    """A call whose arguments are not JSON: LangChain files it under invalid_tool_calls."""
+    return AIMessage(
+        content="",
+        invalid_tool_calls=[
+            {"name": name, "args": '{"findings": [{"title": "cut', "id": call_id, "error": None}
+        ],
+    )
+
+
+def test_a_call_whose_arguments_are_not_json_gets_an_answer(repo_tools: RepoTools) -> None:
+    both = AIMessage(
+        content="",
+        tool_calls=[{"name": "read_file", "args": {"path": "payments/refund.py"}, "id": "c1"}],
+        invalid_tool_calls=[{"name": "read_file", "args": '{"path": ', "id": "c2", "error": None}],
+    )
+    model = ScriptedModel(script=[both, submit()])
+
+    result = run(model, repo_tools)
+
+    # The service refuses a request with a call left unanswered (issue #96).
+    assert result.status == "done"
+    answered = {m.tool_call_id: m for m in model.sent[1] if isinstance(m, ToolMessage)}
+    assert set(answered) == {"c1", "c2"}
+    assert "not valid JSON" in str(answered["c2"].content)
+    assert result.tool_calls == 2  # counted like a call with wrong arguments
+
+
+def test_a_turn_of_only_unparsable_calls_is_not_a_text_answer(repo_tools: RepoTools) -> None:
+    model = ScriptedModel(
+        script=[unparsable("read_file"), unparsable("read_file", "bad2"), submit()]
+    )
+
+    result = run(model, repo_tools)
+
+    # Each call was answered, so the model is asked nothing more (review nit on PR #97).
+    assert result.status == "done"
+    asked = [sum(isinstance(m, HumanMessage) for m in sent) for sent in model.sent]
+    assert asked[0] == asked[2]
+    assert result.tool_calls == 2
+
+
+def test_an_unparsable_call_in_a_final_turn_is_not_run(repo_tools: RepoTools) -> None:
+    model = ScriptedModel(script=[unparsable("read_file"), submit()])
+
+    run(model, repo_tools, limit=0)
+
+    answer = model.sent[1][-1]
+    assert isinstance(answer, ToolMessage) and answer.tool_call_id == "bad1"
+    assert f"only {SUBMIT_TOOL} is available" in str(answer.content)
+
+
+def test_an_unparsable_call_without_an_id_counts_as_a_text_answer(repo_tools: RepoTools) -> None:
+    no_id = AIMessage(
+        content="",
+        invalid_tool_calls=[{"name": "read_file", "args": "{", "id": None, "error": None}],
+    )
+    model = ScriptedModel(script=[no_id, submit()])
+
+    run(model, repo_tools)
+
+    assert f"by calling {SUBMIT_TOOL}" in str(model.sent[1][-1].content)
+
+
+def test_an_unparsable_submission_is_answered_and_retried(repo_tools: RepoTools) -> None:
+    model = ScriptedModel(script=[unparsable(SUBMIT_TOOL), submit(finding(), call_id="s2")])
+
+    result = run(model, repo_tools)
+
+    assert result.status == "done" and len(result.findings) == 1
+    last = model.sent[1][-1]
+    assert isinstance(last, ToolMessage) and last.tool_call_id == "bad1"
+    assert "not valid JSON" in str(last.content)
+
+
+def test_two_unparsable_submissions_end_as_a_format_problem(repo_tools: RepoTools) -> None:
+    model = ScriptedModel(script=[unparsable(SUBMIT_TOOL), unparsable(SUBMIT_TOOL, "bad2")])
+
+    result = run(model, repo_tools)
+
+    assert result.status == "incomplete"
+    assert "not in the expected format twice" in (result.reason or "")
+    assert "not valid JSON" in (result.reason or "")
+
+
+def test_a_second_malformed_submission_says_what_was_wrong(repo_tools: RepoTools) -> None:
+    broken = call(SUBMIT_TOOL, {"findings": "none"})
+    model = ScriptedModel(script=[broken, broken])
+
+    result = run(model, repo_tools)
+
+    # Recorded in the review's steps, so a failed agent can be looked into.
+    assert "findings: Input should be a valid list" in (result.reason or "")
 
 
 def test_a_text_reply_does_not_use_up_the_format_retry(repo_tools: RepoTools) -> None:
