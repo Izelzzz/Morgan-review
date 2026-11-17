@@ -11,6 +11,9 @@ from pathlib import Path
 
 import openai
 import pytest
+from langchain_core.messages import AIMessage, AIMessageChunk
+from langchain_core.messages.tool import tool_call_chunk
+from langchain_core.outputs import ChatGenerationChunk
 from pydantic import SecretStr, ValidationError
 
 from review_agents import models
@@ -58,6 +61,8 @@ class Plan:
     gap: float = 0.0  # seconds between heartbeats and between chunks
     content: str = "no findings"
     finish: str | None = "stop"
+    # A tool call's arguments, sent in these pieces instead of the content.
+    tool_args: list[str] | None = None
 
 
 def sse(data: dict[str, object]) -> bytes:
@@ -84,6 +89,14 @@ def streamed(handler: BaseHTTPRequestHandler, model: str, plan: Plan, cached: in
     size = -(-len(plan.content) // plan.chunks) if plan.content else 1
     pieces = [plan.content[i : i + size] for i in range(0, len(plan.content), size)]
     write.write(sse(chunk(model, {"role": "assistant", "content": ""})))
+    if plan.tool_args is not None:
+        pieces = []
+        opening = {"index": 0, "id": "t1", "type": "function"}
+        opening["function"] = {"name": "submit_findings", "arguments": ""}
+        write.write(sse(chunk(model, {"tool_calls": [opening]})))
+        for args in plan.tool_args:
+            piece_call = {"index": 0, "function": {"arguments": args}}
+            write.write(sse(chunk(model, {"tool_calls": [piece_call]})))
     for piece in pieces:
         write.write(sse(chunk(model, {"content": piece})))
         write.flush()
@@ -100,20 +113,25 @@ def streamed(handler: BaseHTTPRequestHandler, model: str, plan: Plan, cached: in
     write.flush()
 
 
-def completion(model: str, cached: int = 0) -> bytes:
+def completion(model: str, cached: int = 0, plan: Plan | None = None) -> bytes:
+    message: dict[str, object] = {"role": "assistant", "content": "no findings"}
+    finish = "stop"
+    if plan is not None and plan.tool_args is not None:
+        arguments = "".join(plan.tool_args)
+        function = {"name": "submit_findings", "arguments": arguments}
+        message = {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [{"id": "t1", "type": "function", "function": function}],
+        }
+        finish = plan.finish or "stop"
     return json.dumps(
         {
             "id": "c1",
             "object": "chat.completion",
             "created": 0,
             "model": model,
-            "choices": [
-                {
-                    "index": 0,
-                    "message": {"role": "assistant", "content": "no findings"},
-                    "finish_reason": "stop",
-                }
-            ],
+            "choices": [{"index": 0, "message": message, "finish_reason": finish}],
             "usage": {
                 "prompt_tokens": 11,
                 "completion_tokens": 7,
@@ -154,8 +172,9 @@ def service() -> Iterator[FakeService]:
                         self.wfile.flush()
                         time.sleep(fake.trickle)
                 else:
+                    plan = fake.plans[min(n, len(fake.plans)) - 1]
                     self.wfile.write(
-                        completion(body["model"], fake.cached)
+                        completion(body["model"], fake.cached, plan)
                         if status == 200
                         else b'{"error": {}}'
                     )
@@ -534,3 +553,106 @@ def test_no_retry_is_sent_once_the_wasted_attempts_used_up_the_budget(
         )
 
     assert len(service.requests) == 1
+
+
+FULL = '{"title": "a", "why": "w"}'
+# Two findings' arguments, cut off between them: a partial parse still reads as one finding.
+CUT = ['{"findings": [', FULL, ", ", '{"title": "b", "wh']
+
+
+@pytest.mark.parametrize("finish", ["length", "tool_calls", "stop"])
+def test_a_streamed_call_cut_off_mid_arguments_is_not_taken_for_a_whole_one(
+    service: FakeService, finish: str
+) -> None:
+    # A service may report a cut-off call as finished (vLLM #53269): the text decides.
+    service.plans = [Plan(content="", tool_args=CUT, finish=finish)]
+
+    reply = chat_model(endpoint(service)).invoke("review")
+
+    assert isinstance(reply, AIMessage)
+    assert reply.tool_calls == []
+    [bad] = reply.invalid_tool_calls
+    assert bad["id"] == "t1" and bad["name"] == "submit_findings"
+    assert bad["args"] == "".join(CUT)
+
+
+def test_a_streamed_call_with_whole_arguments_is_kept(service: FakeService) -> None:
+    service.plans = [
+        Plan(content="", tool_args=['{"findings": [', FULL, "]}"], finish="tool_calls")
+    ]
+
+    reply = chat_model(endpoint(service)).invoke("review")
+
+    assert isinstance(reply, AIMessage)
+    assert reply.tool_calls[0]["args"] == {"findings": [{"title": "a", "why": "w"}]}
+    assert reply.invalid_tool_calls == []
+
+
+def test_a_whole_reply_cut_off_mid_arguments_is_not_taken_for_a_whole_one(
+    service: FakeService,
+) -> None:
+    service.plans = [Plan(tool_args=CUT, finish="length")]
+
+    reply = chat_model(endpoint(service, stream=False)).invoke("review")
+
+    assert isinstance(reply, AIMessage)
+    assert reply.tool_calls == []
+    assert [c["id"] for c in reply.invalid_tool_calls] == ["t1"]
+
+
+def test_the_reason_a_reply_ended_reaches_the_caller(service: FakeService) -> None:
+    service.plans = [Plan(content="", tool_args=CUT, finish="length")]
+
+    reply = chat_model(endpoint(service)).invoke("review")
+
+    assert reply.response_metadata["finish_reason"] == "length"
+
+
+def test_a_model_sends_no_output_limit_unless_one_is_set(service: FakeService) -> None:
+    chat_model(endpoint(service)).invoke("review")
+
+    assert "max_tokens" not in service.bodies[0]
+    assert "max_completion_tokens" not in service.bodies[0]
+
+
+@pytest.mark.parametrize("stream", [True, False])
+def test_an_output_limit_is_sent_as_max_tokens(service: FakeService, stream: bool) -> None:
+    # The name OpenAI-compatible services document; LangChain would send another.
+    chat_model(endpoint(service, max_output_tokens=32_000, stream=stream)).invoke("review")
+
+    assert service.bodies[0]["max_tokens"] == 32_000
+    assert "max_completion_tokens" not in service.bodies[0]
+
+
+def test_an_output_limit_below_one_token_is_refused() -> None:
+    with pytest.raises(ValidationError):
+        ModelEndpoint.model_validate(
+            {"base_url": "http://127.0.0.1/v1", "model": "m", "max_output_tokens": 0}
+        )
+
+
+def test_a_limit_given_to_the_model_another_way_is_kept() -> None:
+    model = models.ReviewChatModel.model_validate(
+        {"base_url": "http://127.0.0.1/v1", "api_key": "k", "max_tokens": 5}
+    )
+
+    assert model._get_request_payload("hi")["max_tokens"] == 5
+
+
+def test_calls_streamed_without_an_index_are_checked_one_by_one() -> None:
+    # LangChain keeps calls without an index apart; each one's own text decides.
+    def two_calls(*args: object, **kwargs: object) -> Iterator[ChatGenerationChunk]:
+        for call_id, text in (("a", '{"x": 1}'), ("b", '{"y": 2}')):
+            part = tool_call_chunk(name="read_file", args=text, id=call_id, index=None)
+            yield ChatGenerationChunk(message=AIMessageChunk(content="", tool_call_chunks=[part]))
+
+    model = models.ReviewChatModel.model_validate(
+        {"base_url": "http://127.0.0.1/v1", "api_key": "k"}
+    )
+    object.__setattr__(model, "_stream", two_calls)
+
+    reply = model.invoke("review")
+
+    assert isinstance(reply, AIMessage)
+    assert [c["id"] for c in reply.tool_calls] == ["a", "b"]
+    assert reply.invalid_tool_calls == []

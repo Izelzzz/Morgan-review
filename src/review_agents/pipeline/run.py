@@ -162,7 +162,14 @@ def _step(
         "INSERT INTO steps (review_id, node, started_at, finished_at, status, error, note)"
         " VALUES (?, ?, ?, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), ?, ?, ?)",
         # Masked: an error may quote a token or a key (issue #15).
-        (review_id, node, started, "error" if error else "ok", REDACT.optional(error), note),
+        (
+            review_id,
+            node,
+            started,
+            "error" if error else "ok",
+            REDACT.optional(error),
+            REDACT.optional(note),  # a note may quote what a model wrote
+        ),
     )
 
 
@@ -854,9 +861,11 @@ class _Work:
             assert isinstance(result, AgentRun)  # noqa: S101
             run = result
         error = None if run.status == "done" else (run.reason or "incomplete")
-        _step(
-            self.conn, self.review_id, job.node, self.starts.get(job.node, _now(self.conn)), error
-        )
+        started = self.starts.get(job.node, _now(self.conn))
+        _step(self.conn, self.review_id, job.node, started, error)
+        # Each finding the program's own checks left out, so it can be looked into (#106).
+        for number, why in enumerate(run.dropped, start=1):
+            _step(self.conn, self.review_id, f"{job.node}.dropped.{number}", started, note=why)
         return run
 
     def _publishable_unverified(self, candidate: Candidate) -> bool:

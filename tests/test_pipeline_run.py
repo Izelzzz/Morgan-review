@@ -335,6 +335,23 @@ def test_every_enabled_dimension_runs_and_its_findings_are_written(setup: Setup)
     assert steps["context.pr_layer"][0] == "ok"
 
 
+def test_a_finding_dropped_by_the_programs_checks_is_recorded_in_the_steps(
+    setup: Setup,
+) -> None:
+    review_id = setup.queue()
+    nowhere = finding("edge_cases", line_end=99)
+    model = ByDimension(scripts={"edge_cases": [submit(finding("edge_cases"), nowhere)]})
+
+    setup.run(review_id, model)
+
+    note = setup.notes(review_id)["dimension.edge_cases.dropped.1"]
+    assert (
+        note
+        == "edge_cases: refunds can exceed the paid amount: payments/refund.py has only 2 lines"
+    )
+    assert len(setup.findings(review_id)) == 1
+
+
 def test_only_the_dimensions_the_repository_enables_run(setup: Setup) -> None:
     config = "dimensions:\n  spec_drift: false\n  maintainability: false\n  verifiability: false\n"
     review_id = setup.queue(config)
@@ -1471,6 +1488,17 @@ def test_an_error_carrying_a_secret_is_stored_masked(setup: Setup) -> None:
     status, error = setup.steps(review_id)["dimension.security"]
     assert status == "error" and error is not None
     assert LEAKED not in error and "***" in error
+
+
+def test_a_secret_in_a_dropped_finding_is_stored_masked(setup: Setup) -> None:
+    review_id = setup.queue()
+    leak = finding("security", title=f"Token {LEAKED} is committed", line_end=99)
+    model = ByDimension(scripts={"security": [submit(leak)]})
+
+    setup.run(review_id, model)
+
+    note = setup.notes(review_id)["dimension.security.dropped.1"] or ""
+    assert LEAKED not in note and "***" in note
 
 
 def test_a_secret_quoted_in_a_finding_is_masked_in_the_report(setup: Setup) -> None:
