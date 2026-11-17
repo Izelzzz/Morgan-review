@@ -57,6 +57,11 @@ SUBMIT_MARGIN_SECONDS = 30.0
 # The answer to a call whose arguments are not JSON (issue #96).
 NOT_JSON_REASON = "its arguments are not valid JSON"
 NOT_JSON = f"error: {NOT_JSON_REASON}; call it again with valid JSON arguments."
+# A reply that ended at the output limit (issue #106): what it handed in may be whole as
+# far as it goes, with the rest never written. The finish reasons services use for it.
+CUT_OFF = frozenset({"length", "max_tokens", "max_output_tokens"})
+CUT_OFF_REASON = "the reply was cut off at the output limit"
+CUT_OFF_ANSWER = f"error: {CUT_OFF_REASON}; call it again with a shorter answer."
 
 SUBMIT_NOW = (
     f"Stop investigating. Call {SUBMIT_TOOL} now with the findings you have; an empty"
@@ -240,6 +245,7 @@ def tool_loop[T](
             end.reason = "the model returned no message"
             return end
         messages.append(reply)
+        cut_off = reply.response_metadata.get("finish_reason") in CUT_OFF
 
         submitted: ToolCall | None = None
         for tool_call in reply.tool_calls:
@@ -268,7 +274,7 @@ def tool_loop[T](
                 unreadable = call_id
                 answered_bad = True
                 continue
-            answer = NOT_JSON
+            answer = CUT_OFF_ANSWER if cut_off else NOT_JSON
             if bad.get("name") != submit.name:
                 end.tool_calls += 1
                 if final:  # as for a readable call: retrying the tool would not run it
@@ -288,7 +294,9 @@ def tool_loop[T](
         if submitted is None and unreadable is None:
             continue
         problems: str | None = None
-        if submitted is None:
+        if cut_off:  # not taken, however whole it reads
+            problems = CUT_OFF_REASON
+        elif submitted is None:
             problems = NOT_JSON_REASON
         else:
             try:
@@ -307,10 +315,15 @@ def tool_loop[T](
                 end.reason = f"the {submit.what} was not in the expected format twice: {problems}"
                 return end
             format_retry_used = True
+            again = (
+                f"Call {submit.name} again with a shorter {submit.what}: fewer or briefer entries."
+                if cut_off
+                else f"Call {submit.name} again with every required field."
+            )
             messages.append(
                 ToolMessage(
                     f"The {submit.what} you submitted is not in the expected format"
-                    f" ({problems}). Call {submit.name} again with every required field.",
+                    f" ({problems}). {again}",
                     tool_call_id=submitted["id"] if submitted is not None else unreadable,
                 )
             )

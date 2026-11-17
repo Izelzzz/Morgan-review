@@ -285,6 +285,16 @@ def test_a_verdict_whose_arguments_are_not_json_is_asked_again(repo_tools: RepoT
     assert any(isinstance(m, ToolMessage) and m.tool_call_id == "v0" for m in model.sent[1])
 
 
+def test_a_verdict_cut_off_at_the_output_limit_is_asked_again(repo_tools: RepoTools) -> None:
+    cut = verdict(True).model_copy(update={"response_metadata": {"finish_reason": "length"}})
+    model = ScriptedModel(script=[cut, verdict(True)])
+
+    result = verify(model, repo_tools)
+
+    assert result.status == "done"
+    assert "cut off at the output limit" in str(model.sent[1][-1].content)
+
+
 def test_a_verifier_out_of_tool_calls_must_answer(repo_tools: RepoTools) -> None:
     reads = [call("list_dir", {}, f"c{n}") for n in range(2)]
     model = ScriptedModel(script=[*reads, verdict(False)])

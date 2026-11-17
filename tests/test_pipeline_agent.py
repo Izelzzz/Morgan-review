@@ -443,6 +443,61 @@ def test_a_second_malformed_submission_says_what_was_wrong(repo_tools: RepoTools
     assert "findings: Input should be a valid list" in (result.reason or "")
 
 
+def cut_off(reply: AIMessage) -> AIMessage:
+    """The same reply, ended by the output limit."""
+    return reply.model_copy(update={"response_metadata": {"finish_reason": "length"}})
+
+
+def test_a_submission_cut_off_at_the_output_limit_is_asked_again(repo_tools: RepoTools) -> None:
+    # Whole as far as it goes: the rest of the findings were never written.
+    model = ScriptedModel(
+        script=[cut_off(submit(finding())), submit(finding(), finding(title="B"), call_id="s2")]
+    )
+
+    result = run(model, repo_tools)
+
+    assert result.status == "done" and len(result.findings) == 2
+    answer = model.sent[1][-1]
+    assert isinstance(answer, ToolMessage) and answer.tool_call_id == "s1"
+    assert "cut off at the output limit" in str(answer.content)
+
+
+def test_two_cut_off_submissions_end_the_dimension_and_say_why(repo_tools: RepoTools) -> None:
+    model = ScriptedModel(script=[cut_off(submit()), cut_off(submit(call_id="s2"))])
+
+    result = run(model, repo_tools)
+
+    assert result.status == "incomplete"
+    assert "cut off at the output limit" in (result.reason or "")
+
+
+def test_an_unreadable_call_in_a_cut_off_reply_is_told_it_was_cut_off(
+    repo_tools: RepoTools,
+) -> None:
+    model = ScriptedModel(script=[cut_off(unparsable("read_file")), submit()])
+
+    run(model, repo_tools)
+
+    answer = model.sent[1][-1]
+    assert isinstance(answer, ToolMessage) and answer.tool_call_id == "bad1"
+    assert "cut off at the output limit" in str(answer.content)
+
+
+def test_an_unreadable_submission_in_a_cut_off_reply_is_told_it_was_cut_off(
+    repo_tools: RepoTools,
+) -> None:
+    model = ScriptedModel(script=[cut_off(unparsable(SUBMIT_TOOL)), submit(call_id="s2")])
+
+    assert run(model, repo_tools).status == "done"
+    assert "cut off at the output limit" in str(model.sent[1][-1].content)
+
+
+def test_a_reply_that_ended_normally_is_kept(repo_tools: RepoTools) -> None:
+    ended = submit(finding()).model_copy(update={"response_metadata": {"finish_reason": "stop"}})
+
+    assert len(run(ScriptedModel(script=[ended]), repo_tools).findings) == 1
+
+
 def test_a_text_reply_does_not_use_up_the_format_retry(repo_tools: RepoTools) -> None:
     broken = call(SUBMIT_TOOL, {"findings": "none"})
     model = ScriptedModel(

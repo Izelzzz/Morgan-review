@@ -27,6 +27,10 @@ class ModelEndpoint(BaseModel):
     # keeps the service's own choice; otherwise requests say so as DeepSeek spells it.
     # Thinking is billed as output, so it can cost more than the reply itself.
     thinking: Literal["default", "enabled", "disabled"] = "default"
+    # The most tokens one reply may have, sent as `max_tokens` (issue #106); unset sends
+    # nothing and keeps the service's own default, which may be small: DeepSeek's is 8K
+    # without thinking. A reply cut off at it is handed in again, not taken as whole.
+    max_output_tokens: int | None = Field(default=None, ge=1)
 
 
 class Observability(BaseModel):
