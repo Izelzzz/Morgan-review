@@ -34,6 +34,12 @@ class ModelEndpoint(BaseModel):
     # How many times an answer may be handed in again after each kind of mistake: not
     # JSON or cut off, a schema not followed, a check of the program's own (issue #108).
     format_retries: int = Field(default=2, ge=0, le=5)
+    # Send every tool for the service's strict mode (`"strict": true`), which keeps the
+    # arguments in shape (issue #109). Off by default: services take different parts of
+    # JSON Schema, so only what they share is sent; answers are still checked in full.
+    # OpenAI does not hold several calls in one turn to the schema; findings come that
+    # way, so there they are checked only as before.
+    strict_tools: bool = False
 
 
 class Observability(BaseModel):

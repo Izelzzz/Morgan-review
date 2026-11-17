@@ -19,11 +19,13 @@ from langchain_core.callbacks import BaseCallbackHandler, CallbackManagerForLLMR
 from langchain_core.language_models.chat_models import generate_from_stream
 from langchain_core.messages import AIMessage, BaseMessage, InvalidToolCall
 from langchain_core.outputs import ChatGenerationChunk, ChatResult, LLMResult
+from langchain_core.utils.function_calling import convert_to_openai_tool
 from langchain_openai import ChatOpenAI
 from pydantic import Field, SecretStr
 
 from review_agents.config import ModelEndpoint
 from review_agents.db import connect
+from review_agents.strict import drop_nulls, strict_tool
 
 # Without streaming, a whole reply must arrive within this (decision D-029).
 WHOLE_REPLY_SECONDS = 120.0
@@ -146,6 +148,13 @@ class ReviewChatModel(ChatOpenAI):
     rng: random.Random = Field(default_factory=random.Random)
     # The most tokens a reply may have; None sends no limit and keeps the service's own.
     output_limit: int | None = None
+    # Tools sent for the service's strict mode, in the subset strict modes share (#109).
+    strict_tools: bool = False
+
+    def bind_tools(self, tools: Any, **kwargs: Any) -> Any:
+        if self.strict_tools:
+            tools = [strict_tool(convert_to_openai_tool(t)) for t in tools]
+        return super().bind_tools(tools, **kwargs)
 
     def _generate(
         self,
@@ -161,6 +170,8 @@ class ReviewChatModel(ChatOpenAI):
                     lambda cancelled: self._attempt(messages, stop, run_manager, cancelled, kwargs)
                 )
                 _check_not_empty(result)
+                if self.strict_tools:
+                    _left_out_as_null(result)
                 return result
             except DeadlinePassedError:
                 raise
@@ -271,6 +282,15 @@ class ReviewChatModel(ChatOpenAI):
         return result
 
 
+def _left_out_as_null(result: ChatResult) -> None:
+    """In strict mode a field the model leaves out comes as null: read it as left out, so
+    the full schema checks the answer as written (#109)."""
+    for generation in result.generations:
+        message = getattr(generation, "message", None)
+        if isinstance(message, AIMessage):
+            message.tool_calls = [{**c, "args": drop_nulls(c["args"])} for c in message.tool_calls]
+
+
 def _keep_only_whole_calls(message: AIMessage, sent: dict[str, str], order: list[str]) -> None:
     """Move a streamed call whose arguments, as sent, are not JSON to the invalid calls.
 
@@ -377,6 +397,7 @@ def chat_model(
         stream_usage=True,
         stream_replies=endpoint.stream,
         output_limit=endpoint.max_output_tokens,
+        strict_tools=endpoint.strict_tools,
         extra_body=None
         if endpoint.thinking == "default"
         else {"thinking": {"type": endpoint.thinking}},
