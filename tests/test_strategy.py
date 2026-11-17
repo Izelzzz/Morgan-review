@@ -7,11 +7,11 @@ import pytest
 import test_walkthrough as walkthrough_tests
 from gitrepo import Upstream
 from langchain_core.messages import AIMessage, ToolMessage
-from scripted import ScriptedModel, call
+from scripted import ScriptedModel, call, hand_in
 
 from review_agents.context.pack import DIMENSIONS, GENERAL, SKILLS, task
 from review_agents.mirror import MirrorStore
-from review_agents.pipeline.agent import SUBMIT_TOOL, run_dimension
+from review_agents.pipeline.agent import run_dimension
 from review_agents.pipeline.conversation import ConversationLimits, conversation_tokens
 from review_agents.pipeline.run import plan_jobs
 from review_agents.pipeline.strategy import Author, plan
@@ -92,10 +92,7 @@ def general_finding(dimension: str) -> dict[str, Any]:
 
 
 def test_a_general_agent_s_findings_keep_the_dimension_it_tagged(tools: RepoTools) -> None:
-    reply = call(
-        SUBMIT_TOOL,
-        {"findings": [general_finding("security"), general_finding("spec_drift")]},
-    )
+    reply = hand_in(general_finding("security"), general_finding("spec_drift"))
     model = ScriptedModel(script=[reply])
 
     run = run_dimension(
@@ -114,7 +111,7 @@ def test_a_general_agent_s_findings_keep_the_dimension_it_tagged(tools: RepoTool
 
 
 def test_a_dimension_agent_s_findings_take_its_own_dimension(tools: RepoTools) -> None:
-    model = ScriptedModel(script=[call(SUBMIT_TOOL, {"findings": [general_finding("x")]})])
+    model = ScriptedModel(script=[hand_in(general_finding("x"))])
 
     run = run_dimension(
         lambda left: model,
@@ -143,7 +140,7 @@ def test_an_agent_can_carry_on_from_the_walkthrough_s_conversation(tools: RepoTo
     last = written.transcript[-1]
     assert isinstance(last, ToolMessage) and last.tool_call_id == "w1"  # its call answered
 
-    finder = ScriptedModel(script=[call(SUBMIT_TOOL, {"findings": []}, "f1")])
+    finder = ScriptedModel(script=[hand_in(call_id="f1")])
     run = run_dimension(
         lambda left: finder,
         walkthrough_tests.pack(),
@@ -193,7 +190,7 @@ def test_what_the_walkthrough_read_can_be_cut_when_the_agent_runs_short(
     )
     # Deep mode: several runs carry on from the same walkthrough, each cutting its own.
     for _ in range(2):
-        finder = ScriptedModel(script=[call(SUBMIT_TOOL, {"findings": []}, "f1")])
+        finder = ScriptedModel(script=[hand_in(call_id="f1")])
 
         def model_for(left: float, finder: ScriptedModel = finder) -> ScriptedModel:
             return finder

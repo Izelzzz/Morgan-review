@@ -316,3 +316,12 @@ def test_a_reference_that_cannot_be_checked_is_not_published(
 
     assert result.status == "incomplete" and result.walkthrough is None
     assert "timed out" in (result.reason or "")
+
+
+def test_a_misspelt_walkthrough_field_is_named_with_the_one_meant(repo_tools: RepoTools) -> None:
+    wrong = answer()
+    wrong["sumary"] = wrong.pop("summary")
+    model = ScriptedModel(script=[call(WALKTHROUGH_TOOL, wrong), call(WALKTHROUGH_TOOL, answer())])
+
+    assert run(model, repo_tools).status == "done"
+    assert "`sumary` is not a field; did you mean `summary`?" in str(model.sent[1][-1].content)

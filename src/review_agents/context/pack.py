@@ -50,6 +50,14 @@ def language_note(language: Language) -> str:
     )
 
 
+# How findings are handed in; the tool names are the dimension agent's (pipeline/agent.py).
+HAND_IN = (
+    "Hand in each finding with its own `add_finding` call; several in one turn are fine,"
+    " and one that does not check out is refused alone, with why. Once every finding is"
+    " in, call `submit_findings` with how many you handed in."
+)
+
+
 def task(dimension: str, dimensions: tuple[str, ...] | None = None) -> str:
     """The agent's own task: one dimension's rules, or several for a general agent."""
     held = dimensions or (dimension,)
@@ -61,13 +69,14 @@ def task(dimension: str, dimensions: tuple[str, ...] | None = None) -> str:
             " code with your tools wherever the context is not enough. Report each problem"
             " once, and set its `dimension` field to the one dimension above it belongs to"
             " most. Report findings in the output format of the shared rules."
+            f" {HAND_IN}"
         )
     dimension = held[0]
     return (
         f"{SKILLS[dimension]}\n\n"
         f"Review the pull request above for the {dimension} dimension only. Read more code"
         " with your tools wherever the context is not enough. Report findings in the output"
-        " format of the shared rules."
+        f" format of the shared rules. {HAND_IN}"
     )
 
 

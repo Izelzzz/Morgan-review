@@ -226,7 +226,9 @@ class ReviewChatModel(ChatOpenAI):
         message = result.generations[0].message if result.generations else None
         if isinstance(message, AIMessage):
             _keep_only_whole_calls(
-                message, {ids[i]: text for i, text in arguments.items() if i in ids}
+                message,
+                {ids[i]: text for i, text in arguments.items() if i in ids},
+                list(arguments.values()),
             )
         # The usage record names the model; a whole reply carries it in llm_output.
         reported = message.response_metadata.get("model_name") if message else None
@@ -269,17 +271,22 @@ class ReviewChatModel(ChatOpenAI):
         return result
 
 
-def _keep_only_whole_calls(message: AIMessage, sent: dict[str, str]) -> None:
+def _keep_only_whole_calls(message: AIMessage, sent: dict[str, str], order: list[str]) -> None:
     """Move a streamed call whose arguments, as sent, are not JSON to the invalid calls.
 
     LangChain reads streamed arguments as partial JSON: it closes what is open and drops
     what does not parse, so arguments cut off at the output limit read as a whole call,
     shorter. The text as sent decides, whatever reason the service gave for ending
-    (issue #106): some report a cut-off call as finished.
+    (issue #106): some report a cut-off call as finished. A call sent without an id is
+    matched to its text by its place, when every call was read: LangChain keeps them in
+    the order they came (review nit on PR #107).
     """
+    by_place = not message.invalid_tool_calls and len(order) == len(message.tool_calls)
     kept = []
-    for tool_call in message.tool_calls:
+    for place, tool_call in enumerate(message.tool_calls):
         text = sent.get(tool_call["id"] or "")
+        if text is None and by_place:
+            text = order[place]
         if text is None or not text.strip():
             kept.append(tool_call)
             continue

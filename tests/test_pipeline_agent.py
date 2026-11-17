@@ -6,7 +6,7 @@ from typing import Any
 import pytest
 from gitrepo import Upstream
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, ToolMessage
-from scripted import ScriptedModel, call
+from scripted import ScriptedModel, add, call, done, hand_in
 
 from review_agents.context.pack import SHARED_RULES, ContextPack
 from review_agents.context.pr_layer import PrLayer, PrRequest
@@ -14,7 +14,14 @@ from review_agents.context.repo_layer import RepoLayer
 from review_agents.context.tokens import estimate_tokens
 from review_agents.mirror import MirrorStore
 from review_agents.models import BudgetExceededError
-from review_agents.pipeline.agent import SUBMIT_TOOL, AgentRun, run_dimension
+from review_agents.pipeline.agent import (
+    ADD_TOOL,
+    FORMAT_RETRIES,
+    SUBMIT_TOOL,
+    AgentRun,
+    run_dimension,
+    turns_after_tools,
+)
 from review_agents.pipeline.conversation import (
     REMOVED,
     REPEATED,
@@ -57,7 +64,7 @@ def finding(**changes: Any) -> dict[str, Any]:
 
 
 def submit(*findings: dict[str, Any], call_id: str = "s1") -> AIMessage:
-    return call(SUBMIT_TOOL, {"findings": list(findings)}, call_id)
+    return hand_in(*findings, call_id=call_id)
 
 
 @pytest.fixture
@@ -144,8 +151,10 @@ def test_once_the_tool_budget_is_spent_only_submitting_remains(repo_tools: RepoT
     result = run(model, repo_tools, limit=2)
 
     assert result.status == "done"
-    assert model.bound[-1] == [SUBMIT_TOOL]  # the last turn could not call a tool
-    assert "only submit" in str(model.sent[3][-1].content)  # the third call was not run
+    assert model.bound[-1] == [ADD_TOOL, SUBMIT_TOOL]  # the last turn could not call a tool
+    assert f"only {ADD_TOOL} and {SUBMIT_TOOL} can be called" in str(
+        model.sent[3][-1].content
+    )  # the third call was not run
     assert result.tool_calls == 3
 
 
@@ -157,7 +166,8 @@ def test_the_loop_ends_even_if_the_model_never_submits(repo_tools: RepoTools) ->
 
     assert result.status == "incomplete"
     assert "did not submit" in (result.reason or "")
-    assert len(model.sent) <= 2 + 3  # the tool limit, the submit turn and two retries
+    # The tool limit, the submit turn, a text retry and the retries of each kind of mistake.
+    assert len(model.sent) <= 2 + turns_after_tools(FORMAT_RETRIES)
 
 
 def test_findings_that_point_nowhere_are_dropped_with_a_reason(repo_tools: RepoTools) -> None:
@@ -167,7 +177,8 @@ def test_findings_that_point_nowhere_are_dropped_with_a_reason(repo_tools: RepoT
                 finding(),
                 finding(title="Missing file", file="payments/gone.py"),
                 finding(title="Past the end", line_start=2, line_end=99),
-            )
+            ),
+            done(1),
         ]
     )
 
@@ -189,16 +200,16 @@ def test_an_unreadable_submission_gets_one_retry(repo_tools: RepoTools) -> None:
     assert "not in the expected format" in str(model.sent[1][-1].content)
 
 
-def test_a_second_unreadable_submission_leaves_the_dimension_incomplete(
+def test_an_unreadable_submission_is_asked_again_up_to_its_retries(
     repo_tools: RepoTools,
 ) -> None:
-    broken = call(SUBMIT_TOOL, {"findings": "none"})
-    model = ScriptedModel(script=[broken, broken])
+    broken = call(SUBMIT_TOOL, {"count": "none"})
+    model = ScriptedModel(script=[broken] * (FORMAT_RETRIES + 1))
 
     result = run(model, repo_tools)
 
     assert result.status == "incomplete"
-    assert "format" in (result.reason or "")
+    assert f"not in the expected format {FORMAT_RETRIES + 1} times" in (result.reason or "")
 
 
 def test_a_failing_model_ends_only_this_dimension(repo_tools: RepoTools) -> None:
@@ -228,7 +239,7 @@ def test_near_the_deadline_the_agent_must_submit(repo_tools: RepoTools) -> None:
     result = run(model, repo_tools, now=lambda: next(times), deadline=110.0)
 
     assert result.status == "done"
-    assert model.bound[-1] == [SUBMIT_TOOL]
+    assert model.bound[-1] == [ADD_TOOL, SUBMIT_TOOL]
 
 
 def test_past_the_deadline_no_model_call_is_made(repo_tools: RepoTools) -> None:
@@ -297,7 +308,7 @@ def test_on_the_final_turn_tools_that_were_not_offered_are_not_run(
     result = run(model, repo_tools, now=lambda: 0.0, deadline=20.0)
 
     assert ran == []
-    assert "only submit" in str(model.sent[1][-1].content)
+    assert f"only {ADD_TOOL} and {SUBMIT_TOOL} can be called" in str(model.sent[1][-1].content)
     assert result.status == "done"
 
 
@@ -320,7 +331,8 @@ def test_a_finding_without_its_consequence_or_fix_is_dropped(repo_tools: RepoToo
         script=[
             submit(
                 finding(), finding(title="No why", why=" "), finding(title="No fix", suggestion="")
-            )
+            ),
+            done(1),
         ]
     )
 
@@ -397,7 +409,7 @@ def test_an_unparsable_call_in_a_final_turn_is_not_run(repo_tools: RepoTools) ->
 
     answer = model.sent[1][-1]
     assert isinstance(answer, ToolMessage) and answer.tool_call_id == "bad1"
-    assert f"only {SUBMIT_TOOL} is available" in str(answer.content)
+    assert f"only {ADD_TOOL} and {SUBMIT_TOOL} can be called" in str(answer.content)
 
 
 def test_an_unparsable_call_without_an_id_counts_as_a_text_answer(repo_tools: RepoTools) -> None:
@@ -424,23 +436,24 @@ def test_an_unparsable_submission_is_answered_and_retried(repo_tools: RepoTools)
 
 
 def test_two_unparsable_submissions_end_as_a_format_problem(repo_tools: RepoTools) -> None:
-    model = ScriptedModel(script=[unparsable(SUBMIT_TOOL), unparsable(SUBMIT_TOOL, "bad2")])
+    bad = [unparsable(SUBMIT_TOOL, f"bad{n}") for n in range(FORMAT_RETRIES + 1)]
+    model = ScriptedModel(script=bad)
 
     result = run(model, repo_tools)
 
     assert result.status == "incomplete"
-    assert "not in the expected format twice" in (result.reason or "")
+    assert f"not in the expected format {FORMAT_RETRIES + 1} times" in (result.reason or "")
     assert "not valid JSON" in (result.reason or "")
 
 
 def test_a_second_malformed_submission_says_what_was_wrong(repo_tools: RepoTools) -> None:
-    broken = call(SUBMIT_TOOL, {"findings": "none"})
-    model = ScriptedModel(script=[broken, broken])
+    broken = call(SUBMIT_TOOL, {"count": "none"})
+    model = ScriptedModel(script=[broken] * (FORMAT_RETRIES + 1))
 
     result = run(model, repo_tools)
 
     # Recorded in the review's steps, so a failed agent can be looked into.
-    assert "findings: Input should be a valid list" in (result.reason or "")
+    assert "count: Input should be a valid integer" in (result.reason or "")
 
 
 def cut_off(reply: AIMessage) -> AIMessage:
@@ -450,9 +463,8 @@ def cut_off(reply: AIMessage) -> AIMessage:
 
 def test_a_submission_cut_off_at_the_output_limit_is_asked_again(repo_tools: RepoTools) -> None:
     # Whole as far as it goes: the rest of the findings were never written.
-    model = ScriptedModel(
-        script=[cut_off(submit(finding())), submit(finding(), finding(title="B"), call_id="s2")]
-    )
+    # The finding added in that turn was sent whole; only finishing is not taken.
+    model = ScriptedModel(script=[cut_off(submit(finding())), hand_in(finding(title="B"), count=2)])
 
     result = run(model, repo_tools)
 
@@ -463,7 +475,9 @@ def test_a_submission_cut_off_at_the_output_limit_is_asked_again(repo_tools: Rep
 
 
 def test_two_cut_off_submissions_end_the_dimension_and_say_why(repo_tools: RepoTools) -> None:
-    model = ScriptedModel(script=[cut_off(submit()), cut_off(submit(call_id="s2"))])
+    model = ScriptedModel(
+        script=[cut_off(submit(call_id=f"s{n}")) for n in range(FORMAT_RETRIES + 1)]
+    )
 
     result = run(model, repo_tools)
 
@@ -527,7 +541,10 @@ def test_a_path_is_stored_the_way_the_repository_spells_it(
 
 
 def test_a_path_outside_the_repository_is_dropped(repo_tools: RepoTools) -> None:
-    result = run(ScriptedModel(script=[submit(finding(file="../payments/refund.py"))]), repo_tools)
+    outside = finding(file="../payments/refund.py")
+    model = ScriptedModel(script=[submit(outside), done(0)])
+
+    result = run(model, repo_tools)
 
     assert result.findings == []
     assert "inside the repository" in " ".join(result.dropped)
@@ -540,7 +557,7 @@ def test_calling_a_tool_that_does_not_exist_uses_the_budget(repo_tools: RepoTool
     result = run(model, repo_tools, limit=2)
 
     assert result.status == "done"
-    assert model.bound[-1] == [SUBMIT_TOOL]  # the budget ran out, so only submit remained
+    assert model.bound[-1] == [ADD_TOOL, SUBMIT_TOOL]  # the budget ran out, so only submit remained
 
 
 def test_a_submission_forced_by_the_deadline_says_so(repo_tools: RepoTools) -> None:
@@ -872,3 +889,109 @@ def test_a_model_cannot_mark_its_own_basis_as_checked(repo_tools: RepoTools) -> 
 
     [kept] = result.findings
     assert kept.basis[0].check is not None and kept.basis[0].check.status == "failed"
+
+
+def test_one_bad_finding_is_refused_alone_and_the_others_are_kept(repo_tools: RepoTools) -> None:
+    bad = finding(title="Bad level", severity="huge")
+    model = ScriptedModel(
+        script=[
+            hand_in(finding(), bad, finding(title="Third")),
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {"name": ADD_TOOL, "args": finding(title="Bad level"), "id": "a2"},
+                    {"name": SUBMIT_TOOL, "args": {"count": 3}, "id": "d2"},
+                ],
+            ),
+        ]
+    )
+
+    result = run(model, repo_tools)
+
+    assert result.status == "done"
+    titles = [f.title for f in result.findings]
+    assert titles == ["A refund can exceed the paid amount", "Third", "Bad level"]
+    told = {m.tool_call_id: str(m.content) for m in model.sent[1] if isinstance(m, ToolMessage)}
+    assert told["s1.2"].startswith("Not added (severity:")
+    assert told["s1.1"] == "Added (1 so far)." and told["s1.3"] == "Added (2 so far)."
+    assert "you said 3, and 2 were added" in told["s1"] and "Bad level" in told["s1"]
+
+
+def test_a_finding_refused_too_often_is_left_out_and_the_others_kept(
+    repo_tools: RepoTools,
+) -> None:
+    bad = finding(title="Nowhere", line_end=99)
+    tries = [add(bad, f"a{n}") for n in range(FORMAT_RETRIES)]
+    model = ScriptedModel(script=[hand_in(finding(), bad), *tries, done(1)])
+
+    result = run(model, repo_tools)
+
+    assert result.status == "done" and len(result.findings) == 1
+    assert result.dropped == ["Nowhere: payments/refund.py has only 3 lines"]
+    last = model.sent[-1][-1]
+    assert isinstance(last, ToolMessage)
+    assert str(last.content).startswith(f"Left out after {FORMAT_RETRIES + 1} tries")
+
+
+def test_a_misspelt_field_is_named_with_the_one_meant(repo_tools: RepoTools) -> None:
+    misspelt = finding()
+    misspelt["suggestions"] = misspelt.pop("suggestion")
+    model = ScriptedModel(script=[add(misspelt), hand_in(finding())])
+
+    result = run(model, repo_tools)
+
+    assert result.status == "done" and len(result.findings) == 1
+    told = str(model.sent[1][-1].content)
+    assert "`suggestions` is not a field; did you mean `suggestion`?" in told
+
+
+def test_finishing_with_the_wrong_count_is_asked_once(repo_tools: RepoTools) -> None:
+    model = ScriptedModel(script=[hand_in(finding(), count=2), done(2)])
+
+    result = run(model, repo_tools)
+
+    assert result.status == "done" and len(result.findings) == 1
+    assert "you said 2, and 1 were added" in str(model.sent[1][-1].content)
+    assert result.dropped == ["(count): said 2, 1 were added"]
+
+
+def test_forty_five_findings_handed_in_one_a_turn_all_fit(repo_tools: RepoTools) -> None:
+    adds = [add(finding(title=f"Finding {n}"), f"a{n}") for n in range(45)]
+    model = ScriptedModel(script=[call("list_dir", {}), *adds, done(45)])
+
+    result = run(model, repo_tools, limit=2)
+
+    assert result.status == "done" and len(result.findings) == 45
+
+
+def test_with_the_tools_used_up_findings_can_still_be_handed_in(repo_tools: RepoTools) -> None:
+    model = ScriptedModel(script=[call("list_dir", {}), add(finding()), done(1)])
+
+    result = run(model, repo_tools, limit=1)
+
+    assert result.status == "done" and len(result.findings) == 1
+    assert model.bound[1:] == [[ADD_TOOL, SUBMIT_TOOL]] * 2
+
+
+def test_no_retries_ends_at_the_first_malformed_answer(repo_tools: RepoTools) -> None:
+    model = ScriptedModel(script=[call(SUBMIT_TOOL, {"count": "none"})])
+
+    result = run_dimension(
+        lambda timeout: model,
+        pack(),
+        "edge_cases",
+        repo_tools,
+        tool_calls=5,
+        callbacks=[],
+        clock=lambda: 0.0,
+        retries=0,
+    )
+
+    assert result.status == "incomplete"
+    assert "not in the expected format 1 times" in (result.reason or "")
+
+
+def test_the_task_says_how_findings_are_handed_in() -> None:
+    task = str(pack().messages("edge_cases")[-1].content)
+
+    assert f"`{ADD_TOOL}`" in task and f"`{SUBMIT_TOOL}`" in task
