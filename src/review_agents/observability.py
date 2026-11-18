@@ -82,7 +82,7 @@ def setup(
     from openinference.instrumentation.langchain import LangChainInstrumentor
     from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
     from opentelemetry.sdk.resources import Resource
-    from opentelemetry.sdk.trace import TracerProvider
+    from opentelemetry.sdk.trace import SpanLimits, TracerProvider
     from opentelemetry.sdk.trace.export import BatchSpanProcessor, SimpleSpanProcessor
 
     full = settings.content == "full"
@@ -90,7 +90,18 @@ def setup(
         headers = {k: v.get_secret_value() for k, v in settings.headers.items()}
         exporter = OTLPSpanExporter(endpoint=traces_endpoint(settings), headers=headers)
     private = cast("SpanExporter", _Private(exporter, full=full))  # an exporter by its methods
-    provider = TracerProvider(resource=Resource.create({"service.name": SERVICE}))
+    # In `full` a model call's span holds its conversation, several attributes per message
+    # (`llm.input_messages.N.*`), and the SDK's default of 128 per span or event dropped a
+    # long one's earliest messages: no count limit there (UNSET, not an env var).
+    # `metadata` keeps only a few attributes, under the SDK's defaults.
+    limits = (
+        SpanLimits(max_span_attributes=SpanLimits.UNSET, max_event_attributes=SpanLimits.UNSET)
+        if full
+        else SpanLimits()
+    )
+    provider = TracerProvider(
+        resource=Resource.create({"service.name": SERVICE}), span_limits=limits
+    )
     provider.add_span_processor(
         BatchSpanProcessor(private, max_export_batch_size=EXPORT_BATCH)
         if batch

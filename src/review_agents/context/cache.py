@@ -47,7 +47,7 @@ def repo_layer_for_review(
     review's steps show whether it reused another review's work.
     """
     started = _now(conn)
-    with obs.span("context.repo_layer"):
+    with obs.span("context.repo_layer") as current:
         try:
             with repo_lock(repo):
                 layer = build_repo_layer(
@@ -65,7 +65,9 @@ def repo_layer_for_review(
         except Exception as exc:
             _step(conn, review_id, "context.repo_layer", started, f"{type(exc).__name__}: {exc}")
             raise
-    node = "context.repo_layer.cache_hit" if layer.cache_hit else "context.repo_layer"
+        # Named like its step; whether the layer was cached is known only once it is built.
+        node = "context.repo_layer.cache_hit" if layer.cache_hit else "context.repo_layer"
+        current.update_name(node)
     _step(conn, review_id, node, started, None)
     return layer
 
