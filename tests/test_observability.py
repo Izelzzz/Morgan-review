@@ -8,9 +8,12 @@ from typing import Any
 
 import pytest
 from gitrepo import git
+from langchain_core.language_models.fake_chat_models import FakeListChatModel
+from langchain_core.messages import HumanMessage
 from opentelemetry.sdk.trace import ReadableSpan
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 from scripted import call
+from test_context_cache import Setup as CacheSetup
 from test_pipeline_run import ByDimension, Setup, finding, submit
 
 from review_agents import observability
@@ -149,6 +152,41 @@ def test_a_metadata_trace_holds_no_code_prompt_or_model_output(tmp_path: Any, tr
     assert {"review", "dimension.edge_cases", "read_file"} <= set(by_name(spans))
     llm = [s for s in spans if (s.attributes or {}).get("openinference.span.kind") == "LLM"]
     assert llm
+
+
+def test_a_full_trace_keeps_every_message_of_a_long_conversation(
+    traced: Any, caplog: pytest.LogCaptureFixture
+) -> None:
+    # Each message is several attributes; the SDK's default of 128 per span dropped the
+    # earliest ones (issue #112).
+    exporter = traced("full")
+    messages = [HumanMessage(f"message {i}") for i in range(200)]
+
+    FakeListChatModel(responses=["done"]).invoke(messages)
+
+    [llm] = [
+        s
+        for s in exporter.get_finished_spans()
+        if (s.attributes or {}).get("openinference.span.kind") == "LLM"
+    ]
+    attributes = llm.attributes or {}
+    assert attributes["llm.input_messages.0.message.content"] == "message 0"
+    assert attributes["llm.input_messages.199.message.content"] == "message 199"
+    assert "Attributes dict is full" not in caplog.text
+
+
+def test_a_cache_hit_span_is_named_like_its_step(tmp_path: Any, traced: Any) -> None:
+    exporter = traced("metadata")
+    cache = CacheSetup(tmp_path)
+    first, second = cache.review(), cache.review()
+
+    cache.build(first)
+    cache.build(second)
+
+    names = [s.name for s in exporter.get_finished_spans()]
+    assert names.count("context.repo_layer") == 1
+    assert names.count("context.repo_layer.cache_hit") == 1
+    assert cache.steps(second) == ["context.repo_layer.cache_hit:ok"]
 
 
 def test_a_secret_in_the_reviewed_code_is_masked_in_a_full_trace(
@@ -302,3 +340,19 @@ def test_a_failed_write_is_recorded_as_the_failed_step(
 
     assert setup.steps(review_id)["write"] == ("error", "OSError: disk full")
     assert setup.findings(review_id) == []  # rolled back, the step written after
+
+
+def test_a_full_span_is_capped_and_the_cap_can_be_set(
+    traced: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A cap keeps a span within an endpoint's request size; an operator may lower it.
+    monkeypatch.setenv("OTEL_SPAN_ATTRIBUTE_COUNT_LIMIT", "10")
+    exporter = traced("full")
+
+    with observability.span("read_file") as current:
+        for i in range(50):
+            current.set_attribute(f"input.value.{i}", "x")
+
+    [span] = exporter.get_finished_spans()
+    assert len(span.attributes or {}) == 10
+    assert observability.FULL_ATTRIBUTES > 128

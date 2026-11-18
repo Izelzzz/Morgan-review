@@ -1273,6 +1273,8 @@ def test_walkthrough_first_does_not_wait_for_a_slow_walkthrough_until_nothing_is
     [written] = setup.findings(review_id)
     assert written["primary_dimension"] == "security"
     assert setup.steps(review_id)["dimension.general"] == ("ok", None)
+    [sent] = model.sent
+    assert not any(WALKTHROUGH_TASK in str(m.content) for m in sent)  # a fresh opening
 
 
 # --- every writer failing (issue #91) --------------------------------------------
