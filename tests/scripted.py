@@ -41,3 +41,27 @@ class ScriptedModel(BaseChatModel):
 
 def call(name: str, args: dict[str, Any], call_id: str = "c1") -> AIMessage:
     return AIMessage(content="", tool_calls=[{"name": name, "args": args, "id": call_id}])
+
+
+def hand_in(*findings: dict[str, Any], call_id: str = "s1", count: int | None = None) -> AIMessage:
+    """One turn handing in each finding with its own call, then saying how many."""
+    calls: list[dict[str, Any]] = [
+        {"name": "add_finding", "args": f, "id": f"{call_id}.{n}"}
+        for n, f in enumerate(findings, start=1)
+    ]
+    calls.append(
+        {
+            "name": "submit_findings",
+            "args": {"count": len(findings) if count is None else count},
+            "id": call_id,
+        }
+    )
+    return AIMessage(content="", tool_calls=calls)
+
+
+def done(count: int, call_id: str = "d1") -> AIMessage:
+    return call("submit_findings", {"count": count}, call_id)
+
+
+def add(finding: dict[str, Any], call_id: str = "a1") -> AIMessage:
+    return call("add_finding", finding, call_id)

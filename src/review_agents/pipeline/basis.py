@@ -14,7 +14,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Literal, Self
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from pydantic.json_schema import SkipJsonSchema
 
 from review_agents.tools import ToolError, ToolTimeoutError, clean_path
@@ -34,6 +34,8 @@ _LINES = re.compile(r"^(.+?):(\d+)(?:-(\d+))?$")
 
 class Place(BaseModel):
     """Lines of the reviewed commit and what they show."""
+
+    model_config = ConfigDict(extra="forbid")  # a misspelt field is said, not dropped
 
     file: str = Field(min_length=1)
     line_start: int = Field(ge=1)
@@ -57,6 +59,8 @@ class Check(BaseModel):
 
 
 class Basis(BaseModel):
+    model_config = ConfigDict(extra="forbid")  # a misspelt field is said, not dropped
+
     kind: Kind = Field(
         description="spec, contract or convention for a written rule broken; path for a"
         " failure traced from a caller or input."

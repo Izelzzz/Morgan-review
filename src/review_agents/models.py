@@ -1,6 +1,7 @@
 """Model access: OpenAI-compatible chat models, usage records and the token budget."""
 
 import email.utils
+import json
 import math
 import random
 import threading
@@ -16,13 +17,15 @@ import httpx2
 import openai
 from langchain_core.callbacks import BaseCallbackHandler, CallbackManagerForLLMRun
 from langchain_core.language_models.chat_models import generate_from_stream
-from langchain_core.messages import AIMessage, BaseMessage
+from langchain_core.messages import AIMessage, BaseMessage, InvalidToolCall
 from langchain_core.outputs import ChatGenerationChunk, ChatResult, LLMResult
+from langchain_core.utils.function_calling import convert_to_openai_tool
 from langchain_openai import ChatOpenAI
 from pydantic import Field, SecretStr
 
 from review_agents.config import ModelEndpoint
 from review_agents.db import connect
+from review_agents.strict import drop_nulls, strict_tool
 
 # Without streaming, a whole reply must arrive within this (decision D-029).
 WHOLE_REPLY_SECONDS = 120.0
@@ -106,7 +109,12 @@ def retry_wait(error: BaseException, retry: int, rng: random.Random) -> float | 
 def _check_not_empty(result: ChatResult) -> None:
     for generation in result.generations:
         message = getattr(generation, "message", None)
-        if isinstance(message, AIMessage) and not message.content and not message.tool_calls:
+        if (
+            isinstance(message, AIMessage)
+            and not message.content
+            and not message.tool_calls
+            and not message.invalid_tool_calls  # a call came, if not a readable one
+        ):
             # A streamed reply carries it in the generation, a whole one in the message.
             finish = (generation.generation_info or {}).get(
                 "finish_reason"
@@ -138,6 +146,15 @@ class ReviewChatModel(ChatOpenAI):
     sleep_for: Callable[[float], None] = time.sleep
     clock: Callable[[], float] = time.monotonic
     rng: random.Random = Field(default_factory=random.Random)
+    # The most tokens a reply may have; None sends no limit and keeps the service's own.
+    output_limit: int | None = None
+    # Tools sent for the service's strict mode, in the subset strict modes share (#109).
+    strict_tools: bool = False
+
+    def bind_tools(self, tools: Any, **kwargs: Any) -> Any:
+        if self.strict_tools:
+            tools = [strict_tool(convert_to_openai_tool(t)) for t in tools]
+        return super().bind_tools(tools, **kwargs)
 
     def _generate(
         self,
@@ -153,6 +170,8 @@ class ReviewChatModel(ChatOpenAI):
                     lambda cancelled: self._attempt(messages, stop, run_manager, cancelled, kwargs)
                 )
                 _check_not_empty(result)
+                if self.strict_tools:
+                    _left_out_as_null(result)
                 return result
             except DeadlinePassedError:
                 raise
@@ -169,6 +188,18 @@ class ReviewChatModel(ChatOpenAI):
             retry += 1
             self.sleep_for(wait)
 
+    def _get_request_payload(
+        self, input_: Any, *, stop: list[str] | None = None, **kwargs: Any
+    ) -> dict[str, Any]:
+        payload: dict[str, Any] = super()._get_request_payload(input_, stop=stop, **kwargs)
+        # LangChain names the limit `max_completion_tokens`; OpenAI-compatible services
+        # document `max_tokens`, which OpenAI still takes for its chat models.
+        given = payload.pop("max_completion_tokens", None) or payload.pop("max_tokens", None)
+        limit = self.output_limit if self.output_limit is not None else given
+        if limit is not None:
+            payload["max_tokens"] = limit
+        return payload
+
     def _attempt(
         self,
         messages: list[BaseMessage],
@@ -180,12 +211,22 @@ class ReviewChatModel(ChatOpenAI):
         if not self.stream_replies:
             return super()._generate(messages, stop=stop, run_manager=run_manager, **kwargs)
         stream = self._stream(messages, stop=stop, run_manager=run_manager, **kwargs)
+        # Each tool call's arguments as sent, joined as LangChain joins them: by index,
+        # while a piece without an index is a call of its own.
+        arguments: dict[object, str] = {}
+        ids: dict[object, str] = {}
 
         def until_cancelled() -> Iterator[ChatGenerationChunk]:
             try:
                 for piece in stream:
                     if cancelled.is_set():
                         return  # given up: stop reading, which closes the connection
+                    for part in getattr(piece.message, "tool_call_chunks", None) or []:
+                        index = part.get("index")
+                        key: object = index if index is not None else object()
+                        arguments[key] = arguments.get(key, "") + (part.get("args") or "")
+                        if part.get("id"):
+                            ids.setdefault(key, part["id"])
                     yield piece
             finally:
                 close = getattr(stream, "close", None)  # a generator: closing ends the request
@@ -194,6 +235,12 @@ class ReviewChatModel(ChatOpenAI):
 
         result = generate_from_stream(until_cancelled())
         message = result.generations[0].message if result.generations else None
+        if isinstance(message, AIMessage):
+            _keep_only_whole_calls(
+                message,
+                {ids[i]: text for i, text in arguments.items() if i in ids},
+                list(arguments.values()),
+            )
         # The usage record names the model; a whole reply carries it in llm_output.
         reported = message.response_metadata.get("model_name") if message else None
         result.llm_output = {"model_name": reported or self.model_name}
@@ -233,6 +280,51 @@ class ReviewChatModel(ChatOpenAI):
             raise outcome["error"]
         result: ChatResult = outcome["result"]
         return result
+
+
+def _left_out_as_null(result: ChatResult) -> None:
+    """In strict mode a field the model leaves out comes as null: read it as left out, so
+    the full schema checks the answer as written (#109)."""
+    for generation in result.generations:
+        message = getattr(generation, "message", None)
+        if isinstance(message, AIMessage):
+            message.tool_calls = [{**c, "args": drop_nulls(c["args"])} for c in message.tool_calls]
+
+
+def _keep_only_whole_calls(message: AIMessage, sent: dict[str, str], order: list[str]) -> None:
+    """Move a streamed call whose arguments, as sent, are not JSON to the invalid calls.
+
+    LangChain reads streamed arguments as partial JSON: it closes what is open and drops
+    what does not parse, so arguments cut off at the output limit read as a whole call,
+    shorter. The text as sent decides, whatever reason the service gave for ending
+    (issue #106): some report a cut-off call as finished. A call sent without an id is
+    matched to its text by its place, when every call was read: LangChain keeps them in
+    the order they came (review nit on PR #107).
+    """
+    by_place = not message.invalid_tool_calls and len(order) == len(message.tool_calls)
+    kept = []
+    for place, tool_call in enumerate(message.tool_calls):
+        text = sent.get(tool_call["id"] or "")
+        if text is None and by_place:
+            text = order[place]
+        if text is None or not text.strip():
+            kept.append(tool_call)
+            continue
+        try:
+            json.loads(text, strict=False)  # as LangChain reads a whole reply
+        except json.JSONDecodeError as exc:
+            message.invalid_tool_calls.append(
+                InvalidToolCall(
+                    type="invalid_tool_call",
+                    name=tool_call["name"],
+                    args=text,
+                    id=tool_call["id"],
+                    error=f"arguments are not valid JSON: {exc}",
+                )
+            )
+        else:
+            kept.append(tool_call)
+    message.tool_calls = kept
 
 
 # The cancel flag of the attempt running on this thread. The HTTP client's response hook
@@ -304,6 +396,8 @@ def chat_model(
         max_retries=0,
         stream_usage=True,
         stream_replies=endpoint.stream,
+        output_limit=endpoint.max_output_tokens,
+        strict_tools=endpoint.strict_tools,
         extra_body=None
         if endpoint.thinking == "default"
         else {"thinking": {"type": endpoint.thinking}},

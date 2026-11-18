@@ -14,7 +14,7 @@ from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import AIMessage, BaseMessage
 from langchain_core.outputs import ChatGeneration, ChatResult
 from pydantic import Field
-from scripted import ScriptedModel, call
+from scripted import ScriptedModel, call, hand_in
 
 from review_agents.config import ModelEndpoint, Settings
 from review_agents.context.git import Snapshot
@@ -23,7 +23,6 @@ from review_agents.credentials import TokenVault
 from review_agents.db import connect, migrate
 from review_agents.mirror import MirrorStore
 from review_agents.models import BudgetExceededError
-from review_agents.pipeline.agent import SUBMIT_TOOL
 from review_agents.pipeline.merge import MERGE_TOOL
 from review_agents.pipeline.nits import NIT_TOOL
 from review_agents.pipeline.run import ReviewSuperseded, run_review, wait_for_summaries
@@ -221,10 +220,7 @@ def finding(dimension: str, **changes: Any) -> dict[str, Any]:
 
 
 def submit(*findings: dict[str, Any]) -> AIMessage:
-    return AIMessage(
-        content="",
-        tool_calls=[{"name": SUBMIT_TOOL, "args": {"findings": list(findings)}, "id": "s"}],
-    )
+    return hand_in(*findings, call_id="s")
 
 
 class Setup:
@@ -333,6 +329,39 @@ def test_every_enabled_dimension_runs_and_its_findings_are_written(setup: Setup)
     steps = setup.steps(review_id)
     assert all(steps[f"dimension.{d}"] == ("ok", None) for d in ALL)
     assert steps["context.pr_layer"][0] == "ok"
+
+
+def test_a_finding_dropped_by_the_programs_checks_is_recorded_in_the_steps(
+    setup: Setup,
+) -> None:
+    review_id = setup.queue()
+    nowhere = finding("edge_cases", title="Past the end", line_end=99)
+    # The model is told why; it finishes without sending that one again.
+    replies = [submit(finding("edge_cases"), nowhere), hand_in(call_id="d", count=1)]
+    model = ByDimension(scripts={"edge_cases": replies})
+
+    setup.run(review_id, model)
+
+    note = setup.notes(review_id)["dimension.edge_cases.dropped.1"]
+    assert note == ("Past the end: refused and not sent again: payments/refund.py has only 2 lines")
+    assert len(setup.findings(review_id)) == 1
+
+
+def test_findings_kept_by_agents_that_did_not_finish_are_still_reviewed(
+    setup: Setup,
+) -> None:
+    review_id = setup.queue()
+    adding = AIMessage(
+        "", tool_calls=[{"name": "add_finding", "args": finding("edge_cases"), "id": "a"}]
+    )
+    text = AIMessage(content="done")
+    scripts = {d: [text, text] for d in ALL}
+    scripts["edge_cases"] = [adding, text, text]
+
+    setup.run(review_id, ByDimension(scripts=scripts))
+
+    assert setup.review(review_id)["status"] != "failed"
+    assert len(setup.findings(review_id)) == 1
 
 
 def test_only_the_dimensions_the_repository_enables_run(setup: Setup) -> None:
@@ -1471,6 +1500,17 @@ def test_an_error_carrying_a_secret_is_stored_masked(setup: Setup) -> None:
     status, error = setup.steps(review_id)["dimension.security"]
     assert status == "error" and error is not None
     assert LEAKED not in error and "***" in error
+
+
+def test_a_secret_in_a_dropped_finding_is_stored_masked(setup: Setup) -> None:
+    review_id = setup.queue()
+    leak = finding("security", title=f"Token {LEAKED} is committed", line_end=99)
+    model = ByDimension(scripts={"security": [submit(leak), hand_in(call_id="d")]})
+
+    setup.run(review_id, model)
+
+    note = setup.notes(review_id)["dimension.security.dropped.1"] or ""
+    assert LEAKED not in note and "***" in note
 
 
 def test_a_secret_quoted_in_a_finding_is_masked_in_the_report(setup: Setup) -> None:

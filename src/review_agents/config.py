@@ -27,6 +27,19 @@ class ModelEndpoint(BaseModel):
     # keeps the service's own choice; otherwise requests say so as DeepSeek spells it.
     # Thinking is billed as output, so it can cost more than the reply itself.
     thinking: Literal["default", "enabled", "disabled"] = "default"
+    # The most tokens one reply may have, sent as `max_tokens` (issue #106); unset sends
+    # nothing and keeps the service's own default, which may be small: DeepSeek's is 8K
+    # without thinking. A reply cut off at it is handed in again, not taken as whole.
+    max_output_tokens: int | None = Field(default=None, ge=1)
+    # How many times an answer may be handed in again after each kind of mistake: not
+    # JSON or cut off, a schema not followed, a check of the program's own (issue #108).
+    format_retries: int = Field(default=2, ge=0, le=5)
+    # Send every tool for the service's strict mode (`"strict": true`), which keeps the
+    # arguments in shape (issue #109). Off by default: services take different parts of
+    # JSON Schema, so only what they share is sent; answers are still checked in full.
+    # OpenAI does not hold several calls in one turn to the schema; findings come that
+    # way, so there they are checked only as before.
+    strict_tools: bool = False
 
 
 class Observability(BaseModel):

@@ -165,7 +165,15 @@ def _step(
         " trace_id) VALUES (?, ?, ?, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), ?, ?, ?, ?)",
         # Masked: an error may quote a token or a key (issue #15). Steps are written on
         # the review's thread, inside its trace when tracing is on.
-        (review_id, node, started, status, REDACT.optional(error), note, obs.current_trace_id()),
+        (
+            review_id,
+            node,
+            started,
+            status,
+            REDACT.optional(error),
+            REDACT.optional(note),  # a note may quote what a model wrote
+            obs.current_trace_id(),
+        ),
     )
 
 
@@ -554,7 +562,8 @@ def _review(
     # with no findings would pass CI while the model service is down (issue #91). An
     # agent the deadline told to submit early did hand in (status "done"); one the
     # deadline cut off before it submitted did not. The walkthrough writes no findings.
-    if runs and not any(r.status == "done" for r in runs):
+    # One that did not finish may still have handed in findings one by one (#108).
+    if runs and not any(r.status == "done" or r.findings for r in runs):
         first = next((r.reason for r in runs if r.reason), "incomplete")
         raise RuntimeError(f"no agent handed in its findings ({len(runs)} agents): {first}")
     # D-004 as D-027 has it: findings that needed a verifier, none of which got a verdict,
@@ -734,6 +743,8 @@ class _Work:
         finder_limits = self._limits(settings.finder_model.context_tokens)
         verifier = settings.verifier_model or settings.finder_model
         verifier_limits = self._limits(verifier.context_tokens)
+        # How often an answer may be handed in again, by the model that writes it.
+        finder_retries = settings.finder_model.format_retries
         # Agents and verifiers run on threads of their own; their spans join the review's.
         parent = obs.current_context()
 
@@ -767,6 +778,7 @@ class _Work:
                     dimensions=job.dimensions or None,
                     opening=opening,
                     carried=carried,
+                    retries=finder_retries,
                 )
                 if run.status != "done":
                     obs.failed(current, REDACT(run.reason or "incomplete"))
@@ -788,6 +800,7 @@ class _Work:
                     clock=self.clock,
                     limits=finder_limits,
                     slot=lambda: self.slots.held(DIMENSION_TURN),
+                    retries=finder_retries,
                 )
                 if walked.status != "done":
                     obs.failed(current, REDACT(walked.reason or "incomplete"))
@@ -822,6 +835,7 @@ class _Work:
                     clock=self.clock,
                     limits=verifier_limits,
                     slot=lambda: self.slots.held(priority),
+                    retries=verifier.format_retries,
                 )
             except Exception as exc:  # one verification failing must not fail the review
                 return VerificationRun(
@@ -960,9 +974,11 @@ class _Work:
             assert isinstance(result, AgentRun)  # noqa: S101
             run = result
         error = None if run.status == "done" else (run.reason or "incomplete")
-        _step(
-            self.conn, self.review_id, job.node, self.starts.get(job.node, _now(self.conn)), error
-        )
+        started = self.starts.get(job.node, _now(self.conn))
+        _step(self.conn, self.review_id, job.node, started, error)
+        # Each finding the program's own checks left out, so it can be looked into (#106).
+        for number, why in enumerate(run.dropped, start=1):
+            _step(self.conn, self.review_id, f"{job.node}.dropped.{number}", started, note=why)
         return run
 
     def _publishable_unverified(self, candidate: Candidate) -> bool:

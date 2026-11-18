@@ -126,6 +126,17 @@ def test_a_walkthrough_whose_arguments_are_not_json_is_asked_again(
     assert any(isinstance(m, ToolMessage) and m.tool_call_id == "w0" for m in model.sent[1])
 
 
+def test_a_walkthrough_cut_off_at_the_output_limit_is_asked_again(repo_tools: RepoTools) -> None:
+    whole = call(WALKTHROUGH_TOOL, answer())
+    cut = whole.model_copy(update={"response_metadata": {"finish_reason": "length"}})
+    model = ScriptedModel(script=[cut, whole])
+
+    result = run(model, repo_tools)
+
+    assert result.status == "done"
+    assert "cut off at the output limit" in str(model.sent[1][-1].content)
+
+
 @pytest.mark.parametrize(
     ("where", "problem"),
     [
@@ -305,3 +316,12 @@ def test_a_reference_that_cannot_be_checked_is_not_published(
 
     assert result.status == "incomplete" and result.walkthrough is None
     assert "timed out" in (result.reason or "")
+
+
+def test_a_misspelt_walkthrough_field_is_named_with_the_one_meant(repo_tools: RepoTools) -> None:
+    wrong = answer()
+    wrong["sumary"] = wrong.pop("summary")
+    model = ScriptedModel(script=[call(WALKTHROUGH_TOOL, wrong), call(WALKTHROUGH_TOOL, answer())])
+
+    assert run(model, repo_tools).status == "done"
+    assert "`sumary` is not a field; did you mean `summary`?" in str(model.sent[1][-1].content)
