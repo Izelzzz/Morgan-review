@@ -2,6 +2,7 @@ import logging
 
 import uvicorn
 
+from review_agents import observability
 from review_agents.api import create_app
 from review_agents.config import Settings
 from review_agents.credentials import TokenVault
@@ -15,6 +16,8 @@ def main() -> None:
     install_log_filter()  # every log line is masked (issue #15)
     settings = Settings()
     register_settings(REDACT, settings)
+    # Off unless REVIEW_AGENTS_OBSERVABILITY__ENABLED is set (docs/observability.md).
+    observability.setup(settings.observability)
     vault = TokenVault()
     # Without a finder model the service still starts, answers /healthz and queues
     # reviews; each review then fails with a message saying what to configure.
@@ -26,6 +29,7 @@ def main() -> None:
         port=settings.port,
         log_config=None,
     )
+    observability.shutdown()  # sends the spans still waiting
 
 
 if __name__ == "__main__":

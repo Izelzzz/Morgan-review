@@ -26,9 +26,9 @@ import queue
 import sqlite3
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from concurrent.futures import Future, ThreadPoolExecutor, wait
-from contextlib import closing
+from contextlib import closing, contextmanager
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
@@ -36,6 +36,7 @@ from typing import Any
 
 from langchain_core.language_models import BaseChatModel
 
+from review_agents import observability as obs
 from review_agents.config import Settings
 from review_agents.context.cache import repo_layer_for_review
 from review_agents.context.git import Snapshot
@@ -158,19 +159,59 @@ def _step(
     error: str | None = None,
     note: str | None = None,
 ) -> None:
+    status = "error" if error else "ok"
     conn.execute(
-        "INSERT INTO steps (review_id, node, started_at, finished_at, status, error, note)"
-        " VALUES (?, ?, ?, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), ?, ?, ?)",
-        # Masked: an error may quote a token or a key (issue #15).
+        "INSERT INTO steps (review_id, node, started_at, finished_at, status, error, note,"
+        " trace_id) VALUES (?, ?, ?, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), ?, ?, ?, ?)",
+        # Masked: an error may quote a token or a key (issue #15). Steps are written on
+        # the review's thread, inside its trace when tracing is on.
         (
             review_id,
             node,
             started,
-            "error" if error else "ok",
+            status,
             REDACT.optional(error),
             REDACT.optional(note),  # a note may quote what a model wrote
+            obs.current_trace_id(),
         ),
     )
+
+
+@dataclass
+class _Outcome:
+    """How a node that did not raise ended: with an error it worked around, or none."""
+
+    error: str | None = None
+
+
+def _failed_step(
+    conn: sqlite3.Connection, review_id: int, node: str, started: str, exc: Exception
+) -> None:
+    """The step of a node that raised; failing to write it must not hide why it raised."""
+    try:
+        _step(conn, review_id, node, started, f"{type(exc).__name__}: {exc}")
+    except sqlite3.Error:
+        log.exception("could not record the failure of %s in review %s", node, review_id)
+
+
+@contextmanager
+def _node(conn: sqlite3.Connection, review_id: int, node: str) -> Iterator[_Outcome]:
+    """One node of the review: a span, and a step even when it raises (issue #16).
+
+    A node that raises ends the review; its step says which node it was and why, so the
+    steps alone point at the failure when tracing is off.
+    """
+    started = _now(conn)
+    outcome = _Outcome()
+    with obs.span(node) as current:
+        try:
+            yield outcome
+        except Exception as exc:
+            _failed_step(conn, review_id, node, started, exc)
+            raise
+        if outcome.error is not None:
+            obs.failed(current, REDACT(outcome.error))
+        _step(conn, review_id, node, started, outcome.error)
 
 
 def _last_round(conn: sqlite3.Connection, review: sqlite3.Row) -> sqlite3.Row | None:
@@ -342,7 +383,51 @@ def run_review(
 
     `judge_for` merges and `verifier_for` verifies; without a verifier model the finder
     model verifies (D-027), and without a judge only the safe merge runs (D-024).
+    The review is one trace when tracing is on (issue #16).
     """
+    review = conn.execute(
+        "SELECT repo, pr, head_sha, event FROM reviews WHERE id = ?", (review_id,)
+    ).fetchone()
+    attributes = {
+        "review.id": review_id,
+        "review.repo": review["repo"],
+        "review.pr": review["pr"],
+        "review.head_sha": review["head_sha"],
+        "review.event": review["event"],
+        "review.strategy": settings.strategy,
+        # A PR's reviews, one per push, grouped as one session.
+        "session.id": f"{review['repo']}#{review['pr']}",
+    }
+    with obs.span("review", attributes):
+        _review(
+            conn,
+            review_id,
+            settings=settings,
+            vault=vault,
+            store=store,
+            model_for=model_for,
+            judge_for=judge_for,
+            verifier_for=verifier_for,
+            clock=clock,
+            review_seconds=review_seconds,
+            after_submit_seconds=after_submit_seconds,
+        )
+
+
+def _review(
+    conn: sqlite3.Connection,
+    review_id: int,
+    *,
+    settings: Settings,
+    vault: TokenVault,
+    store: MirrorStore,
+    model_for: ModelFor,
+    judge_for: ModelFor | None,
+    verifier_for: ModelFor | None,
+    clock: Callable[[], float],
+    review_seconds: float | None,
+    after_submit_seconds: float | None,
+) -> None:
     if settings.finder_model is None:
         raise RuntimeError("no finder model is configured")
     started_at = clock()
@@ -353,22 +438,22 @@ def run_review(
     repo, head = review["repo"], review["head_sha"]
     _check_not_superseded(conn, review_id)
 
-    step = _now(conn)
     # The default branch for the config and repository layer; the PR's own head ref,
     # which GitHub keeps for forks too, for the commits under review.
     refs = [f"refs/heads/{review['default_branch']}", f"refs/pull/{review['pr']}/head"]
     # The repository's own, shorter limit is read from the mirror, so the sync is
     # bounded by the longest review there can be (decision D-028).
     longest = review_seconds if review_seconds is not None else MAX_REVIEW_MINUTES * 60
-    git_dir = store.sync(
-        repo, refs, [review["base_sha"], head], token, deadline=started_at + longest, clock=clock
-    )
-    _step(conn, review_id, "mirror.sync", step)
-    step = _now(conn)
-    loaded = read_repo_config(git_dir, review["default_branch"])
+    with _node(conn, review_id, "mirror.sync"):
+        git_dir = store.sync(
+            repo, refs, [review["base_sha"], head], token, deadline=started_at + longest,
+            clock=clock,
+        )  # fmt: skip
+    with _node(conn, review_id, "config") as outcome:
+        loaded = read_repo_config(git_dir, review["default_branch"])
+        # An invalid config falls back to the defaults as a whole (D-001); the step says why.
+        outcome.error = "; ".join(loaded.errors) or None
     config = loaded.config
-    # An invalid config falls back to the defaults as a whole (D-001); the step says why.
-    _step(conn, review_id, "config", step, "; ".join(loaded.errors) or None)
     limits = config.limits
     # D-039: a push is a round; past the repository's limit only `/review` is reviewed.
     last = _last_round(conn, review)
@@ -416,30 +501,29 @@ def run_review(
             settings.db_path, repo, git_dir, review["default_branch"], skip,
             module_tokens(window), summarize,
         )  # fmt: skip
-    step = _now(conn)
-    request = PrRequest(
-        repo, review["pr"], review["title"], review["body"], review["base_sha"], head
-    )
-    pr_layer = build_pr_layer(
-        conn, request, git_dir, config, token=token, surrounding_code=settings.surrounding_code
-    )
-    planned = plan(settings.strategy, config)
-    packs = build_packs(
-        repo_layer,
-        pr_layer,
-        window,
-        settings.output_reserve_tokens,
-        config.language,
-        # The room kept for the agents' task follows the agents that run (issue #83).
-        [(a.name, a.dimensions) for a in planned.authors],
-    )
-    # For the report: the whole PR's lines, not only this round's, since GitHub takes
-    # inline comments on those. Read with the rest of the code, before any model call.
-    patches = pr_patches(git_dir, review["base_sha"], head, pr_layer.files)
-    facts = pr_facts(git_dir, pr_layer)  # for the walkthrough's header and file table
-    _step(conn, review_id, "context.pr_layer", step)
+    with _node(conn, review_id, "context.pr_layer"):
+        request = PrRequest(
+            repo, review["pr"], review["title"], review["body"], review["base_sha"], head
+        )
+        pr_layer = build_pr_layer(
+            conn, request, git_dir, config, token=token, surrounding_code=settings.surrounding_code
+        )
+        planned = plan(settings.strategy, config)
+        packs = build_packs(
+            repo_layer,
+            pr_layer,
+            window,
+            settings.output_reserve_tokens,
+            config.language,
+            # The room kept for the agents' task follows the agents that run (issue #83).
+            [(a.name, a.dimensions) for a in planned.authors],
+        )
+        # For the report: the whole PR's lines, not only this round's, since GitHub takes
+        # inline comments on those. Read with the rest of the code, before any model call.
+        patches = pr_patches(git_dir, review["base_sha"], head, pr_layer.files)
+        facts = pr_facts(git_dir, pr_layer)  # for the walkthrough's header and file table
     if len(packs) > 1:
-        _step(conn, review_id, f"context.groups.{len(packs)}", step)
+        _step(conn, review_id, f"context.groups.{len(packs)}", _now(conn))
 
     _check_not_superseded(conn, review_id)
     dimensions, repeats = planned.dimensions, planned.runs
@@ -488,22 +572,22 @@ def run_review(
         first = next((c.run.reason for c in checks if c.run and c.run.reason), "no verdict")
         raise RuntimeError(f"no finding could be verified ({len(checks)} tried): {first}")
 
-    step = _now(conn)
-    judge = None
-    fallbacks: list[str] = []
-    # One candidate has nothing to merge with; the judge is not asked. It has until the
-    # review's end; without time left, the safe merge takes its place at once.
-    if judge_for is not None and len(accepted) > 1:
-        left = deadline - clock()
-        if left > 0:
-            meter = UsageMeter(budget, review_usage(settings.db_path, review_id, "merge"))
-            judge = model_judge(judge_for(left), callbacks=[meter])
-        else:
-            fallbacks.append("no time left to judge the merge")
-    # A judge that fails or answers nonsense leaves the safe merge: the review still
-    # completes, and the step says the merge was degraded.
-    merged = merge(accepted, judge, fallbacks.append)
-    _step(conn, review_id, "merge", step, fallbacks[0] if fallbacks else None)
+    with _node(conn, review_id, "merge") as outcome:
+        judge = None
+        fallbacks: list[str] = []
+        # One candidate has nothing to merge with; the judge is not asked. It has until the
+        # review's end; without time left, the safe merge takes its place at once.
+        if judge_for is not None and len(accepted) > 1:
+            left = deadline - clock()
+            if left > 0:
+                meter = UsageMeter(budget, review_usage(settings.db_path, review_id, "merge"))
+                judge = model_judge(judge_for(left), callbacks=[meter])
+            else:
+                fallbacks.append("no time left to judge the merge")
+        # A judge that fails or answers nonsense leaves the safe merge: the review still
+        # completes, and the step says the merge was degraded.
+        merged = merge(accepted, judge, fallbacks.append)
+        outcome.error = fallbacks[0] if fallbacks else None
     hits = [r.limit_hit for r in runs] + [c.run.limit_hit for c in checks if c.run]
     limit_hit = next((lim for lim in _LIMIT_ORDER if lim in hits), None)
     binary = sorted(path for path, patch in patches.items() if is_binary(patch))
@@ -511,78 +595,85 @@ def run_review(
     nits = sum(1 for i in items if i.severity == "nit")
     if 0 < limits.nits_per_report < nits:
         # One call to the strong model, outside the review's time (D-034, D-035).
-        step = _now(conn)
-        meter = UsageMeter(budget, review_usage(settings.db_path, review_id, "nits"))
-        strong = verifier_for or model_for
-        nit_merge = merge_nits(
-            items,
-            lambda: strong(NIT_MERGE_SECONDS),
-            limit=limits.nits_per_report,
-            callbacks=[meter],
-            language=config.language,
-        )
-        items = nit_merge.items
-        _step(conn, review_id, "report.nits", step, nit_merge.problem)
-    report = build_report(
-        items,
-        changed={path: added_lines(patch) for path, patch in patches.items()},
-        missed=[
-            MissedStep(
-                job.dimension,
-                job.group if job.groups > 1 else None,
-                job.run if job.runs > 1 else None,
-                run.reason or "incomplete",
+        with _node(conn, review_id, "report.nits") as outcome:
+            meter = UsageMeter(budget, review_usage(settings.db_path, review_id, "nits"))
+            strong = verifier_for or model_for
+            nit_merge = merge_nits(
+                items,
+                lambda: strong(NIT_MERGE_SECONDS),
+                limit=limits.nits_per_report,
+                callbacks=[meter],
+                language=config.language,
             )
-            for job, run in zip(jobs, runs, strict=True)
-            if run.status != "done"
-        ],
-        unverified=[
-            Unverified(c.lead.finding.title, c.lead.finding.severity, c.run.reason or "incomplete")
-            for c in checks
-            if c.run is not None and c.run.verdict is None
-        ],
-        scope=Scope(
-            mode=config.mode,
-            dimensions=dimensions,
-            runs=repeats,
-            files=len(patches) - len(binary),
-            groups=len(packs),
-            skipped=[f.path for f in pr_layer.files if f.skipped],
-            binary=binary,
-            finder_verifies=verifier_for is None,
-            withheld=work.dropped,
-            retired=loaded.retired,
-        ),
-        stats=Stats(_tokens_used(conn, review_id), clock() - started_at, review_id),
-        language=config.language,
-        nits_per_report=limits.nits_per_report,
-    )
-    written = work.walkthrough
-    walkthrough = (
-        render_walkthrough(written.walkthrough, facts, config.language)
-        if written is not None and written.walkthrough is not None
-        else render_failed((written and written.reason) or "incomplete", config.language)
-    )
+            items = nit_merge.items
+            outcome.error = nit_merge.problem
+    with _node(conn, review_id, "report"):
+        report = build_report(
+            items,
+            changed={path: added_lines(patch) for path, patch in patches.items()},
+            missed=[
+                MissedStep(
+                    job.dimension,
+                    job.group if job.groups > 1 else None,
+                    job.run if job.runs > 1 else None,
+                    run.reason or "incomplete",
+                )
+                for job, run in zip(jobs, runs, strict=True)
+                if run.status != "done"
+            ],
+            unverified=[
+                Unverified(
+                    c.lead.finding.title, c.lead.finding.severity, c.run.reason or "incomplete"
+                )
+                for c in checks
+                if c.run is not None and c.run.verdict is None
+            ],
+            scope=Scope(
+                mode=config.mode,
+                dimensions=dimensions,
+                runs=repeats,
+                files=len(patches) - len(binary),
+                groups=len(packs),
+                skipped=[f.path for f in pr_layer.files if f.skipped],
+                binary=binary,
+                finder_verifies=verifier_for is None,
+                withheld=work.dropped,
+                retired=loaded.retired,
+            ),
+            stats=Stats(_tokens_used(conn, review_id), clock() - started_at, review_id),
+            language=config.language,
+            nits_per_report=limits.nits_per_report,
+        )
+        written = work.walkthrough
+        walkthrough = (
+            render_walkthrough(written.walkthrough, facts, config.language)
+            if written is not None and written.walkthrough is not None
+            else render_failed((written and written.reason) or "incomplete", config.language)
+        )
+
     # The findings and the review's end state commit together (reliability §5.3): never
     # half a review, and a review with stored findings is never claimed and run again.
-    conn.execute("BEGIN IMMEDIATE")
-    try:
-        for item in merged:
-            _insert_finding(conn, review_id, item, published)
-        conn.execute(
-            "UPDATE reviews SET limit_hit = ?, status = 'done', error = NULL, report = ?,"
-            " finished_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = ?",
-            # What CI posts: a secret a finding quotes from the code is masked (issue #15).
-            (
-                limit_hit,
-                json.dumps(REDACT.every_string(replace(report, walkthrough=walkthrough).as_json())),
-                review_id,
-            ),
-        )
-        conn.execute("COMMIT")
-    except BaseException:
-        conn.execute("ROLLBACK")
-        raise
+    # What CI posts: a secret a finding quotes from the code is masked (issue #15).
+    stored = json.dumps(REDACT.every_string(replace(report, walkthrough=walkthrough).as_json()))
+    started = _now(conn)
+    with obs.span("write"):
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            for item in merged:
+                _insert_finding(conn, review_id, item, published)
+            conn.execute(
+                "UPDATE reviews SET limit_hit = ?, status = 'done', error = NULL, report = ?,"
+                " finished_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = ?",
+                (limit_hit, stored, review_id),
+            )
+            # In the same commit, so a review that is done always has its step.
+            _step(conn, review_id, "write", started)
+            conn.execute("COMMIT")
+        except BaseException as exc:
+            conn.execute("ROLLBACK")
+            if isinstance(exc, Exception):
+                _failed_step(conn, review_id, "write", started, exc)
+            raise
 
 
 class _Work:
@@ -654,6 +745,8 @@ class _Work:
         verifier_limits = self._limits(verifier.context_tokens)
         # How often an answer may be handed in again, by the model that writes it.
         finder_retries = settings.finder_model.format_retries
+        # Agents and verifiers run on threads of their own; their spans join the review's.
+        parent = obs.current_context()
 
         def find(job: Job) -> AgentRun:
             opening = carried = None
@@ -670,52 +763,68 @@ class _Work:
             meter = UsageMeter(
                 self.budget, review_usage(settings.db_path, self.review_id, job.dimension)
             )
-            return run_dimension(
-                self.model_for,
-                job.pack,
-                job.dimension,
-                self._tools(),
-                tool_calls=self.tool_calls,
-                callbacks=[meter],
-                deadline=submit_by,
-                clock=self.clock,
-                limits=finder_limits,
-                slot=lambda: self.slots.held(DIMENSION_TURN),
-                dimensions=job.dimensions or None,
-                opening=opening,
-                carried=carried,
-                retries=finder_retries,
-            )
+            with obs.span(job.node, parent=parent, kind="AGENT") as current:
+                run = run_dimension(
+                    self.model_for,
+                    job.pack,
+                    job.dimension,
+                    self._tools(),
+                    tool_calls=self.tool_calls,
+                    callbacks=[meter],
+                    deadline=submit_by,
+                    clock=self.clock,
+                    limits=finder_limits,
+                    slot=lambda: self.slots.held(DIMENSION_TURN),
+                    dimensions=job.dimensions or None,
+                    opening=opening,
+                    carried=carried,
+                    retries=finder_retries,
+                )
+                if run.status != "done":
+                    obs.failed(current, REDACT(run.reason or "incomplete"))
+                return run
 
         def write() -> WalkthroughRun:
             self.starts["walkthrough"] = _utc_now()
             meter = UsageMeter(
                 self.budget, review_usage(settings.db_path, self.review_id, "walkthrough")
             )
-            return run_walkthrough(
-                self.model_for,
-                walkthrough_pack,
-                self._tools(),
-                tool_calls=min(self.tool_calls, WALKTHROUGH_TOOL_CALLS),
-                callbacks=[meter],
-                deadline=submit_by,
-                clock=self.clock,
-                limits=finder_limits,
-                slot=lambda: self.slots.held(DIMENSION_TURN),
-                retries=finder_retries,
-            )
+            with obs.span("walkthrough", parent=parent, kind="AGENT") as current:
+                walked = run_walkthrough(
+                    self.model_for,
+                    walkthrough_pack,
+                    self._tools(),
+                    tool_calls=min(self.tool_calls, WALKTHROUGH_TOOL_CALLS),
+                    callbacks=[meter],
+                    deadline=submit_by,
+                    clock=self.clock,
+                    limits=finder_limits,
+                    slot=lambda: self.slots.held(DIMENSION_TURN),
+                    retries=finder_retries,
+                )
+                if walked.status != "done":
+                    obs.failed(current, REDACT(walked.reason or "incomplete"))
+                return walked
 
         def verify(check: _Check) -> None:
             # Each check has a thread of its own and competes for model calls by priority
             # (Slots): a pool would let checks already started hold every thread until
             # they end, and a 🔴 handed in later would wait behind them.
             check.started = _utc_now()
+            with obs.span(f"verify.{check.number}", parent=parent, kind="AGENT") as current:
+                run = verified(check)
+                if run.verdict is None:
+                    obs.failed(current, REDACT(run.reason or "incomplete"))
+            # Only the review's thread stores the result.
+            self.events.put(("verified", (check, run), None))
+
+        def verified(check: _Check) -> VerificationRun:
             meter = UsageMeter(
                 self.budget, review_usage(settings.db_path, self.review_id, "verify")
             )
             priority = verify_priority(check.lead.finding.severity)
             try:
-                run = run_verifier(
+                return run_verifier(
                     self.verifier_for,
                     check.pack,
                     check.lead.finding,
@@ -729,11 +838,9 @@ class _Work:
                     retries=verifier.format_retries,
                 )
             except Exception as exc:  # one verification failing must not fail the review
-                run = VerificationRun(
+                return VerificationRun(
                     check.lead.finding, "incomplete", reason=f"{type(exc).__name__}: {exc}"
                 )
-            # Only the review's thread stores the result.
-            self.events.put(("verified", (check, run), None))
 
         finders = ThreadPoolExecutor(settings.model_concurrency, thread_name_prefix="find")
         runs: dict[int, AgentRun] = {}  # by the job's place in `jobs`: a Job is not hashable
@@ -966,12 +1073,14 @@ def summarize_in_background(
     """
 
     def build() -> None:
-        try:
-            with closing(connect(db_path, create=False)) as conn:
-                snapshot = Snapshot.at_branch(git_dir, default_branch, tuple(skip))
-                module_summaries(conn, repo, snapshot, summarize, tokens)
-        except Exception:
-            log.exception("writing module summaries for %s failed", repo)
+        # A trace of its own: the summaries belong to the repository, not to a review.
+        with obs.span("summaries", {"review.repo": repo}):
+            try:
+                with closing(connect(db_path, create=False)) as conn:
+                    snapshot = Snapshot.at_branch(git_dir, default_branch, tuple(skip))
+                    module_summaries(conn, repo, snapshot, summarize, tokens)
+            except Exception:
+                log.exception("writing module summaries for %s failed", repo)
 
     with _summaries_guard:
         running = _summaries.get(repo)

@@ -54,8 +54,11 @@ class Observability(BaseModel):
 
     @model_validator(mode="after")
     def _endpoint_when_enabled(self) -> Self:
-        if self.enabled and self.endpoint is None:
-            raise ValueError("observability is enabled but has no endpoint")
+        # LangSmith and a local Phoenix have a known endpoint; Langfuse's depends on the
+        # region, and a collector on where it runs (docs/observability.md).
+        defaults = ("langsmith", "phoenix")
+        if self.enabled and self.endpoint is None and self.exporter not in defaults:
+            raise ValueError(f"observability is enabled but has no endpoint for {self.exporter}")
         return self
 
 

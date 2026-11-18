@@ -31,6 +31,7 @@ from langchain_core.tools import StructuredTool
 from langchain_core.utils.function_calling import convert_to_openai_tool
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
+from review_agents import observability as obs
 from review_agents.context.pack import ContextPack
 from review_agents.context.tokens import estimate_tokens
 from review_agents.models import BudgetExceededError
@@ -40,6 +41,7 @@ from review_agents.pipeline.conversation import (
     ConversationLimits,
     ConversationTooLong,
 )
+from review_agents.redact import REDACT
 from review_agents.tools import (
     LIMIT_REACHED,
     RepoTools,
@@ -652,10 +654,17 @@ def _answer(
             ToolMessage(f"error: there is no tool named {name!r}", tool_call_id=call_id)
         )
         return
-    try:
-        # Called through the budget wrapper, so a call with wrong arguments still counts.
-        result = tool(**tool_call["args"])
-    except Exception as exc:  # wrong arguments, or a tool that broke: this call fails only
-        messages.append(ToolMessage(f"error: {exc}", tool_call_id=call_id))
-        return
+    attributes = {"tool.name": name}
+    if obs.records_content():  # a metadata trace has no paths, patterns or code
+        attributes["input.value"] = json.dumps(tool_call["args"])
+    with obs.span(name, attributes, kind="TOOL") as current:
+        try:
+            # Called through the budget wrapper, so a call with wrong arguments still counts.
+            result = tool(**tool_call["args"])
+        except Exception as exc:  # wrong arguments, or a tool that broke: this call fails only
+            obs.failed(current, REDACT(f"{type(exc).__name__}: {exc}"))
+            messages.append(ToolMessage(f"error: {exc}", tool_call_id=call_id))
+            return
+        if obs.records_content():
+            current.set_attribute("output.value", result)
     conversation.answer(messages, call_id, name, tool_call["args"], result)
