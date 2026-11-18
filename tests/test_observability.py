@@ -340,3 +340,19 @@ def test_a_failed_write_is_recorded_as_the_failed_step(
 
     assert setup.steps(review_id)["write"] == ("error", "OSError: disk full")
     assert setup.findings(review_id) == []  # rolled back, the step written after
+
+
+def test_a_full_span_is_capped_and_the_cap_can_be_set(
+    traced: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A cap keeps a span within an endpoint's request size; an operator may lower it.
+    monkeypatch.setenv("OTEL_SPAN_ATTRIBUTE_COUNT_LIMIT", "10")
+    exporter = traced("full")
+
+    with observability.span("read_file") as current:
+        for i in range(50):
+            current.set_attribute(f"input.value.{i}", "x")
+
+    [span] = exporter.get_finished_spans()
+    assert len(span.attributes or {}) == 10
+    assert observability.FULL_ATTRIBUTES > 128

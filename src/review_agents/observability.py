@@ -13,6 +13,7 @@ leaves the service. `metadata` also has OpenInference not record them in the fir
 
 from __future__ import annotations
 
+import os
 from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from typing import TYPE_CHECKING, Any, cast
@@ -52,6 +53,8 @@ REASON_CHARS = 120
 # Spans per OTLP request: in `full` a model call's span holds its whole conversation,
 # so a request of the SDK's default 512 could pass an endpoint's size limit.
 EXPORT_BATCH = 32
+# Attributes a `full` span may hold: a model call with some 1,000 messages.
+FULL_ATTRIBUTES = 4096
 
 _provider: TracerProvider | None = None
 _instrumentor: Any = None
@@ -91,14 +94,13 @@ def setup(
         exporter = OTLPSpanExporter(endpoint=traces_endpoint(settings), headers=headers)
     private = cast("SpanExporter", _Private(exporter, full=full))  # an exporter by its methods
     # In `full` a model call's span holds its conversation, several attributes per message
-    # (`llm.input_messages.N.*`), and the SDK's default of 128 per span or event dropped a
-    # long one's earliest messages: no count limit there (UNSET, not an env var).
-    # `metadata` keeps only a few attributes, under the SDK's defaults.
-    limits = (
-        SpanLimits(max_span_attributes=SpanLimits.UNSET, max_event_attributes=SpanLimits.UNSET)
-        if full
-        else SpanLimits()
-    )
+    # (`llm.input_messages.N.*`), and the SDK's default of 128 per span dropped a long
+    # one's earliest messages (issue #112). A high cap keeps them and still bounds a span;
+    # OTEL_SPAN_ATTRIBUTE_COUNT_LIMIT overrides it. `metadata` keeps the SDK's defaults.
+    limits = None
+    if full:
+        cap = int(os.environ.get("OTEL_SPAN_ATTRIBUTE_COUNT_LIMIT", FULL_ATTRIBUTES))
+        limits = SpanLimits(max_span_attributes=cap, max_event_attributes=cap)
     provider = TracerProvider(
         resource=Resource.create({"service.name": SERVICE}), span_limits=limits
     )

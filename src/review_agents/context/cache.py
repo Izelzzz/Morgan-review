@@ -5,6 +5,7 @@ lets the first build the layer and its summaries while the others wait, then rea
 from the cache instead of building them again.
 """
 
+import logging
 import sqlite3
 import threading
 from collections import defaultdict
@@ -15,6 +16,7 @@ from review_agents.context.modules import MODULE_TOKENS, SUMMARY_VERSION, Summar
 from review_agents.context.repo_layer import RepoLayer, build_repo_layer
 from review_agents.redact import REDACT
 
+log = logging.getLogger(__name__)
 _locks: defaultdict[str, threading.Lock] = defaultdict(threading.Lock)
 _locks_guard = threading.Lock()
 KEEP_LAYERS = 3
@@ -63,7 +65,11 @@ def repo_layer_for_review(
                 )
                 prune(conn, repo)
         except Exception as exc:
-            _step(conn, review_id, "context.repo_layer", started, f"{type(exc).__name__}: {exc}")
+            try:
+                error = f"{type(exc).__name__}: {exc}"
+                _step(conn, review_id, "context.repo_layer", started, error)
+            except sqlite3.Error:  # failing to record it must not hide why it failed
+                log.exception("could not record the repository layer's failure")
             raise
         # Named like its step; whether the layer was cached is known only once it is built.
         node = "context.repo_layer.cache_hit" if layer.cache_hit else "context.repo_layer"
