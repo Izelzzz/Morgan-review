@@ -4,7 +4,7 @@ from typing import Any
 import pytest
 from langchain_core.callbacks import CallbackManagerForLLMRun
 from langchain_core.language_models import BaseChatModel
-from langchain_core.messages import AIMessage, BaseMessage
+from langchain_core.messages import AIMessage, BaseMessage, ToolMessage
 from langchain_core.outputs import ChatGeneration, ChatResult
 from pydantic import Field
 
@@ -464,3 +464,72 @@ def test_a_judge_wrong_twice_leaves_the_safe_merge_and_says_both_times_why() -> 
     assert len(model.sent) == 2 and len(merged) == 2
     [reason] = told
     assert "7" in reason and "more than once" in reason
+
+
+def two_calls(first: dict[str, Any], second: dict[str, Any]) -> AIMessage:
+    return AIMessage(
+        content="",
+        tool_calls=[
+            {"name": MERGE_TOOL, "args": first, "id": "m1"},
+            {"name": MERGE_TOOL, "args": second, "id": "m2"},
+        ],
+        invalid_tool_calls=[{"name": MERGE_TOOL, "args": "{", "id": "m3", "error": None}],
+    )
+
+
+def test_asking_the_judge_again_answers_every_call_of_its_reply() -> None:
+    # The service refuses a request with a call left unanswered (review on #119).
+    wrong = {"same_problem": [[9]], "same_kind": []}
+    model = JudgeModel(first=[two_calls(wrong, wrong)], reply=answer([[1], [2]], []))
+    cands = [candidate(1, file="a.py"), candidate(2, file="b.py")]
+
+    merge(cands, model_judge(model, callbacks=[]))
+
+    answered = [m.tool_call_id for m in model.sent[1] if isinstance(m, ToolMessage)]
+    assert sorted(answered) == ["m1", "m2", "m3"]
+
+
+def test_a_judge_that_then_answers_in_text_still_says_what_was_wrong_first() -> None:
+    model = JudgeModel(first=[answer([[7]], [])], reply=AIMessage("they look alike"))
+    told: list[str] = []
+
+    merge(
+        [candidate(1, file="a.py"), candidate(2, file="b.py")], model_judge(model, []), told.append
+    )
+
+    [reason] = told
+    assert reason.startswith("judge answer rejected") and "[7]" in reason
+
+
+def test_an_answer_not_in_the_schema_is_told_and_asked_once_more() -> None:
+    model = JudgeModel(
+        first=[answer([["x"]], [])],  # type: ignore[list-item]
+        reply=answer([[1], [2]], []),
+    )
+    told: list[str] = []
+
+    merge(
+        [candidate(1, file="a.py"), candidate(2, file="b.py")], model_judge(model, []), told.append
+    )
+
+    assert told == [] and len(model.sent) == 2
+    assert "same_problem" in str(model.sent[1][-1].content)
+
+
+def test_a_judge_call_without_an_id_is_not_asked_again() -> None:
+    no_id = AIMessage(
+        content="",
+        tool_calls=[
+            {"name": MERGE_TOOL, "args": {"same_problem": [[7]], "same_kind": []}, "id": None}
+        ],
+    )
+    model = JudgeModel(reply=no_id)
+    told: list[str] = []
+
+    merge(
+        [candidate(1, file="a.py"), candidate(2, file="b.py")], model_judge(model, []), told.append
+    )
+
+    assert len(model.sent) == 1
+    [reason] = told
+    assert reason.startswith("judge answer rejected") and "[7]" in reason

@@ -1118,3 +1118,28 @@ def test_a_cut_off_reply_is_still_only_told_it_was_cut_off(repo_tools: RepoTools
 
     told = str(model.sent[1][-1].content)
     assert "cut off at the output limit" in told and "at character" not in told
+
+
+def test_json_that_is_not_an_object_is_called_that(repo_tools: RepoTools) -> None:
+    listed = AIMessage(
+        content="",
+        invalid_tool_calls=[{"name": "read_file", "args": '["a.py"]', "id": "l1", "error": None}],
+    )
+    model = ScriptedModel(script=[listed, done(0)])
+
+    run(model, repo_tools)
+
+    told = str(model.sent[1][-1].content)
+    assert "must be a JSON object" in told and "a list" in told
+
+
+def test_what_to_do_is_said_before_what_the_model_wrote(repo_tools: RepoTools) -> None:
+    model = ScriptedModel(script=[broken(ADD_TOOL, "b1"), broken("read_file", "b2"), done(0)])
+
+    run(model, repo_tools)
+
+    for m in model.sent[-1]:
+        if isinstance(m, ToolMessage) and m.tool_call_id in ("b1", "b2"):
+            text = str(m.content)
+            assert text.index("again") < text.index("<untrusted")
+            assert text.rstrip().endswith("</untrusted>")
