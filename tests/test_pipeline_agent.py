@@ -1067,3 +1067,79 @@ def test_a_count_with_the_left_out_counted_is_asked_about_while_one_waits(
 
     told = {m.tool_call_id: str(m.content) for m in model.sent[-1] if isinstance(m, ToolMessage)}
     assert told["d2"].startswith("Not finished") and "Waiting" in told["d2"]
+
+
+# Review 29 of the 2026-11-20 evaluation (issue #119): one `}` left out, then `]}`.
+BROKEN = (
+    '{"summary": "s", "changes": [{"title": "t", "body": "Two pure functions test'
+    ' `formatEventStreamMessage`."]}, "impacts": []}'
+)
+
+
+def broken(name: str, call_id: str) -> AIMessage:
+    return AIMessage(
+        content="",
+        invalid_tool_calls=[{"name": name, "args": BROKEN, "id": call_id, "error": None}],
+    )
+
+
+def test_arguments_that_are_not_json_are_answered_with_where_they_break(
+    repo_tools: RepoTools,
+) -> None:
+    model = ScriptedModel(script=[broken(ADD_TOOL, "b1"), broken("read_file", "b2"), done(0)])
+
+    run(model, repo_tools)
+
+    told = {m.tool_call_id: str(m.content) for m in model.sent[-1] if isinstance(m, ToolMessage)}
+    for call_id in ("b1", "b2"):
+        assert "Expecting ',' delimiter" in told[call_id]
+        assert f"at character {BROKEN.index(']}')}" in told[call_id]
+        assert '<untrusted source="your arguments">' in told[call_id]
+        assert "formatEventStreamMessage" in told[call_id]
+
+
+def test_an_unreadable_submission_says_where_and_the_reason_keeps_no_text(
+    repo_tools: RepoTools,
+) -> None:
+    model = ScriptedModel(script=[broken(SUBMIT_TOOL, f"s{n}") for n in range(FORMAT_RETRIES + 1)])
+
+    result = run(model, repo_tools)
+
+    assert "at character" in str(model.sent[1][-1].content)
+    assert "Expecting ',' delimiter" in (result.reason or "")
+    # What the model wrote is for it to fix, not for the review's steps.
+    assert "formatEventStreamMessage" not in (result.reason or "")
+
+
+def test_a_cut_off_reply_is_still_only_told_it_was_cut_off(repo_tools: RepoTools) -> None:
+    model = ScriptedModel(script=[cut_off(broken(ADD_TOOL, "c1")), done(0)])
+
+    run(model, repo_tools)
+
+    told = str(model.sent[1][-1].content)
+    assert "cut off at the output limit" in told and "at character" not in told
+
+
+def test_json_that_is_not_an_object_is_called_that(repo_tools: RepoTools) -> None:
+    listed = AIMessage(
+        content="",
+        invalid_tool_calls=[{"name": "read_file", "args": '["a.py"]', "id": "l1", "error": None}],
+    )
+    model = ScriptedModel(script=[listed, done(0)])
+
+    run(model, repo_tools)
+
+    told = str(model.sent[1][-1].content)
+    assert "must be a JSON object" in told and "a list" in told
+
+
+def test_what_to_do_is_said_before_what_the_model_wrote(repo_tools: RepoTools) -> None:
+    model = ScriptedModel(script=[broken(ADD_TOOL, "b1"), broken("read_file", "b2"), done(0)])
+
+    run(model, repo_tools)
+
+    for m in model.sent[-1]:
+        if isinstance(m, ToolMessage) and m.tool_call_id in ("b1", "b2"):
+            text = str(m.content)
+            assert text.index("again") < text.index("<untrusted")
+            assert text.rstrip().endswith("</untrusted>")

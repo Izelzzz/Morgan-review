@@ -32,6 +32,7 @@ from langchain_core.utils.function_calling import convert_to_openai_tool
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
 from review_agents import observability as obs
+from review_agents.context.markup import untrusted
 from review_agents.context.pack import ContextPack
 from review_agents.context.tokens import estimate_tokens
 from review_agents.models import BudgetExceededError
@@ -67,12 +68,13 @@ MAX_FINDINGS = 100
 SUBMIT_MARGIN_SECONDS = 30.0
 # The answer to a call whose arguments are not JSON (issue #96).
 NOT_JSON_REASON = "its arguments are not valid JSON"
-NOT_JSON = f"error: {NOT_JSON_REASON}; call it again with valid JSON arguments."
 # A reply that ended at the output limit (issue #106): what it handed in may be whole as
 # far as it goes, with the rest never written. The finish reasons services use for it.
 CUT_OFF = frozenset({"length", "max_tokens", "max_output_tokens"})
 CUT_OFF_REASON = "the reply was cut off at the output limit"
 CUT_OFF_ANSWER = f"error: {CUT_OFF_REASON}; call it again with a shorter answer."
+# How much of the arguments is shown on each side of where they stop being JSON (#119).
+AROUND_CHARS = 80
 
 SUBMIT_NOW = (
     f"Stop investigating. Hand in each finding you have not handed in yet with its own"
@@ -256,6 +258,42 @@ def describe(exc: ValueError, fields: Sequence[str]) -> str:
     return "; ".join(parts)
 
 
+_KINDS = {
+    list: "a list",
+    str: "a string",
+    bool: "true or false",
+    int: "a number",
+    float: "a number",
+}
+
+
+def _unreadable(args: object) -> tuple[str, str]:
+    """Why arguments could not be read, and the text where they break (issue #119).
+
+    The first part is what the model is told and the steps keep; the second, empty when
+    there is no place to show, is what the model wrote around that place, as data, for
+    it alone: put after what it is asked to do, so the request is not read as quoted.
+    """
+    if not isinstance(args, str):
+        return NOT_JSON_REASON, ""
+    try:
+        value = json.loads(args, strict=False)
+    except json.JSONDecodeError as exc:
+        around = (
+            args[max(0, exc.pos - AROUND_CHARS) : exc.pos]
+            + " <<it breaks here>> "
+            + args[exc.pos : exc.pos + AROUND_CHARS]
+        )
+        return (
+            f"{NOT_JSON_REASON}: {exc.msg} at character {exc.pos}",
+            f"\nAround that place you wrote:\n{untrusted('your arguments', around)}",
+        )
+    if isinstance(value, dict):  # whole and an object: not why it was refused
+        return NOT_JSON_REASON, ""
+    kind = "null" if value is None else _KINDS.get(type(value), type(value).__name__)
+    return f"its arguments must be a JSON object, not {kind}", ""
+
+
 def _mistake(exc: ValueError) -> Mistake:
     return "schema" if isinstance(exc, ValidationError) else "check"
 
@@ -323,7 +361,7 @@ def tool_loop[T](
         refused.pop(key, None)
         end.dropped.append(f"{key[0]}: {why}")
 
-    def add(args: object, unreadable: str | None) -> str:
+    def add(args: object, unreadable: tuple[str, str] | None) -> str:
         """Read one item handed in; what the model is told about it."""
         assert collect is not None  # noqa: S101 - only called with items to collect
         if len(end.collected) >= MAX_FINDINGS:
@@ -331,8 +369,10 @@ def tool_loop[T](
         if unreadable is not None or not isinstance(args, dict):
             # Nothing to tell it by: each one is answered, and a count that does not
             # match says what never came.
-            why = unreadable or NOT_JSON_REASON
-            return f"Not added ({why}). Call {collect.name} again; the ones added are kept."
+            why, around = unreadable or (NOT_JSON_REASON, "")
+            return (
+                f"Not added ({why}). Call {collect.name} again; the ones added are kept." + around
+            )
         key = _key(args)
         if key in left_out:
             return "Not added: this one was already left out after too many tries."
@@ -428,6 +468,7 @@ def tool_loop[T](
         # to the service with the reply: one left unanswered makes it refuse the next
         # request (issue #96). An unreadable submission is a malformed one.
         unreadable: str | None = None
+        unreadable_args: object = None
         answered_bad = False
         for bad in reply.invalid_tool_calls:
             call_id = bad.get("id")
@@ -435,14 +476,18 @@ def tool_loop[T](
                 continue
             answered_bad = True
             if bad.get("name") == submit.name and submitted is None and unreadable is None:
-                unreadable = call_id
+                unreadable, unreadable_args = call_id, bad.get("args")
                 continue
             if collect is not None and bad.get("name") == collect.name:
                 add_calls += 1
-                why = CUT_OFF_REASON if cut_off else NOT_JSON_REASON
-                messages.append(ToolMessage(add(None, why), tool_call_id=call_id))
+                unread = (CUT_OFF_REASON, "") if cut_off else _unreadable(bad.get("args"))
+                messages.append(ToolMessage(add(None, unread), tool_call_id=call_id))
                 continue
-            answer = CUT_OFF_ANSWER if cut_off else NOT_JSON
+            if cut_off:
+                answer = CUT_OFF_ANSWER
+            else:
+                why, around = _unreadable(bad.get("args"))
+                answer = f"error: {why}; call it again with valid JSON arguments.{around}"
             if bad.get("name") != submit.name:
                 end.tool_calls += 1
                 if final:  # as for a readable call: retrying the tool would not run it
@@ -462,11 +507,12 @@ def tool_loop[T](
             continue
         reply_to = submitted["id"] if submitted is not None else unreadable
         problems: str | None = None
+        around = ""  # what the model wrote where its arguments break, for it alone
         mistake: Mistake = "unreadable"
         if cut_off:  # not taken, however whole it reads
             problems = CUT_OFF_REASON
         elif submitted is None:
-            problems = NOT_JSON_REASON
+            problems, around = _unreadable(unreadable_args)
         else:
             try:
                 end.answer = submit.parse(submitted["args"])
@@ -490,7 +536,7 @@ def tool_loop[T](
             messages.append(
                 ToolMessage(
                     f"The {submit.what} you submitted is not in the expected format"
-                    f" ({problems}). {again}",
+                    f" ({problems}). {again}{around}",
                     tool_call_id=reply_to,
                 )
             )

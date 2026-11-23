@@ -4,7 +4,7 @@ from typing import Any
 import pytest
 from langchain_core.callbacks import CallbackManagerForLLMRun
 from langchain_core.language_models import BaseChatModel
-from langchain_core.messages import AIMessage, BaseMessage
+from langchain_core.messages import AIMessage, BaseMessage, ToolMessage
 from langchain_core.outputs import ChatGeneration, ChatResult
 from pydantic import Field
 
@@ -223,6 +223,8 @@ def test_findings_come_out_most_severe_first_then_most_voted() -> None:
 class JudgeModel(BaseChatModel):
     reply: Any
     sent: list[list[BaseMessage]] = Field(default_factory=list)
+    # Replies to give first, one per call, before `reply` for every call after.
+    first: list[Any] = Field(default_factory=list)
 
     @property
     def _llm_type(self) -> str:
@@ -239,7 +241,8 @@ class JudgeModel(BaseChatModel):
         **kwargs: Any,
     ) -> ChatResult:
         self.sent.append(list(messages))
-        return ChatResult(generations=[ChatGeneration(message=self.reply)])
+        reply = self.first.pop(0) if self.first else self.reply
+        return ChatResult(generations=[ChatGeneration(message=reply)])
 
 
 def test_the_model_judge_reads_every_candidate_as_data_and_answers_by_tool() -> None:
@@ -404,3 +407,129 @@ def test_the_model_judge_sees_each_candidate_s_basis() -> None:
     prompt = str(model.sent[0][-1].content)
     assert 'spec from docs/refunds.md:14: "At most paid."' in prompt
     assert "the cap is missing" in prompt
+
+
+def answer(same_problem: list[list[int]], same_kind: list[list[int]]) -> AIMessage:
+    args = {"same_problem": same_problem, "same_kind": same_kind}
+    return AIMessage(content="", tool_calls=[{"name": MERGE_TOOL, "args": args, "id": "m"}])
+
+
+def review_18() -> list[Candidate]:
+    """Review 18 of the 2026-11-20 evaluation (issue #119): #5 did not hold, so the ids
+    have a gap, and the clusters list them as #3, #1, #4, #6, #2."""
+    return [candidate(n, file=f"f{n}.py", fingerprint=f"fp{n}") for n in (3, 1, 4, 6, 2)]
+
+
+def test_the_judge_numbers_the_candidates_one_by_one_as_it_sees_them() -> None:
+    # It answered by place; the ids it gives back are read as the places it was shown.
+    model = JudgeModel(reply=answer([[1], [2], [3], [4], [5]], [[1, 2], [3, 4, 5]]))
+    cands = review_18()
+    told: list[str] = []
+
+    merged = merge(cands, model_judge(model, callbacks=[]), told.append)
+
+    assert told == []
+    prompt = str(model.sent[0][-1].content)
+    assert [line.split()[0] for line in prompt.splitlines() if line.startswith("#")] == [
+        "#1",
+        "#2",
+        "#3",
+        "#4",
+        "#5",
+    ]
+    kinds = sorted(sorted(c.id for c in m.sources) for m in merged)
+    assert kinds == [[1, 3], [2, 4, 6]]
+
+
+def test_a_judge_answering_with_ids_it_was_not_shown_is_told_and_asked_once_more() -> None:
+    model = JudgeModel(first=[answer([[1], [2], [9]], [])], reply=answer([[1], [2], [3]], []))
+    cands = [candidate(n, file=f"f{n}.py", fingerprint=f"fp{n}") for n in (1, 2, 3)]
+    told: list[str] = []
+
+    merge(cands, model_judge(model, callbacks=[]), told.append)
+
+    assert told == [] and len(model.sent) == 2
+    feedback = str(model.sent[1][-1].content)
+    assert "9" in feedback and "not shown" in feedback and "#3" in feedback
+
+
+def test_a_judge_wrong_twice_leaves_the_safe_merge_and_says_both_times_why() -> None:
+    wrong = answer([[1, 1]], [])
+    model = JudgeModel(first=[answer([[7]], [])], reply=wrong)
+    cands = [candidate(1, file="a.py"), candidate(2, file="b.py")]
+    told: list[str] = []
+
+    merged = merge(cands, model_judge(model, callbacks=[]), told.append)
+
+    assert len(model.sent) == 2 and len(merged) == 2
+    [reason] = told
+    assert "7" in reason and "more than once" in reason
+
+
+def two_calls(first: dict[str, Any], second: dict[str, Any]) -> AIMessage:
+    return AIMessage(
+        content="",
+        tool_calls=[
+            {"name": MERGE_TOOL, "args": first, "id": "m1"},
+            {"name": MERGE_TOOL, "args": second, "id": "m2"},
+        ],
+        invalid_tool_calls=[{"name": MERGE_TOOL, "args": "{", "id": "m3", "error": None}],
+    )
+
+
+def test_asking_the_judge_again_answers_every_call_of_its_reply() -> None:
+    # The service refuses a request with a call left unanswered (review on #119).
+    wrong = {"same_problem": [[9]], "same_kind": []}
+    model = JudgeModel(first=[two_calls(wrong, wrong)], reply=answer([[1], [2]], []))
+    cands = [candidate(1, file="a.py"), candidate(2, file="b.py")]
+
+    merge(cands, model_judge(model, callbacks=[]))
+
+    answered = [m.tool_call_id for m in model.sent[1] if isinstance(m, ToolMessage)]
+    assert sorted(answered) == ["m1", "m2", "m3"]
+
+
+def test_a_judge_that_then_answers_in_text_still_says_what_was_wrong_first() -> None:
+    model = JudgeModel(first=[answer([[7]], [])], reply=AIMessage("they look alike"))
+    told: list[str] = []
+
+    merge(
+        [candidate(1, file="a.py"), candidate(2, file="b.py")], model_judge(model, []), told.append
+    )
+
+    [reason] = told
+    assert reason.startswith("judge answer rejected") and "[7]" in reason
+
+
+def test_an_answer_not_in_the_schema_is_told_and_asked_once_more() -> None:
+    model = JudgeModel(
+        first=[answer([["x"]], [])],  # type: ignore[list-item]
+        reply=answer([[1], [2]], []),
+    )
+    told: list[str] = []
+
+    merge(
+        [candidate(1, file="a.py"), candidate(2, file="b.py")], model_judge(model, []), told.append
+    )
+
+    assert told == [] and len(model.sent) == 2
+    assert "same_problem" in str(model.sent[1][-1].content)
+
+
+def test_a_judge_call_without_an_id_is_not_asked_again() -> None:
+    no_id = AIMessage(
+        content="",
+        tool_calls=[
+            {"name": MERGE_TOOL, "args": {"same_problem": [[7]], "same_kind": []}, "id": None}
+        ],
+    )
+    model = JudgeModel(reply=no_id)
+    told: list[str] = []
+
+    merge(
+        [candidate(1, file="a.py"), candidate(2, file="b.py")], model_judge(model, []), told.append
+    )
+
+    assert len(model.sent) == 1
+    [reason] = told
+    assert reason.startswith("judge answer rejected") and "[7]" in reason

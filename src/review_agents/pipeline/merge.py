@@ -17,9 +17,9 @@ from operator import attrgetter
 
 from langchain_core.callbacks import BaseCallbackHandler
 from langchain_core.language_models import BaseChatModel
-from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage, ToolMessage
 from langchain_core.tools import StructuredTool
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
 
 from review_agents.context.markup import untrusted
 from review_agents.pipeline.agent import Finding
@@ -48,6 +48,10 @@ class Decision:
 
 
 Judge = Callable[[list[list[Candidate]]], Decision]
+
+
+class JudgeRejected(ValueError):
+    """The judge answered, but its answer did not add up however often it was asked."""
 
 
 @dataclass
@@ -184,6 +188,9 @@ def merge(
         groups = clusters(candidates)
         try:
             decision = judge(groups)
+        except JudgeRejected as error:  # it answered: not the same as failing to
+            log.warning("the judge's merge did not add up; using the safe merge")
+            reason = f"judge answer rejected {error}"
         except Exception as error:
             log.exception("merging findings with the judge failed; using the safe merge")
             reason = f"judge failed: {type(error).__name__}: {error}"
@@ -242,6 +249,8 @@ def _join_kinds(problems: list[Merged], kinds: list[list[int]]) -> list[Merged]:
 
 
 MERGE_TOOL = "submit_merge"
+# Times the judge is asked: once, and once more when its answer does not add up (#119).
+JUDGE_TRIES = 2
 JUDGE_INSTRUCTIONS = """You merge the candidate findings of a code review.
 Several reviewers looked at the same pull request, so one problem may be reported more
 than once, and one kind of problem may be reported once per place it appears.
@@ -268,17 +277,47 @@ class _MergeArgs(BaseModel):
     )
 
 
-def _describe(candidate: Candidate) -> str:
+def _describe(candidate: Candidate, shown: int) -> str:
     f = candidate.finding
     return (
-        f"#{candidate.id} [{f.dimension}, {f.severity}] {f.file}:{f.line_start}-{f.line_end}"
+        f"#{shown} [{f.dimension}, {f.severity}] {f.file}:{f.line_start}-{f.line_end}"
         f" {f.title}\n  why: {f.why}"
         + "".join("\n  basis: " + describe(b).replace("\n", "\n  ") for b in f.basis)
     )
 
 
+def _wrong(decision: Decision, shown: int, cluster_of: dict[int, int]) -> list[str]:
+    """What does not add up in an answer given in the ids the judge was shown."""
+    problems = []
+    for name, lists in (("same_problem", decision.same_problem), ("same_kind", decision.same_kind)):
+        seen = [i for group in lists for i in group]
+        unknown = sorted({i for i in seen if not 1 <= i <= shown})
+        repeated = sorted({i for i in seen if seen.count(i) > 1})
+        if unknown:
+            problems.append(f"{name} has ids you were not shown: {unknown}")
+        if repeated:
+            problems.append(f"{name} names ids more than once: {repeated}")
+    spanning = [
+        group
+        for group in decision.same_problem
+        if len({cluster_of[i] for i in group if i in cluster_of}) > 1
+    ]
+    if spanning:
+        problems.append(
+            "same_problem joins candidates of different possible clusters, which share no"
+            f" code: {spanning}"
+        )
+    return problems
+
+
 def model_judge(model: BaseChatModel, callbacks: Sequence[BaseCallbackHandler]) -> Judge:
-    """A judge that asks `model` once, with the candidates listed by possible cluster."""
+    """A judge that asks `model`, with the candidates listed by possible cluster.
+
+    The candidates are numbered #1, #2, ... in the order they are listed, and the answer
+    is read back into their own ids: a model reads ids as places, and the ids that reach
+    the merge have gaps where a finding did not hold (issue #119). An answer that does
+    not add up is answered with what is wrong, and asked once more.
+    """
 
     def submit_merge(same_problem: list[list[int]], same_kind: list[list[int]]) -> str:
         return "received"
@@ -291,19 +330,62 @@ def model_judge(model: BaseChatModel, callbacks: Sequence[BaseCallbackHandler]) 
     )
 
     def judge(groups: list[list[Candidate]]) -> Decision:
+        listed = [c for group in groups for c in group]
+        own = {n: c.id for n, c in enumerate(listed, start=1)}  # as shown -> its own id
+        shown_as = {cid: n for n, cid in own.items()}
+        cluster_of = {shown_as[c.id]: k for k, group in enumerate(groups) for c in group}
         listing = "\n\n".join(
-            f"Possible cluster {n}:\n" + "\n".join(_describe(c) for c in group)
-            for n, group in enumerate(groups, start=1)
+            f"Possible cluster {k}:\n" + "\n".join(_describe(c, shown_as[c.id]) for c in group)
+            for k, group in enumerate(groups, start=1)
         )
-        reply = model.bind_tools([tool]).invoke(
-            [SystemMessage(JUDGE_INSTRUCTIONS), HumanMessage(untrusted("candidates", listing))],
-            config={"callbacks": list(callbacks)},
-        )
-        calls = getattr(reply, "tool_calls", None) or []
-        call = next((c for c in calls if c["name"] == MERGE_TOOL), None)
-        if call is None:
-            raise ValueError(f"the judge did not call {MERGE_TOOL}")
-        args = _MergeArgs.model_validate(call["args"])
-        return Decision(same_problem=args.same_problem, same_kind=args.same_kind)
+        messages: list[BaseMessage] = [
+            SystemMessage(JUDGE_INSTRUCTIONS),
+            HumanMessage(untrusted("candidates", listing)),
+        ]
+        said: list[str] = []
+        for attempt in range(1, JUDGE_TRIES + 1):
+            reply = model.bind_tools([tool]).invoke(messages, config={"callbacks": list(callbacks)})
+            calls = list(getattr(reply, "tool_calls", None) or [])
+            call = next((c for c in calls if c["name"] == MERGE_TOOL), None)
+            if call is None:
+                if said:  # it answered before: what was wrong then is the story
+                    said.append(f"then no call of {MERGE_TOOL}")
+                    raise JudgeRejected(f"{len(said)} times: " + " | then: ".join(said))
+                raise ValueError(f"the judge did not call {MERGE_TOOL}")
+            placed: set[int] = set()
+            try:
+                args = _MergeArgs.model_validate(call["args"])
+            except ValidationError as error:
+                problems = [
+                    f"{'.'.join(map(str, e['loc']))}: {e['msg']}" for e in error.errors()[:5]
+                ]
+            else:
+                decision = Decision(same_problem=args.same_problem, same_kind=args.same_kind)
+                problems = _wrong(decision, len(listed), cluster_of)
+                placed = {i for group in decision.same_problem for i in group}
+                if not problems:
+                    return Decision(
+                        same_problem=[[own[i] for i in group] for group in decision.same_problem],
+                        same_kind=[[own[i] for i in group] for group in decision.same_kind],
+                    )
+            said.append("; ".join(problems))
+            invalid = list(getattr(reply, "invalid_tool_calls", None) or [])
+            ids = [c["id"] for c in calls] + [b.get("id") for b in invalid]
+            # Asked again only in a conversation the service takes: every call answered.
+            if attempt == JUDGE_TRIES or not isinstance(reply, AIMessage) or None in ids:
+                raise JudgeRejected(f"{len(said)} times: " + " | then: ".join(said))
+            left = [f"#{n}" for n in own if n not in placed]
+            feedback = (
+                f"Not merged: {said[-1]}. The candidates are #1 to #{len(listed)}"
+                + (f"; not placed in any group: {', '.join(left)}" if left else "")
+                + f". Call {MERGE_TOOL} again with the ids as shown."
+            )
+            ignored = f"Ignored: only one {MERGE_TOOL} call counts."
+            messages.append(reply)
+            messages += [
+                ToolMessage(feedback if c is call else ignored, tool_call_id=c["id"]) for c in calls
+            ]
+            messages += [ToolMessage(ignored, tool_call_id=b["id"]) for b in invalid]
+        raise AssertionError("unreachable")  # pragma: no cover
 
     return judge
