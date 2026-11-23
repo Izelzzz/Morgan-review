@@ -32,6 +32,7 @@ from langchain_core.utils.function_calling import convert_to_openai_tool
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
 from review_agents import observability as obs
+from review_agents.context.markup import untrusted
 from review_agents.context.pack import ContextPack
 from review_agents.context.tokens import estimate_tokens
 from review_agents.models import BudgetExceededError
@@ -73,6 +74,8 @@ NOT_JSON = f"error: {NOT_JSON_REASON}; call it again with valid JSON arguments."
 CUT_OFF = frozenset({"length", "max_tokens", "max_output_tokens"})
 CUT_OFF_REASON = "the reply was cut off at the output limit"
 CUT_OFF_ANSWER = f"error: {CUT_OFF_REASON}; call it again with a shorter answer."
+# How much of the arguments is shown on each side of where they stop being JSON (#119).
+AROUND_CHARS = 80
 
 SUBMIT_NOW = (
     f"Stop investigating. Hand in each finding you have not handed in yet with its own"
@@ -256,6 +259,23 @@ def describe(exc: ValueError, fields: Sequence[str]) -> str:
     return "; ".join(parts)
 
 
+def _unreadable(args: object) -> tuple[str, str]:
+    """Why arguments are not JSON: for the model, with the text where they break, so it
+    can fix that place (issue #119); and for the record, without what the model wrote."""
+    if isinstance(args, str):
+        try:
+            json.loads(args, strict=False)
+        except json.JSONDecodeError as exc:
+            where = f"{NOT_JSON_REASON}: {exc.msg} at character {exc.pos}"
+            around = (
+                args[max(0, exc.pos - AROUND_CHARS) : exc.pos]
+                + " <<it breaks here>> "
+                + args[exc.pos : exc.pos + AROUND_CHARS]
+            )
+            return f"{where}; around it you wrote:\n{untrusted('your arguments', around)}", where
+    return NOT_JSON_REASON, NOT_JSON_REASON
+
+
 def _mistake(exc: ValueError) -> Mistake:
     return "schema" if isinstance(exc, ValidationError) else "check"
 
@@ -428,6 +448,7 @@ def tool_loop[T](
         # to the service with the reply: one left unanswered makes it refuse the next
         # request (issue #96). An unreadable submission is a malformed one.
         unreadable: str | None = None
+        unreadable_args: object = None
         answered_bad = False
         for bad in reply.invalid_tool_calls:
             call_id = bad.get("id")
@@ -435,14 +456,19 @@ def tool_loop[T](
                 continue
             answered_bad = True
             if bad.get("name") == submit.name and submitted is None and unreadable is None:
-                unreadable = call_id
+                unreadable, unreadable_args = call_id, bad.get("args")
                 continue
             if collect is not None and bad.get("name") == collect.name:
                 add_calls += 1
-                why = CUT_OFF_REASON if cut_off else NOT_JSON_REASON
+                why = CUT_OFF_REASON if cut_off else _unreadable(bad.get("args"))[0]
                 messages.append(ToolMessage(add(None, why), tool_call_id=call_id))
                 continue
-            answer = CUT_OFF_ANSWER if cut_off else NOT_JSON
+            answer = (
+                CUT_OFF_ANSWER
+                if cut_off
+                else f"error: {_unreadable(bad.get('args'))[0]}; call it again with valid JSON"
+                " arguments."
+            )
             if bad.get("name") != submit.name:
                 end.tool_calls += 1
                 if final:  # as for a readable call: retrying the tool would not run it
@@ -462,11 +488,12 @@ def tool_loop[T](
             continue
         reply_to = submitted["id"] if submitted is not None else unreadable
         problems: str | None = None
+        recorded: str | None = None  # what the steps keep, when not the same
         mistake: Mistake = "unreadable"
         if cut_off:  # not taken, however whole it reads
             problems = CUT_OFF_REASON
         elif submitted is None:
-            problems = NOT_JSON_REASON
+            problems, recorded = _unreadable(unreadable_args)
         else:
             try:
                 end.answer = submit.parse(submitted["args"])
@@ -478,7 +505,7 @@ def tool_loop[T](
             if mistakes[mistake] >= retries:
                 end.reason = (
                     f"the {submit.what} was not in the expected format"
-                    f" {mistakes[mistake] + 1} times: {problems}"
+                    f" {mistakes[mistake] + 1} times: {recorded or problems}"
                 )
                 return end
             mistakes[mistake] += 1
