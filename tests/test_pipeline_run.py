@@ -11,7 +11,7 @@ import pytest
 from gitrepo import Upstream, git
 from langchain_core.callbacks import CallbackManagerForLLMRun
 from langchain_core.language_models import BaseChatModel
-from langchain_core.messages import AIMessage, BaseMessage
+from langchain_core.messages import AIMessage, BaseMessage, ToolMessage
 from langchain_core.outputs import ChatGeneration, ChatResult
 from pydantic import Field
 from scripted import ScriptedModel, call, hand_in
@@ -124,8 +124,7 @@ class ByDimension(BaseChatModel):
                 raise answer
             return ChatResult(generations=[ChatGeneration(message=_verdict(answer, text))])
 
-        # The latest task in the conversation says who is asked: an agent may carry on
-        # from the walkthrough's conversation (strategy walkthrough_first).
+        # The latest task in the conversation says who is asked.
         def last(found: Any) -> int:
             return max((i for i, m in enumerate(messages) if found(str(m.content))), default=-1)
 
@@ -1219,62 +1218,65 @@ def test_the_general_strategy_runs_one_agent_for_every_dimension(setup: Setup) -
     assert "规格漂移" in report["summary"] and "可验证性" in report["summary"]  # all reviewed
 
 
-def test_walkthrough_first_finds_problems_after_the_walkthrough(setup: Setup) -> None:
-    with_strategy(setup, "walkthrough_first")
+@pytest.mark.parametrize("strategy", ["dimensions", "general"])
+def test_no_agent_sees_the_walkthrough_s_conversation(setup: Setup, strategy: str) -> None:
+    # The walkthrough and the agents are independent (issue #122): each opens its own
+    # conversation, and none is shown what the walkthrough was asked, read or wrote.
+    with_strategy(setup, strategy)
     review_id = setup.queue()
     model = ByDimension(
         scripts={GENERAL: [submit(finding("security"))]},
-        walkthrough=[walkthrough_answer()],
+        walkthrough=[
+            call("read_file", {"path": "payments/refund.py"}, "r"),
+            walkthrough_answer(),
+        ],
     )
 
     setup.run(review_id, model)
 
-    assert model.order[:2] == ["walkthrough", GENERAL]
-    [sent] = model.sent  # the agent's one turn: the walkthrough's conversation, then its task
-    assert WALKTHROUGH_TASK in str(sent[2].content) and GENERAL_TASK in str(sent[-1].content)
-    [written] = setup.findings(review_id)
-    assert written["primary_dimension"] == "security"
+    assert model.sent  # every agent's every turn
+    for sent in model.sent:
+        assert not any(WALKTHROUGH_TASK in str(m.content) for m in sent)
+        assert not any(isinstance(m, ToolMessage) and m.tool_call_id in {"r", "w"} for m in sent)
+    assert setup.steps(review_id)["walkthrough"] == ("ok", None)
     report = json.loads(setup.review(review_id)["report"])
     assert report["walkthrough"].startswith(MARKER)
 
 
-def test_walkthrough_first_still_finds_problems_when_the_walkthrough_fails(setup: Setup) -> None:
-    with_strategy(setup, "walkthrough_first")
-    review_id = setup.queue()
-    model = ByDimension(
-        scripts={GENERAL: [submit(finding("security"))]},
-        walkthrough=[RuntimeError("model service down")],
-    )
-
-    setup.run(review_id, model)
-
-    assert len(setup.findings(review_id)) == 1
-    [sent] = model.sent
-    assert not any(WALKTHROUGH_TASK in str(m.content) for m in sent)  # a fresh opening
-    status, error = setup.steps(review_id)["walkthrough"]
-    assert status == "error" and error is not None
-
-
-def test_walkthrough_first_does_not_wait_for_a_slow_walkthrough_until_nothing_is_left(
-    setup: Setup,
-) -> None:
-    with_strategy(setup, "walkthrough_first")
+def test_the_agents_do_not_wait_for_a_slow_walkthrough(setup: Setup) -> None:
+    with_strategy(setup, "general")
     review_id = setup.queue()
     model = ByDimension(
         scripts={GENERAL: [submit(finding("security"))]},
         walkthrough=[walkthrough_answer()],
-        delay={"walkthrough": 6.0},  # still writing when the agents must hand in
+        delay={"walkthrough": 2.0},
     )
 
-    setup.run(review_id, model, review_seconds=3.0)
+    setup.run(review_id, model)
 
-    # It opened its own conversation with time left, instead of waiting until the
-    # latest submit time and having none.
+    # The agent handed in while the walkthrough was still being written.
+    assert model.order.index(GENERAL) < model.order.index("walkthrough")
     [written] = setup.findings(review_id)
     assert written["primary_dimension"] == "security"
-    assert setup.steps(review_id)["dimension.general"] == ("ok", None)
-    [sent] = model.sent
-    assert not any(WALKTHROUGH_TASK in str(m.content) for m in sent)  # a fresh opening
+    assert setup.steps(review_id)["walkthrough"] == ("ok", None)
+
+
+def test_a_review_without_the_walkthrough_writes_none(setup: Setup) -> None:
+    setup.settings = setup.settings.model_copy(update={"walkthrough": False})
+    review_id = setup.queue()
+    model = ByDimension(
+        scripts={"security": [submit(finding("security"))]}, walkthrough=[walkthrough_answer()]
+    )
+
+    setup.run(review_id, model)
+
+    assert "walkthrough" not in model.order  # its model was never asked
+    assert "walkthrough" not in setup.steps(review_id)
+    [written] = setup.findings(review_id)
+    assert written["primary_dimension"] == "security"
+    review = setup.review(review_id)
+    assert review["status"] == "done"
+    assert json.loads(review["report"])["walkthrough"] is None  # CI posts no walkthrough
 
 
 # --- every writer failing (issue #91) --------------------------------------------

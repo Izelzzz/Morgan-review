@@ -20,8 +20,7 @@ import json
 import math
 from collections.abc import Callable, Iterator, Sequence
 from contextlib import AbstractContextManager, nullcontext
-from copy import deepcopy
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from typing import Any, Literal, cast
 
 from langchain_core.callbacks import BaseCallbackHandler
@@ -215,10 +214,6 @@ class LoopEnd[T]:
     reason: str | None = None
     limit_hit: Literal["time", "tokens", "tool_calls"] | None = None
     tool_calls: int = 0
-    # The submit call the answer came in, for a conversation that carries on after it.
-    submit_id: str | None = None
-    # Its tool results, so an agent carrying on can still cut them to fit its window.
-    conversation: Conversation | None = None
     # Items handed in one by one and kept, and those left out with their reason.
     collected: list[Any] = field(default_factory=list)
     dropped: list[str] = field(default_factory=list)
@@ -318,7 +313,6 @@ def tool_loop[T](
     clock: Callable[[], float],
     limits: ConversationLimits,
     slot: Slot = nullcontext,
-    carried: Conversation | None = None,
     retries: int = FORMAT_RETRIES,
 ) -> LoopEnd[T]:
     """Let a model read the code with read-only tools until it hands in its answer.
@@ -335,14 +329,8 @@ def tool_loop[T](
     definitions = [convert_to_openai_tool(t) for t in [*schemas, *hand_in]]
     overhead = estimate_tokens(json.dumps(definitions))
     fields = _field_names(hand_in)
-    if carried is not None:
-        # The messages carry on from that conversation: its results stay cuttable, under
-        # this loop's window and with this loop's tool definitions. A copy of its own:
-        # Deep mode's runs all carry on from the same walkthrough.
-        conversation = replace(deepcopy(carried), limits=limits, overhead=overhead)
-    else:
-        conversation = Conversation(limits, overhead=overhead)
-    end: LoopEnd[T] = LoopEnd(conversation=conversation)
+    conversation = Conversation(limits, overhead=overhead)
+    end: LoopEnd[T] = LoopEnd()
     only = "Not run: only " + " and ".join(t.name for t in hand_in) + " can be called now."
     text_retry_used = False
     mistakes: dict[Mistake, int] = {"unreadable": 0, "schema": 0, "check": 0}
@@ -567,7 +555,6 @@ def tool_loop[T](
                 leave_out(key, f"refused and not sent again: {why}")
             if not matches:
                 end.dropped.append(f"(count): said {said}, {kept} were added")
-        end.submit_id = submitted["id"]
         # A forced answer is complete but cut short; the report says by what.
         if budget.used >= tool_calls:
             end.limit_hit = "tool_calls"
@@ -603,21 +590,16 @@ def run_dimension(
     limits: ConversationLimits = ConversationLimits(),  # noqa: B008 - frozen, shared safely
     slot: Slot = nullcontext,
     dimensions: tuple[str, ...] | None = None,
-    opening: Sequence[BaseMessage] | None = None,
-    carried: Conversation | None = None,
     retries: int = FORMAT_RETRIES,
 ) -> AgentRun:
     """Run one agent to its findings, or to a recorded reason it stopped.
 
     `dimensions` are the rules it holds: its own dimension unless given (a general agent
-    holds several, D-038). Given an `opening`, the walkthrough's conversation once it is
-    written, the agent carries on from it with its own task, so the code it read and
-    what it wrote are already in front of it.
+    holds several, D-038). It opens its own conversation, whatever else the review runs
+    (issue #122).
     """
     held = dimensions or (dimension,)
     messages = list(pack.messages(dimension, held))
-    if opening is not None:
-        messages = [*opening, messages[-1]]
     line_count = functools.cache(tools.line_count)
     sources = pack_sources(pack, tools)
 
@@ -662,7 +644,6 @@ def run_dimension(
         clock=clock,
         limits=limits,
         slot=slot,
-        carried=carried if opening is not None else None,
         retries=retries,
     )
     run = AgentRun(

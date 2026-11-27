@@ -116,11 +116,20 @@ def test_a_verifier_model_with_a_smaller_window_is_refused() -> None:
 
 def test_the_review_strategy_defaults_to_dimension_agents(monkeypatch: pytest.MonkeyPatch) -> None:
     assert Settings().strategy == "dimensions"
-    monkeypatch.setenv("REVIEW_AGENTS_STRATEGY", "walkthrough_first")
-    assert Settings().strategy == "walkthrough_first"
-    monkeypatch.setenv("REVIEW_AGENTS_STRATEGY", "five_more")
-    with pytest.raises(ValidationError):
-        Settings()
+    monkeypatch.setenv("REVIEW_AGENTS_STRATEGY", "general")
+    assert Settings().strategy == "general"
+    # Agents no longer carry on from the walkthrough (issue #122): a setting left at the
+    # old value is refused at start, not silently read as another strategy.
+    for retired in ("walkthrough_first", "five_more"):
+        monkeypatch.setenv("REVIEW_AGENTS_STRATEGY", retired)
+        with pytest.raises(ValidationError):
+            Settings()
+
+
+def test_the_walkthrough_is_written_unless_turned_off(monkeypatch: pytest.MonkeyPatch) -> None:
+    assert Settings().walkthrough is True
+    monkeypatch.setenv("REVIEW_AGENTS_WALKTHROUGH", "false")
+    assert Settings().walkthrough is False
 
 
 def test_format_retries_default_to_two_and_stay_small() -> None:

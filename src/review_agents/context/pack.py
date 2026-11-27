@@ -23,8 +23,8 @@ DIMENSIONS = ("spec_drift", "edge_cases", "security", "maintainability", "verifi
 _SKILLS = files("review_agents") / "skills"
 SHARED_RULES = (_SKILLS / "_shared.md").read_text(encoding="utf-8")
 SKILLS = {d: (_SKILLS / d / "SKILL.md").read_text(encoding="utf-8") for d in DIMENSIONS}
-# One agent holding several dimensions' rules (strategies `general` and
-# `walkthrough_first`, D-038) tags each finding with the dimension it belongs to.
+# One agent holding several dimensions' rules (strategy `general`, D-038) tags each
+# finding with the dimension it belongs to.
 GENERAL = "general"
 GENERAL_TASK = "Review the pull request above for each of these dimensions"
 

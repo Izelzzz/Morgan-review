@@ -85,10 +85,14 @@ class Settings(BaseSettings):
 
     observability: Observability = Field(default_factory=Observability)
 
-    # Who writes the findings and the walkthrough (D-038): an agent per dimension, one
-    # general agent, or one general agent that writes the walkthrough first and carries
-    # on from it. Verification, merging and the report are the same for all three.
-    strategy: Literal["dimensions", "general", "walkthrough_first"] = "dimensions"
+    # Who writes the findings (D-038): an agent per dimension, or one general agent.
+    # Verification, merging and the report are the same for both. The walkthrough is
+    # written alongside and apart from them: no agent waits for it or reads its
+    # conversation (issue #122).
+    strategy: Literal["dimensions", "general"] = "dimensions"
+    # Off, no walkthrough agent runs and the report carries no walkthrough, so CI posts
+    # the review's summary alone (issue #122: evaluation runs without it).
+    walkthrough: bool = True
 
     # Safety nets against runaway cost, not design limits (decisions D-009, D-016); to be
     # tuned from measurements on repositories of different sizes (#17). A review's
