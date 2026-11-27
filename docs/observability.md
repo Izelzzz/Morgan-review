@@ -24,8 +24,8 @@ flowchart TD
   W --> L3[模型调用 LLM]
 ```
 
-- **根 span `review`**：审查编号、仓库、PR 号、head 提交、触发事件、策略。`session.id` 为 `仓库#PR`，同一个 PR 的各轮审查归在一个会话里。
-- **节点 span**：名字和 `steps` 表的 `node` 一致。节点失败时 span 标为错误，错误信息与 `steps.error` 相同。
+- **根 span `review`**：审查编号、仓库、PR 号、head 提交、触发事件、策略、是否写改动说明（`review.walkthrough`）。`session.id` 为 `仓库#PR`，同一个 PR 的各轮审查归在一个会话里。
+- **节点 span**：名字和 `steps` 表的 `node` 一致。`REVIEW_AGENTS_WALKTHROUGH=false` 时没有 `walkthrough` span，`steps` 里也没有这一行。节点失败时 span 标为错误，错误信息与 `steps.error` 相同。
 - **模型调用**：由 OpenInference 的 LangChain 插件记录，包括模型名和 token 数（输入、输出、缓存命中）。挂在发起调用的审查员或验证员下面。
 - **工具调用**：工具名、是否出错；`full` 档另记参数和返回内容。
 - **`summaries`**：后台生成仓库模块摘要，单独一条 trace，不属于任何一次审查。

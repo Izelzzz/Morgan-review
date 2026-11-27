@@ -1,7 +1,9 @@
 """The walkthrough: the first comment, explaining a pull request (walkthrough design, D-035).
 
 A walkthrough agent writes it alongside the dimension agents, with the same opening and
-the same priority, and hands it in by the same latest submit time. It is not verified:
+the same priority, and hands it in by the same latest submit time. It is independent of
+them: none waits for it or reads its conversation (issue #122), and the service can be
+set not to write it at all. It is not verified:
 the program checks every `path:line` it cites and how many diagrams it draws, and asks
 once for a correction. The program adds the facts it knows itself (files, lines added
 and removed, commits, decisions) and lays the comment out.
@@ -19,7 +21,7 @@ from typing import Any, Literal
 
 from langchain_core.callbacks import BaseCallbackHandler
 from langchain_core.language_models import BaseChatModel
-from langchain_core.messages import BaseMessage, HumanMessage, ToolMessage
+from langchain_core.messages import BaseMessage, HumanMessage
 from langchain_core.tools import StructuredTool
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -27,7 +29,7 @@ from review_agents.context.pack import LANGUAGE_NAMES, ContextPack
 from review_agents.context.pr_layer import GIT_TIMEOUT_SECONDS, PrLayer
 from review_agents.mirror import run_git
 from review_agents.pipeline.agent import FORMAT_RETRIES, Slot, Submit, tool_loop
-from review_agents.pipeline.conversation import Conversation, ConversationLimits
+from review_agents.pipeline.conversation import ConversationLimits
 from review_agents.repo_config import Language
 from review_agents.report import defused
 from review_agents.tools import RepoTools, ToolTimeoutError
@@ -133,11 +135,6 @@ class WalkthroughRun:
     reason: str | None = None
     limit_hit: Literal["time", "tokens", "tool_calls"] | None = None
     tool_calls: int = 0
-    # The conversation once the walkthrough is in, its submission answered, for an agent
-    # to carry on from (strategy walkthrough_first, D-038); None if it was not handed in.
-    transcript: list[BaseMessage] | None = None
-    # Its tool results, kept with the transcript so the agent can cut them (issue #103).
-    conversation: Conversation | None = None
 
 
 def reference_problems(
@@ -256,18 +253,12 @@ def run_walkthrough(
         )
     except _Unchecked as exc:
         return WalkthroughRun("incomplete", reason=f"its references could not be checked: {exc}")
-    transcript = conversation = None
-    if end.answer is not None and end.submit_id is not None:
-        transcript = [*messages, ToolMessage("received", tool_call_id=end.submit_id)]
-        conversation = end.conversation
     return WalkthroughRun(
         "done" if end.answer is not None else "incomplete",
         walkthrough=end.answer,
         reason=end.reason,
         limit_hit=end.limit_hit,
         tool_calls=end.tool_calls,
-        transcript=transcript,
-        conversation=conversation,
     )
 
 

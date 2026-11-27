@@ -1,9 +1,10 @@
 """Who writes a review's findings and its walkthrough (issue #83, D-038).
 
-A strategy decides only the writing: which agents look for problems, with which
-dimensions' rules, and whether they start from the walkthrough's conversation. What
-follows is the same for every strategy: each agent's findings are verified as soon as
-it hands them in, then merged, ranked and reported.
+A strategy decides only the writing: which agents look for problems, and with which
+dimensions' rules. Every agent opens its own conversation; none waits for the
+walkthrough or reads it (issue #122). What follows is the same for every strategy:
+each agent's findings are verified as soon as it hands them in, then merged, ranked and
+reported.
 """
 
 from dataclasses import dataclass
@@ -12,7 +13,7 @@ from typing import Literal
 from review_agents.context.pack import DIMENSIONS, GENERAL
 from review_agents.repo_config import RepoConfig
 
-Strategy = Literal["dimensions", "general", "walkthrough_first"]
+Strategy = Literal["dimensions", "general"]
 
 # Quick mode looks at edge cases and security only (architecture §4.3); Deep mode runs
 # each agent three times and keeps what any run reports (D-022).
@@ -32,8 +33,6 @@ class Author:
 class Plan:
     authors: list[Author]
     runs: int
-    # The authors carry on from the walkthrough's conversation once it is written.
-    walkthrough_first: bool = False
 
     @property
     def dimensions(self) -> list[str]:
@@ -56,4 +55,4 @@ def plan(strategy: Strategy, config: RepoConfig) -> Plan:
         authors = [Author(d, (d,)) for d in dimensions]
     else:
         authors = [Author(GENERAL, tuple(dimensions))]
-    return Plan(authors, runs, walkthrough_first=strategy == "walkthrough_first")
+    return Plan(authors, runs)

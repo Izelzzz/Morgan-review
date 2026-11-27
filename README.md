@@ -2,7 +2,7 @@
 
 一个可自部署的多 agent PR 审查服务。每次打开 PR 或推送新提交，仓库的 CI 把 PR 交给服务；几个维度的审查员同时找问题，验证审查员逐条复核，程序核对每条依据，最后生成两条评论：
 
-1. **改动说明**：这个 PR 为什么改、改了什么、影响到哪里。
+1. **改动说明**：这个 PR 为什么改、改了什么、影响到哪里（可关掉，见下文 `REVIEW_AGENTS_WALKTHROUGH`）。
 2. **审查结果**：按级别分组的发现（🔴 阻断、🟡 重要、🔵 健壮性、⚪ 细节），🔴 / 🟡 同时发成行间评论。
 
 服务不保存 GitHub 凭据，也不写 GitHub：它只拿 CI 给的只读令牌读代码，评论由 CI 自己发。
@@ -41,7 +41,7 @@ curl http://127.0.0.1:8080/healthz
 | `REVIEW_AGENTS_FINDER_MODEL__BASE_URL` | 找问题用的模型服务，任何 OpenAI 兼容接口 |
 | `REVIEW_AGENTS_FINDER_MODEL__MODEL` | 模型名 |
 
-可选：`REVIEW_AGENTS_FINDER_MODEL__API_KEY` 模型服务的 key（本地模型不需要时可不设）；`REVIEW_AGENTS_VERIFIER_MODEL__*` 配一个更强的验证模型（不配时由找问题模型验证）；`REVIEW_AGENTS_FINDER_MODEL__THINKING` / `REVIEW_AGENTS_VERIFIER_MODEL__THINKING` 开关模型的思考（`default` 不发、保持服务商默认，`enabled`、`disabled`；思考按输出计费）；`REVIEW_AGENTS_FINDER_MODEL__MAX_OUTPUT_TOKENS` / `REVIEW_AGENTS_VERIFIER_MODEL__MAX_OUTPUT_TOKENS` 一次回复最多多少 token，以 `max_tokens` 发出（不设则不发、用服务商默认，DeepSeek 关思考时默认只有 8K；建议关思考设 32000、开思考设 64000；被截断的交卷会要求重交，不会当作完整的收下）；`REVIEW_AGENTS_FINDER_MODEL__FORMAT_RETRIES` / `REVIEW_AGENTS_VERIFIER_MODEL__FORMAT_RETRIES` 交上来的结果写坏时最多重交几次（默认 2，0–5；坏 JSON 或被截断、不符合格式、程序检查不通过三种分开计；发现是逐条交的，一条写坏只影响这一条）；`REVIEW_AGENTS_FINDER_MODEL__STRICT_TOOLS` / `REVIEW_AGENTS_VERIFIER_MODEL__STRICT_TOOLS` 以服务商的 strict 模式发送所有工具（默认关；服务商需支持 OpenAI 兼容的 `"strict": true`，如 DeepSeek 要把 `BASE_URL` 设为其 beta 地址；只发各家共同支持的 schema 写法，收回后仍按完整 schema 校验）；`REVIEW_AGENTS_TOKENS_PER_REVIEW` 每次审查的 token 上限（默认 1,500,000）；`REVIEW_AGENTS_OBSERVABILITY__*` 接入 OpenTelemetry，一次审查一条 trace，可发到 Langfuse、LangSmith、Phoenix 或任意 OTLP 接收端，见 [docs/observability.md](docs/observability.md)。`REVIEW_AGENTS_STRATEGY` 选谁来写发现和改动说明：`dimensions`（默认，每个维度一个审查员）、`general`（一个审查员看全部维度）、`walkthrough_first`（一个审查员先写改动说明再找问题）。全部设置见 `src/review_agents/config.py`。
+可选：`REVIEW_AGENTS_FINDER_MODEL__API_KEY` 模型服务的 key（本地模型不需要时可不设）；`REVIEW_AGENTS_VERIFIER_MODEL__*` 配一个更强的验证模型（不配时由找问题模型验证）；`REVIEW_AGENTS_FINDER_MODEL__THINKING` / `REVIEW_AGENTS_VERIFIER_MODEL__THINKING` 开关模型的思考（`default` 不发、保持服务商默认，`enabled`、`disabled`；思考按输出计费）；`REVIEW_AGENTS_FINDER_MODEL__MAX_OUTPUT_TOKENS` / `REVIEW_AGENTS_VERIFIER_MODEL__MAX_OUTPUT_TOKENS` 一次回复最多多少 token，以 `max_tokens` 发出（不设则不发、用服务商默认，DeepSeek 关思考时默认只有 8K；建议关思考设 32000、开思考设 64000；被截断的交卷会要求重交，不会当作完整的收下）；`REVIEW_AGENTS_FINDER_MODEL__FORMAT_RETRIES` / `REVIEW_AGENTS_VERIFIER_MODEL__FORMAT_RETRIES` 交上来的结果写坏时最多重交几次（默认 2，0–5；坏 JSON 或被截断、不符合格式、程序检查不通过三种分开计；发现是逐条交的，一条写坏只影响这一条）；`REVIEW_AGENTS_FINDER_MODEL__STRICT_TOOLS` / `REVIEW_AGENTS_VERIFIER_MODEL__STRICT_TOOLS` 以服务商的 strict 模式发送所有工具（默认关；服务商需支持 OpenAI 兼容的 `"strict": true`，如 DeepSeek 要把 `BASE_URL` 设为其 beta 地址；只发各家共同支持的 schema 写法，收回后仍按完整 schema 校验）；`REVIEW_AGENTS_TOKENS_PER_REVIEW` 每次审查的 token 上限（默认 1,500,000）；`REVIEW_AGENTS_OBSERVABILITY__*` 接入 OpenTelemetry，一次审查一条 trace，可发到 Langfuse、LangSmith、Phoenix 或任意 OTLP 接收端，见 [docs/observability.md](docs/observability.md)。`REVIEW_AGENTS_STRATEGY` 选谁来写发现：`dimensions`（默认，每个维度一个审查员）、`general`（一个审查员看全部维度）。改动说明由单独的 agent 和审查员同时写，审查员不等它、也看不到它的对话；`REVIEW_AGENTS_WALKTHROUGH=false` 不写改动说明，只发审查结果（默认 `true`；之前几轮已经发过的改动说明评论不会被删掉）。每个审查员最多调用 100 次工具（仓库配置只能调小）。全部设置见 `src/review_agents/config.py`。
 
 服务要能被 GitHub Actions 访问到：公网地址加 HTTPS。
 

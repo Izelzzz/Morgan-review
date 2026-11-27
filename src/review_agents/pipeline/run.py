@@ -27,7 +27,7 @@ import sqlite3
 import threading
 import time
 from collections.abc import Callable, Iterator
-from concurrent.futures import Future, ThreadPoolExecutor, wait
+from concurrent.futures import Future, ThreadPoolExecutor
 from contextlib import closing, contextmanager
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
@@ -93,9 +93,6 @@ _summaries_guard = threading.Lock()
 
 # When one review hits several limits, the report names the most severe.
 _LIMIT_ORDER = ("time", "tokens", "tool_calls")
-# Of the time left before the latest submit time, the most an agent carrying on from
-# the walkthrough's conversation waits for it (strategy walkthrough_first).
-CARRY_ON_WAIT_SHARE = 0.5
 
 
 class ReviewSuperseded(RuntimeError):
@@ -112,8 +109,6 @@ class Job:
     runs: int = 1
     # The dimensions whose rules the agent holds; its own dimension unless given.
     dimensions: tuple[str, ...] = ()
-    # It carries on from the walkthrough's conversation (strategy walkthrough_first).
-    after_walkthrough: bool = False
 
     @property
     def node(self) -> str:
@@ -133,9 +128,6 @@ def plan_jobs(planned: Plan, packs: list[ContextPack]) -> list[Job]:
             run,
             planned.runs,
             author.dimensions,
-            # The walkthrough reads the first group; another group's agent opening from
-            # its conversation would see the first group's changes instead of its own.
-            planned.walkthrough_first and index == 1,
         )
         for run in range(1, planned.runs + 1)
         for index, pack in enumerate(packs, start=1)
@@ -395,6 +387,7 @@ def run_review(
         "review.head_sha": review["head_sha"],
         "review.event": review["event"],
         "review.strategy": settings.strategy,
+        "review.walkthrough": settings.walkthrough,  # off: no walkthrough span (issue #122)
         # A PR's reviews, one per push, grouped as one session.
         "session.id": f"{review['repo']}#{review['pr']}",
     }
@@ -521,7 +514,8 @@ def _review(
         # For the report: the whole PR's lines, not only this round's, since GitHub takes
         # inline comments on those. Read with the rest of the code, before any model call.
         patches = pr_patches(git_dir, review["base_sha"], head, pr_layer.files)
-        facts = pr_facts(git_dir, pr_layer)  # for the walkthrough's header and file table
+        # For the walkthrough's header and file table; not read when none is written.
+        facts = pr_facts(git_dir, pr_layer) if settings.walkthrough else None
     if len(packs) > 1:
         _step(conn, review_id, f"context.groups.{len(packs)}", _now(conn))
 
@@ -552,9 +546,14 @@ def _review(
         verifier_for=verifier_for or model_for,
         clock=clock,
     )
-    # The walkthrough reads the first group: the whole PR when it is not split.
+    # The walkthrough reads the first group: the whole PR when it is not split. None
+    # when the service is set not to write it (issue #122).
     runs, checks, accepted, published = work.find_and_verify(
-        jobs, packs[0], submit_by=submit_by, deadline=deadline, verifying=verifying
+        jobs,
+        packs[0] if settings.walkthrough else None,
+        submit_by=submit_by,
+        deadline=deadline,
+        verifying=verifying,
     )
     # A newer push makes this review superseded, whatever else went wrong in it.
     _check_not_superseded(conn, review_id)
@@ -645,11 +644,11 @@ def _review(
             nits_per_report=limits.nits_per_report,
         )
         written = work.walkthrough
-        walkthrough = (
-            render_walkthrough(written.walkthrough, facts, config.language)
-            if written is not None and written.walkthrough is not None
-            else render_failed((written and written.reason) or "incomplete", config.language)
-        )
+        walkthrough = None  # not written: CI posts no walkthrough comment
+        if written is not None and written.walkthrough is not None and facts is not None:
+            walkthrough = render_walkthrough(written.walkthrough, facts, config.language)
+        elif written is not None:
+            walkthrough = render_failed(written.reason or "incomplete", config.language)
 
     # The findings and the review's end state commit together (reliability §5.3): never
     # half a review, and a review with stored findings is never claimed and run again.
@@ -723,7 +722,7 @@ class _Work:
     def find_and_verify(
         self,
         jobs: list[Job],
-        walkthrough_pack: ContextPack,
+        walkthrough_pack: ContextPack | None,
         *,
         submit_by: float,
         deadline: float,
@@ -732,7 +731,9 @@ class _Work:
         """Every job side by side, each one's findings verified as soon as it hands in.
 
         The walkthrough agent works alongside the dimension agents, at their priority and
-        by their latest submit time (D-035); its run is left in `self.walkthrough`.
+        by their latest submit time (D-035); its run is left in `self.walkthrough`. It is
+        independent of them: none waits for it or reads its conversation (issue #122).
+        Without a `walkthrough_pack` none is written and `self.walkthrough` stays None.
 
         Waits for the agents until `submit_by` and for the verifiers until `deadline`.
         What is still running then is left behind: every model call it makes is built
@@ -749,16 +750,6 @@ class _Work:
         parent = obs.current_context()
 
         def find(job: Job) -> AgentRun:
-            opening = carried = None
-            if job.after_walkthrough:
-                # Waits for the walkthrough, queued first, for at most half the time left
-                # before the latest submit time: waiting it all out would leave the agent
-                # none of its own. Without the walkthrough it opens its own conversation.
-                left = submit_by - self.clock()
-                wait([written], timeout=max(0.0, left * CARRY_ON_WAIT_SHARE))
-                if written.done() and not written.cancelled() and written.exception() is None:
-                    opening = written.result().transcript
-                    carried = written.result().conversation
             self.starts[job.node] = _utc_now()  # when the job runs, not when it was queued
             meter = UsageMeter(
                 self.budget, review_usage(settings.db_path, self.review_id, job.dimension)
@@ -776,15 +767,13 @@ class _Work:
                     limits=finder_limits,
                     slot=lambda: self.slots.held(DIMENSION_TURN),
                     dimensions=job.dimensions or None,
-                    opening=opening,
-                    carried=carried,
                     retries=finder_retries,
                 )
                 if run.status != "done":
                     obs.failed(current, REDACT(run.reason or "incomplete"))
                 return run
 
-        def write() -> WalkthroughRun:
+        def write(walkthrough_pack: ContextPack) -> WalkthroughRun:
             self.starts["walkthrough"] = _utc_now()
             meter = UsageMeter(
                 self.budget, review_usage(settings.db_path, self.review_id, "walkthrough")
@@ -853,15 +842,15 @@ class _Work:
             return lambda future: self.events.put((kind, item, future))
 
         try:
-            # Queued first, so it is not left waiting for a thread behind the dimensions,
-            # and so an agent that carries on from it never waits for a thread it holds.
-            written = finders.submit(write)
-            written.add_done_callback(done("written", None))
+            # Queued first, so it is not left waiting for a thread behind the dimensions.
+            if walkthrough_pack is not None:
+                written = finders.submit(write, walkthrough_pack)
+                written.add_done_callback(done("written", None))
             for index, job in enumerate(jobs):
                 finders.submit(find, job).add_done_callback(done("found", index))
             while True:
                 now = self.clock()
-                writing = self.walkthrough is None
+                writing = walkthrough_pack is not None and self.walkthrough is None
                 agents_out = (len(runs) < len(jobs) or writing) and now < submit_by
                 checking = unverified > 0 and now < deadline
                 if not (agents_out or checking):
@@ -930,7 +919,7 @@ class _Work:
                     self.starts.get(job.node, _now(self.conn)),
                     run.reason,
                 )
-        if self.walkthrough is None:
+        if walkthrough_pack is not None and self.walkthrough is None:
             reason = (
                 "did not hand in its walkthrough by the latest submit time"
                 if "walkthrough" in self.starts

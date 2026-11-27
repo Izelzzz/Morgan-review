@@ -60,7 +60,8 @@ class Dimensions(_Strict):
 # nets, not design limits (decisions D-016, D-028); a repository can only lower them.
 MAX_REVIEW_MINUTES = 30
 MAX_REVIEW_ROUNDS = 10
-MAX_TOOL_CALLS_PER_AGENT = 50
+# 100 since issue #122: no agent reached 50, so the cap leaves room, not a stop.
+MAX_TOOL_CALLS_PER_AGENT = 100
 
 
 class Limits(_Strict):
